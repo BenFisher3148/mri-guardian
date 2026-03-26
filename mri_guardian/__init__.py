@@ -9,6 +9,7 @@ from .harness import (
     build_demo_authority_sources,
     build_demo_case,
 )
+from .viewer import build_side_by_side_view_model, render_side_by_side_report_html
 
 __all__ = [
     "MRI_GUARDIAN_POLICY_NAME",
@@ -18,4 +19,6 @@ __all__ = [
     "MriGuardianHarness",
     "build_demo_authority_sources",
     "build_demo_case",
+    "build_side_by_side_view_model",
+    "render_side_by_side_report_html",
 ]

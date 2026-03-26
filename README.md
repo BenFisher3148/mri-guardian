@@ -16,6 +16,7 @@ The ICSD layer makes the release state invariant-closed. A case is either `pendi
 - [mri_guardian/harness.py](mri_guardian/harness.py) defines the policy profile, invariants, deterministic reconstruction checks, and release transition.
 - [mri_guardian/transparency.py](mri_guardian/transparency.py) implements a file-backed append-only hash chain for ICSD transparency receipts.
 - [mri_guardian/demo.py](mri_guardian/demo.py) writes a deterministic demo evidence bundle and workstation payload.
+- [mri_guardian/viewer.py](mri_guardian/viewer.py) renders the side-by-side "AI vs Verified Reality" review page with mismatch and rejected-region highlights.
 - [tests/test_guardian.py](tests/test_guardian.py) covers the happy path and two rejection paths.
 
 ## Run
@@ -31,6 +32,11 @@ Verify the emitted ICSD evidence envelope:
 ```powershell
 .\.venv\Scripts\icsd-dpa verify demo_artifacts\evidence.json
 ```
+
+Open the visual comparison outputs:
+
+- `demo_artifacts/comparison.html`
+- `demo_artifacts/comparison_rejected_candidate.html`
 
 Run the unit tests:
 
@@ -50,3 +56,10 @@ This prototype does that by making the workstation payload a deterministic funct
 - the active ICSD policy profile
 
 The AI can suggest a reconstruction, but it cannot inject a different pixel raster into the released state. The released view is always harness-reconstructed from raw data, hashed into ICSD evidence, and appended to a transparency log with a verifiable receipt.
+
+The added viewer makes that boundary human-visible. It renders:
+
+- left: AI reconstruction plus the AI tumour mask
+- right: deterministic reconstruction plus the admissible mask
+- highlighted mismatched voxels
+- highlighted rejected mask regions where the AI overlay rests on unsupported pixels

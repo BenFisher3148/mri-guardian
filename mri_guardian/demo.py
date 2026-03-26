@@ -13,6 +13,7 @@ from .harness import (
     build_demo_case,
     render_release_bundle_json,
 )
+from .viewer import render_side_by_side_report_html
 
 DEMO_TIMESTAMP = "2026-03-26T00:00:00Z"
 
@@ -41,6 +42,22 @@ def run_demo(*, output_dir: Path | str) -> None:
     released_state = canonical_json_dumps(result.after_state)
     (output_path / "released_state.json").write_text(
         f"{released_state}\n",
+        encoding="utf-8",
+    )
+    (output_path / "comparison.html").write_text(
+        render_side_by_side_report_html(
+            case_state,
+            report_title="Accepted Case: AI vs Verified Reality",
+        ),
+        encoding="utf-8",
+    )
+    rejected_candidate = build_demo_case()
+    rejected_candidate["ai_reconstruction"][0][1][1] = 4.8
+    (output_path / "comparison_rejected_candidate.html").write_text(
+        render_side_by_side_report_html(
+            rejected_candidate,
+            report_title="Rejected Candidate: AI vs Verified Reality",
+        ),
         encoding="utf-8",
     )
 

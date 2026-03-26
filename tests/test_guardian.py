@@ -14,6 +14,7 @@ from mri_guardian.harness import (
     build_demo_authority_sources,
     build_demo_case,
 )
+from mri_guardian.viewer import build_side_by_side_view_model, render_side_by_side_report_html
 
 
 class MriGuardianHarnessTests(unittest.TestCase):
@@ -71,6 +72,45 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 authority_sources=build_demo_authority_sources(case_id=state["case_id"]),
                 timestamp="2026-03-26T00:00:00Z",
             )
+
+    def test_view_model_reports_no_visual_findings_for_clean_case(self) -> None:
+        state = build_demo_case()
+
+        view_model = build_side_by_side_view_model(state)
+
+        self.assertTrue(view_model["release_eligible"])
+        self.assertEqual(view_model["summary"]["mismatch_voxel_count"], 0)
+        self.assertEqual(view_model["summary"]["rejected_region_count"], 0)
+        self.assertEqual(view_model["differences"]["rows"], [])
+
+    def test_view_model_flags_rejected_mask_region_for_mismatched_ai_voxel(self) -> None:
+        state = build_demo_case()
+        state["ai_reconstruction"][0][1][1] = 4.8
+
+        view_model = build_side_by_side_view_model(state)
+
+        self.assertFalse(view_model["release_eligible"])
+        self.assertEqual(view_model["summary"]["mismatch_voxel_count"], 1)
+        self.assertEqual(view_model["summary"]["rejected_region_count"], 1)
+        self.assertEqual(view_model["differences"]["rows"][0]["slice_index"], 0)
+        self.assertEqual(view_model["differences"]["rows"][0]["row_index"], 1)
+        self.assertEqual(view_model["differences"]["rows"][0]["column_index"], 1)
+        self.assertTrue(view_model["differences"]["rows"][0]["rejected_region"])
+        self.assertEqual(view_model["slices"][0]["verified_mask"][1][1], 0)
+
+    def test_html_report_contains_side_by_side_labels_and_difference_register(self) -> None:
+        state = build_demo_case()
+        state["ai_reconstruction"][0][1][1] = 4.8
+
+        html = render_side_by_side_report_html(
+            state,
+            report_title="Rejected Candidate: AI vs Verified Reality",
+        )
+
+        self.assertIn("AI Reconstruction + Tumour Mask", html)
+        self.assertIn("Deterministic Reconstruction + Verified Mask", html)
+        self.assertIn("Difference Register", html)
+        self.assertIn("Rejected Region", html)
 
     def _build_harness(self) -> MriGuardianHarness:
         return MriGuardianHarness(
