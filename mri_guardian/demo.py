@@ -13,14 +13,16 @@ from .harness import (
     build_demo_case,
     render_release_bundle_json,
 )
+from .tamper import build_tamper_mode_base_case, build_tamper_scenarios
 from .viewer import render_side_by_side_report_html
 
 DEMO_TIMESTAMP = "2026-03-26T00:00:00Z"
 
 
-def run_demo(*, output_dir: Path | str) -> None:
+def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    (output_path / "comparison_rejected_candidate.html").unlink(missing_ok=True)
     case_state = build_demo_case()
     harness = MriGuardianHarness(
         transparency_log_path=output_path / "transparency-log.jsonl",
@@ -51,15 +53,8 @@ def run_demo(*, output_dir: Path | str) -> None:
         ),
         encoding="utf-8",
     )
-    rejected_candidate = build_demo_case()
-    rejected_candidate["ai_reconstruction"][0][1][1] = 4.8
-    (output_path / "comparison_rejected_candidate.html").write_text(
-        render_side_by_side_report_html(
-            rejected_candidate,
-            report_title="Rejected Candidate: AI vs Verified Reality",
-        ),
-        encoding="utf-8",
-    )
+    if tamper_mode:
+        _write_tamper_mode_reports(output_path)
 
 
 def main() -> int:
@@ -69,9 +64,34 @@ def main() -> int:
         default="demo_artifacts",
         help="Directory where evidence and workstation payload files will be written.",
     )
+    parser.add_argument(
+        "--tamper-mode",
+        action="store_true",
+        help="Write deterministic tamper-mode reports that demonstrate live failure detection.",
+    )
     args = parser.parse_args()
-    run_demo(output_dir=args.output_dir)
+    run_demo(output_dir=args.output_dir, tamper_mode=args.tamper_mode)
     return 0
+
+
+def _write_tamper_mode_reports(output_path: Path) -> None:
+    baseline_state = build_tamper_mode_base_case()
+    (output_path / "tamper_baseline.html").write_text(
+        render_side_by_side_report_html(
+            baseline_state,
+            report_title="Tamper Mode Baseline: Verified Reality",
+        ),
+        encoding="utf-8",
+    )
+    for scenario in build_tamper_scenarios():
+        report_path = output_path / f"tamper_{scenario['slug']}.html"
+        report_path.write_text(
+            render_side_by_side_report_html(
+                scenario["state"],
+                report_title=scenario["title"],
+            ),
+            encoding="utf-8",
+        )
 
 
 if __name__ == "__main__":

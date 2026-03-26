@@ -6,9 +6,11 @@ from .harness import (
     RELEASE_STATUS_PENDING,
     RELEASE_STATUS_RELEASED,
     MriGuardianHarness,
+    build_case_verification_report,
     build_demo_authority_sources,
     build_demo_case,
 )
+from .tamper import build_tamper_mode_base_case, build_tamper_scenarios
 from .viewer import build_side_by_side_view_model, render_side_by_side_report_html
 
 __all__ = [
@@ -17,8 +19,11 @@ __all__ = [
     "RELEASE_STATUS_PENDING",
     "RELEASE_STATUS_RELEASED",
     "MriGuardianHarness",
+    "build_case_verification_report",
     "build_demo_authority_sources",
     "build_demo_case",
+    "build_tamper_mode_base_case",
+    "build_tamper_scenarios",
     "build_side_by_side_view_model",
     "render_side_by_side_report_html",
 ]

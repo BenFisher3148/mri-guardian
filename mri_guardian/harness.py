@@ -25,6 +25,7 @@ RELEASE_STATUS_RELEASED = "released_to_radiologist"
 _RECONSTRUCTION_TOLERANCE = 1e-9
 _IMAGINARY_LEAK_TOLERANCE = 1e-9
 _VOLUME_TOLERANCE = 1e-9
+_VERIFIED_MASK_THRESHOLD = 2.5
 _REQUIRED_AUTHORITY_SOURCE_TYPES = frozenset(
     {"scanner_manifest", "voxel_geometry", "model_manifest"}
 )
@@ -62,6 +63,20 @@ class MriGuardianHarness:
         evidence: EvidenceBundle | Mapping[str, Any],
     ) -> bool:
         return self._transition.verify_transparency(evidence).verified
+
+
+def build_case_verification_report(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the deterministic verification envelope for one MRI case."""
+    analysis = _analyse_case(state)
+    manifest = _build_verified_manifest(state, analysis)
+    reasons = _build_failure_reasons(state, analysis, manifest)
+    return {
+        "analysis": analysis,
+        "manifest": manifest,
+        "failure_reasons": reasons,
+        "release_eligible": not reasons
+        and all(manifest[section]["verified"] for section in _release_gate_sections()),
+    }
 
 
 def build_demo_case() -> dict[str, Any]:
@@ -358,7 +373,7 @@ def _check_released_state_matches_trace(
     if state.get("release_status") != RELEASE_STATUS_RELEASED:
         return None
     try:
-        analysis = _analyse_case(state)
+        report = build_case_verification_report(state)
     except ValueError as exc:
         return (
             InvariantFailure(
@@ -367,9 +382,10 @@ def _check_released_state_matches_trace(
                 message=str(exc),
             ),
         )
+    analysis = report["analysis"]
     failures: list[InvariantFailure] = []
     manifest = state.get("verified_manifest")
-    expected_manifest = _build_verified_manifest(state, analysis)
+    expected_manifest = report["manifest"]
     if manifest != expected_manifest:
         failures.append(
             InvariantFailure(
@@ -383,13 +399,7 @@ def _check_released_state_matches_trace(
             )
         )
     else:
-        proof_sections = (
-            "measurement_consistency",
-            "ai_reconstruction_match",
-            "tumor_volume_proof",
-            "no_invented_pixels",
-        )
-        for section_name in proof_sections:
+        for section_name in _release_gate_sections():
             section = expected_manifest[section_name]
             if section["verified"]:
                 continue
@@ -431,7 +441,7 @@ def _analyse_case(state: Mapping[str, Any]) -> dict[str, Any]:
     raw_real = arrays["raw_real"]
     raw_imag = arrays["raw_imag"]
     ai_reconstruction = arrays["ai_reconstruction"]
-    tumor_mask = arrays["tumor_mask"]
+    ai_mask = np.asarray(arrays["tumor_mask"], dtype=np.int64)
     raw_kspace = raw_real + (1j * raw_imag)
     inverse_fft = np.fft.ifft2(raw_kspace, axes=(-2, -1))
     imaginary_leakage = _max_abs(inverse_fft.imag)
@@ -439,12 +449,21 @@ def _analyse_case(state: Mapping[str, Any]) -> dict[str, Any]:
     reprojection = np.fft.fft2(derived_reconstruction, axes=(-2, -1))
     measurement_residual = reprojection - raw_kspace
     ai_residual = ai_reconstruction - derived_reconstruction
+    reconstruction_mismatch_mask = (
+        np.abs(ai_reconstruction - derived_reconstruction) > _RECONSTRUCTION_TOLERANCE
+    )
+    verified_mask = _derive_verified_mask(derived_reconstruction)
+    mask_false_positive = (ai_mask == 1) & (verified_mask == 0)
+    mask_false_negative = (ai_mask == 0) & (verified_mask == 1)
+    mask_mismatch_mask = mask_false_positive | mask_false_negative
     voxel_spacing = np.asarray(state["voxel_spacing_mm"], dtype=np.float64)
     voxel_volume_mm3 = float(np.prod(voxel_spacing))
-    tumor_voxel_count = int(np.count_nonzero(tumor_mask))
-    computed_tumor_volume_mm3 = _round_float(tumor_voxel_count * voxel_volume_mm3)
+    ai_mask_voxel_count = int(np.count_nonzero(ai_mask))
+    verified_mask_voxel_count = int(np.count_nonzero(verified_mask))
+    computed_tumor_volume_mm3 = _round_float(verified_mask_voxel_count * voxel_volume_mm3)
     derived_reconstruction_list = _float_array_to_list(derived_reconstruction)
-    tumor_mask_list = np.asarray(tumor_mask, dtype=np.int64).tolist()
+    ai_mask_list = ai_mask.tolist()
+    verified_mask_list = verified_mask.astype(np.int64).tolist()
     forward_projection_pairs = _complex_array_to_pairs(reprojection)
     raw_hash = hash_canonical_json(
         {
@@ -453,20 +472,29 @@ def _analyse_case(state: Mapping[str, Any]) -> dict[str, Any]:
         }
     )
     derived_reconstruction_hash = hash_canonical_json(derived_reconstruction_list)
-    tumor_mask_hash = hash_canonical_json(tumor_mask_list)
+    ai_mask_hash = hash_canonical_json(ai_mask_list)
+    verified_mask_hash = hash_canonical_json(verified_mask_list)
     return {
         "raw_hash": raw_hash,
         "derived_reconstruction": derived_reconstruction_list,
         "derived_reconstruction_hash": derived_reconstruction_hash,
-        "tumor_mask": tumor_mask_list,
-        "tumor_mask_hash": tumor_mask_hash,
+        "ai_mask": ai_mask_list,
+        "ai_mask_hash": ai_mask_hash,
+        "ai_mask_voxel_count": ai_mask_voxel_count,
+        "verified_mask": verified_mask_list,
+        "verified_mask_hash": verified_mask_hash,
+        "verified_mask_voxel_count": verified_mask_voxel_count,
+        "mask_voxel_delta": int(np.count_nonzero(mask_mismatch_mask)),
+        "mask_false_positive_count": int(np.count_nonzero(mask_false_positive)),
+        "mask_false_negative_count": int(np.count_nonzero(mask_false_negative)),
+        "rejected_region_count": int(np.count_nonzero(mask_false_positive)),
         "forward_projection_hash": hash_canonical_json(forward_projection_pairs),
         "max_measurement_abs_error": _max_abs(measurement_residual),
         "relative_measurement_l2_error": _relative_l2(measurement_residual, raw_kspace),
         "max_ai_abs_error": _max_abs(ai_residual),
+        "reconstruction_mismatch_voxel_count": int(np.count_nonzero(reconstruction_mismatch_mask)),
         "max_imaginary_leakage": imaginary_leakage,
         "voxel_volume_mm3": _round_float(voxel_volume_mm3),
-        "tumor_voxel_count": tumor_voxel_count,
         "computed_tumor_volume_mm3": computed_tumor_volume_mm3,
     }
 
@@ -481,14 +509,26 @@ def _build_verified_manifest(
         and analysis["max_imaginary_leakage"] <= _IMAGINARY_LEAK_TOLERANCE
     )
     ai_match_verified = analysis["max_ai_abs_error"] <= _RECONSTRUCTION_TOLERANCE
+    mask_verified = analysis["mask_voxel_delta"] == 0
     volume_verified = abs(claimed_volume - analysis["computed_tumor_volume_mm3"]) <= _VOLUME_TOLERANCE
     return {
         "policy_name": MRI_GUARDIAN_POLICY_NAME,
         "policy_version": MRI_GUARDIAN_POLICY_VERSION,
         "raw_hash": analysis["raw_hash"],
         "derived_reconstruction_hash": analysis["derived_reconstruction_hash"],
-        "tumor_mask_hash": analysis["tumor_mask_hash"],
+        "ai_mask_hash": analysis["ai_mask_hash"],
+        "verified_mask_hash": analysis["verified_mask_hash"],
         "reconstruction_algorithm": "numpy.ifft2_per_slice.real",
+        "mask_verification": {
+            "verified": mask_verified,
+            "algorithm": "threshold_on_raw_derived_reconstruction",
+            "threshold": _VERIFIED_MASK_THRESHOLD,
+            "ai_voxel_count": analysis["ai_mask_voxel_count"],
+            "verified_voxel_count": analysis["verified_mask_voxel_count"],
+            "voxel_delta": analysis["mask_voxel_delta"],
+            "false_positive_count": analysis["mask_false_positive_count"],
+            "false_negative_count": analysis["mask_false_negative_count"],
+        },
         "measurement_consistency": {
             "verified": consistency_verified,
             "max_abs_error": analysis["max_measurement_abs_error"],
@@ -506,7 +546,7 @@ def _build_verified_manifest(
             "verified": volume_verified,
             "claimed_mm3": claimed_volume,
             "computed_mm3": analysis["computed_tumor_volume_mm3"],
-            "voxel_count": analysis["tumor_voxel_count"],
+            "voxel_count": analysis["verified_mask_voxel_count"],
             "voxel_volume_mm3": analysis["voxel_volume_mm3"],
         },
         "no_invented_pixels": {
@@ -529,12 +569,12 @@ def _build_workstation_payload(
         "sequence_id": state["sequence_id"],
         "patient_pseudonym": state["patient_pseudonym"],
         "pixel_source": "harness_reconstructed_from_raw_kspace",
-        "overlay_mode": "binary_mask_on_measured_grid",
+        "overlay_mode": "policy_verified_mask_on_measured_grid",
         "reconstruction_hash": analysis["derived_reconstruction_hash"],
-        "tumor_mask_hash": analysis["tumor_mask_hash"],
+        "verified_mask_hash": analysis["verified_mask_hash"],
         "tumor_volume_mm3": analysis["computed_tumor_volume_mm3"],
         "reconstruction": analysis["derived_reconstruction"],
-        "tumor_mask": analysis["tumor_mask"],
+        "verified_mask": analysis["verified_mask"],
     }
 
 
@@ -560,6 +600,102 @@ def _extract_arrays(
                 details={"field": field_name, "error_type": type(exc).__name__},
             )
     return arrays, None
+
+
+def _release_gate_sections() -> tuple[str, ...]:
+    return (
+        "measurement_consistency",
+        "ai_reconstruction_match",
+        "mask_verification",
+        "tumor_volume_proof",
+        "no_invented_pixels",
+    )
+
+
+def _build_failure_reasons(
+    state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    reasons: list[dict[str, Any]] = []
+    mask_delta = int(analysis["mask_voxel_delta"])
+    if mask_delta:
+        reasons.append(
+            {
+                "code": "mask_voxel_mismatch",
+                "summary": f"mask_voxel_mismatch (delta = {mask_delta} voxels)",
+                "delta": mask_delta,
+                "message": (
+                    "The AI tumour mask does not match the policy-derived verified mask "
+                    "computed from the raw-derived reconstruction."
+                ),
+                "details": {
+                    "false_positive_count": int(analysis["mask_false_positive_count"]),
+                    "false_negative_count": int(analysis["mask_false_negative_count"]),
+                },
+            }
+        )
+    intensity_delta = int(analysis["reconstruction_mismatch_voxel_count"])
+    if intensity_delta:
+        reasons.append(
+            {
+                "code": "intensity_manipulation_detected",
+                "summary": (
+                    "intensity_manipulation_detected "
+                    f"(delta = {intensity_delta} voxels; max_abs_error = {analysis['max_ai_abs_error']})"
+                ),
+                "delta": intensity_delta,
+                "message": (
+                    "The AI reconstruction no longer matches the deterministic reconstruction "
+                    "recomputed from raw k-space."
+                ),
+                "details": {
+                    "max_abs_error": analysis["max_ai_abs_error"],
+                },
+            }
+        )
+    if not manifest["tumor_volume_proof"]["verified"]:
+        claimed_volume = _round_float(float(state["tumor_volume_mm3"]))
+        verified_volume = manifest["tumor_volume_proof"]["computed_mm3"]
+        reasons.append(
+            {
+                "code": "tumor_volume_mismatch",
+                "summary": (
+                    "tumor_volume_mismatch "
+                    f"(claimed = {claimed_volume} mm3; verified = {verified_volume} mm3)"
+                ),
+                "delta": _round_float(abs(claimed_volume - verified_volume)),
+                "message": "The submitted tumour volume does not match the verified mask volume.",
+                "details": {
+                    "claimed_mm3": claimed_volume,
+                    "verified_mm3": verified_volume,
+                },
+            }
+        )
+    if not manifest["measurement_consistency"]["verified"]:
+        reasons.append(
+            {
+                "code": "raw_measurement_inconsistency",
+                "summary": (
+                    "raw_measurement_inconsistency "
+                    f"(max |Δ| = {analysis['max_measurement_abs_error']})"
+                ),
+                "delta": analysis["max_measurement_abs_error"],
+                "message": (
+                    "The deterministic reconstruction cannot be cleanly reprojected back "
+                    "to the supplied raw measurements."
+                ),
+                "details": {
+                    "relative_l2_error": analysis["relative_measurement_l2_error"],
+                },
+            }
+        )
+    return reasons
+
+
+def _derive_verified_mask(derived_reconstruction: np.ndarray) -> np.ndarray:
+    reconstruction = np.asarray(derived_reconstruction, dtype=np.float64)
+    return (reconstruction >= _VERIFIED_MASK_THRESHOLD).astype(np.int64)
 
 
 def _float_array_to_list(values: np.ndarray | list[float] | list[list[float]]) -> Any:

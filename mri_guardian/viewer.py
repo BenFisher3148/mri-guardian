@@ -13,9 +13,8 @@ from .harness import (
     MRI_GUARDIAN_POLICY_VERSION,
     _RECONSTRUCTION_TOLERANCE,
     _VOLUME_TOLERANCE,
-    _analyse_case,
-    _build_verified_manifest,
     _extract_arrays,
+    build_case_verification_report,
     _round_float,
 )
 
@@ -27,28 +26,31 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
     arrays, failure = _extract_arrays(state)
     if failure is not None:
         raise ValueError(failure.message)
-    analysis = _analyse_case(state)
-    manifest = _build_verified_manifest(state, analysis)
+    report = build_case_verification_report(state)
+    analysis = report["analysis"]
+    manifest = report["manifest"]
+    reasons = report["failure_reasons"]
     ai_reconstruction = np.asarray(arrays["ai_reconstruction"], dtype=np.float64)
-    ai_mask = np.asarray(arrays["tumor_mask"], dtype=np.int64)
+    ai_mask = np.asarray(analysis["ai_mask"], dtype=np.int64)
     verified_reconstruction = np.asarray(analysis["derived_reconstruction"], dtype=np.float64)
-    mismatch_mask = np.abs(ai_reconstruction - verified_reconstruction) > _RECONSTRUCTION_TOLERANCE
-    rejected_mask = ((ai_mask == 1) & mismatch_mask).astype(np.int64)
-    verified_mask = np.where(rejected_mask == 1, 0, ai_mask).astype(np.int64)
-    claimed_volume = _round_float(float(state["tumor_volume_mm3"]))
-    computed_volume = analysis["computed_tumor_volume_mm3"]
-    volume_verified = abs(claimed_volume - computed_volume) <= _VOLUME_TOLERANCE
+    verified_mask = np.asarray(analysis["verified_mask"], dtype=np.int64)
+    intensity_mismatch_mask = (
+        np.abs(ai_reconstruction - verified_reconstruction) > _RECONSTRUCTION_TOLERANCE
+    )
+    rejected_mask = ((ai_mask == 1) & (verified_mask == 0)).astype(np.int64)
+    missing_mask = ((ai_mask == 0) & (verified_mask == 1)).astype(np.int64)
 
-    mismatch_count = int(np.count_nonzero(mismatch_mask))
+    intensity_mismatch_count = int(np.count_nonzero(intensity_mismatch_mask))
     rejected_count = int(np.count_nonzero(rejected_mask))
-    verified_voxel_count = int(np.count_nonzero(verified_mask))
+    mask_delta = int(analysis["mask_voxel_delta"])
     intensity_min = _round_float(float(min(ai_reconstruction.min(), verified_reconstruction.min())))
     intensity_max = _round_float(float(max(ai_reconstruction.max(), verified_reconstruction.max())))
 
     slices: list[dict[str, Any]] = []
     for slice_index in range(ai_reconstruction.shape[0]):
-        slice_mismatch_mask = mismatch_mask[slice_index]
+        slice_mismatch_mask = intensity_mismatch_mask[slice_index]
         slice_rejected_mask = rejected_mask[slice_index]
+        slice_missing_mask = missing_mask[slice_index]
         slices.append(
             {
                 "slice_index": slice_index,
@@ -59,26 +61,39 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
                 ),
                 "ai_mask": ai_mask[slice_index].astype(np.int64).tolist(),
                 "verified_mask": verified_mask[slice_index].astype(np.int64).tolist(),
-                "mismatch_mask": slice_mismatch_mask.astype(np.int64).tolist(),
+                "intensity_mismatch_mask": slice_mismatch_mask.astype(np.int64).tolist(),
                 "rejected_mask": slice_rejected_mask.astype(np.int64).tolist(),
-                "mismatch_count": int(np.count_nonzero(slice_mismatch_mask)),
+                "missing_mask": slice_missing_mask.astype(np.int64).tolist(),
+                "intensity_mismatch_count": int(np.count_nonzero(slice_mismatch_mask)),
                 "rejected_count": int(np.count_nonzero(slice_rejected_mask)),
+                "mask_delta": int(
+                    np.count_nonzero(slice_rejected_mask) + np.count_nonzero(slice_missing_mask)
+                ),
             }
         )
 
-    difference_rows = _difference_rows(
+    difference_rows, total_difference_count = _difference_rows(
         ai_reconstruction=ai_reconstruction,
         verified_reconstruction=verified_reconstruction,
         ai_mask=ai_mask,
-        mismatch_mask=mismatch_mask,
+        verified_mask=verified_mask,
+        intensity_mismatch_mask=intensity_mismatch_mask,
         rejected_mask=rejected_mask,
+        missing_mask=missing_mask,
     )
+    verification = _build_verification_summary(reasons=reasons)
     findings = _build_findings(
-        mismatch_count=mismatch_count,
+        reasons=reasons,
+        mask_delta=mask_delta,
         rejected_count=rejected_count,
-        volume_verified=volume_verified,
-        claimed_volume=claimed_volume,
-        computed_volume=computed_volume,
+        intensity_mismatch_count=intensity_mismatch_count,
+        claimed_volume=_round_float(float(state["tumor_volume_mm3"])),
+        computed_volume=analysis["computed_tumor_volume_mm3"],
+        volume_verified=abs(
+            _round_float(float(state["tumor_volume_mm3"]))
+            - analysis["computed_tumor_volume_mm3"]
+        )
+        <= _VOLUME_TOLERANCE,
     )
     return {
         "title": "The Verifiable MRI Guardian",
@@ -87,24 +102,17 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
         "policy_version": MRI_GUARDIAN_POLICY_VERSION,
         "ai_label": "AI Reconstruction + Tumour Mask",
         "verified_label": "Deterministic Reconstruction + Verified Mask",
-        "release_eligible": all(
-            manifest[section]["verified"]
-            for section in (
-                "measurement_consistency",
-                "ai_reconstruction_match",
-                "tumor_volume_proof",
-                "no_invented_pixels",
-            )
-        ),
+        "release_eligible": bool(report["release_eligible"]),
+        "verification": verification,
         "findings": findings,
         "summary": {
-            "mismatch_voxel_count": mismatch_count,
+            "mask_voxel_delta": mask_delta,
             "rejected_region_count": rejected_count,
-            "verified_mask_voxel_count": verified_voxel_count,
-            "claimed_tumor_volume_mm3": claimed_volume,
-            "verified_tumor_volume_mm3": computed_volume,
-            "volume_verified": volume_verified,
-            "measurement_consistency_verified": manifest["measurement_consistency"]["verified"],
+            "intensity_mismatch_voxel_count": intensity_mismatch_count,
+            "verified_mask_voxel_count": int(analysis["verified_mask_voxel_count"]),
+            "claimed_tumor_volume_mm3": _round_float(float(state["tumor_volume_mm3"])),
+            "verified_tumor_volume_mm3": analysis["computed_tumor_volume_mm3"],
+            "volume_verified": manifest["tumor_volume_proof"]["verified"],
             "max_ai_abs_error": manifest["ai_reconstruction_match"]["max_abs_error"],
             "max_measurement_abs_error": manifest["measurement_consistency"]["max_abs_error"],
         },
@@ -114,7 +122,7 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
         },
         "differences": {
             "rows": difference_rows,
-            "omitted_count": max(0, mismatch_count - len(difference_rows)),
+            "omitted_count": max(0, total_difference_count - len(difference_rows)),
         },
         "slices": slices,
     }
@@ -129,10 +137,19 @@ def render_side_by_side_report_html(
     view_model = build_side_by_side_view_model(state)
     title = report_title if report_title is not None else view_model["title"]
     summary = view_model["summary"]
+    verification = view_model["verification"]
     findings_markup = "\n".join(
         f"<li>{escape(finding)}</li>" for finding in view_model["findings"]
     )
     differences_markup = _difference_table_markup(view_model["differences"])
+    reason_markup = "\n".join(
+        (
+            "<li>"
+            f"<strong>{escape(reason['code'])}</strong>: {escape(reason['message'])}"
+            "</li>"
+        )
+        for reason in verification["reasons"]
+    )
     data_json = json.dumps(view_model, separators=(",", ":"))
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -225,7 +242,7 @@ def render_side_by_side_report_html(
       flex-wrap: wrap;
       gap: 12px;
       align-items: center;
-      margin-bottom: 24px;
+      margin-bottom: 12px;
     }}
 
     .status-pill {{
@@ -248,6 +265,35 @@ def render_side_by_side_report_html(
     .status-fail {{
       color: #ffe5e6;
       background: rgba(255, 90, 95, 0.18);
+    }}
+
+    .failure-banner {{
+      margin: 12px 0 20px;
+      padding: 18px 20px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }}
+
+    .failure-banner h2 {{
+      margin: 0;
+      font-size: clamp(1.4rem, 3vw, 2.2rem);
+      line-height: 1.05;
+      letter-spacing: 0.02em;
+      text-transform: none;
+    }}
+
+    .failure-reason {{
+      margin: 10px 0 0;
+      font-size: 1rem;
+      color: rgba(245, 247, 251, 0.92);
+    }}
+
+    .failure-list {{
+      margin: 12px 0 0;
+      padding-left: 18px;
+      color: rgba(245, 247, 251, 0.86);
+      line-height: 1.45;
     }}
 
     .metric-grid {{
@@ -476,6 +522,11 @@ def render_side_by_side_report_html(
       background: rgba(255, 90, 95, 0.16);
     }}
 
+    .chip-missing {{
+      color: #145f37;
+      background: rgba(54, 226, 143, 0.18);
+    }}
+
     .chip-mismatch {{
       color: #7b4f00;
       background: rgba(255, 194, 75, 0.22);
@@ -511,30 +562,37 @@ def render_side_by_side_report_html(
       <p class="subtitle">{escape(view_model["subtitle"])}</p>
       <div class="status-row">
         <span class="status-pill {'status-pass' if view_model['release_eligible'] else 'status-fail'}">
-          {'Release Eligible' if view_model['release_eligible'] else 'Release Rejected'}
+          {escape(verification["headline"])}
         </span>
         <span class="status-pill">Policy {escape(view_model["policy_name"])} v{escape(view_model["policy_version"])}</span>
       </div>
+      <div class="failure-banner">
+        <h2>{escape(verification["headline"])}</h2>
+        <p class="failure-reason">Reason: {escape(verification["primary_reason_summary"])}</p>
+        <ul class="failure-list">
+          {reason_markup}
+        </ul>
+      </div>
       <div class="metric-grid">
         <article class="metric-card">
-          <span class="metric-label">Mismatched Voxels</span>
-          <div class="metric-value">{summary["mismatch_voxel_count"]}</div>
-          <div class="metric-note">AI pixels that do not agree with raw-derived reconstruction.</div>
+          <span class="metric-label">Mask Delta</span>
+          <div class="metric-value">{summary["mask_voxel_delta"]}</div>
+          <div class="metric-note">Voxel delta between the AI mask and the policy-verified mask.</div>
         </article>
         <article class="metric-card">
           <span class="metric-label">Rejected Regions</span>
           <div class="metric-value">{summary["rejected_region_count"]}</div>
-          <div class="metric-note">Masked voxels resting on mismatched image evidence.</div>
+          <div class="metric-note">AI mask voxels that the guard removed before workstation release.</div>
         </article>
         <article class="metric-card">
-          <span class="metric-label">Volume Claim</span>
-          <div class="metric-value">{summary["claimed_tumor_volume_mm3"]} mm³</div>
-          <div class="metric-note">Verified from mask geometry: {summary["verified_tumor_volume_mm3"]} mm³.</div>
+          <span class="metric-label">Intensity Delta</span>
+          <div class="metric-value">{summary["intensity_mismatch_voxel_count"]}</div>
+          <div class="metric-note">AI image voxels that diverge from the raw-derived reconstruction.</div>
         </article>
         <article class="metric-card">
-          <span class="metric-label">Max AI Error</span>
-          <div class="metric-value">{summary["max_ai_abs_error"]}</div>
-          <div class="metric-note">Absolute voxel delta against deterministic reconstruction.</div>
+          <span class="metric-label">Verified Volume</span>
+          <div class="metric-value">{summary["verified_tumor_volume_mm3"]} mm3</div>
+          <div class="metric-note">Claimed volume: {summary["claimed_tumor_volume_mm3"]} mm3.</div>
         </article>
       </div>
       <ul class="findings">
@@ -547,12 +605,12 @@ def render_side_by_side_report_html(
       <div class="legend-items">
         <span class="legend-item"><span class="swatch swatch-ai"></span> AI tumour overlay</span>
         <span class="legend-item"><span class="swatch swatch-verified"></span> Verified tumour overlay</span>
-        <span class="legend-item"><span class="swatch swatch-mismatch"></span> Mismatched voxel</span>
-        <span class="legend-item"><span class="swatch swatch-rejected"></span> Rejected region</span>
+        <span class="legend-item"><span class="swatch swatch-mismatch"></span> Intensity mismatch</span>
+        <span class="legend-item"><span class="swatch swatch-rejected"></span> Rejected AI region</span>
       </div>
       <p class="footnote">
-        Left panels show exactly what the AI tried to send downstream. Right panels show what survives the ICSD guard:
-        reconstruction recomputed from raw k-space and tumour overlay trimmed away from any unsupported voxel.
+        Left panels show exactly what the AI tried to send downstream. Right panels show what the ICSD guard can defend:
+        reconstruction recomputed from raw k-space and a tumour mask derived by deterministic policy from measured reality.
       </p>
     </section>
 
@@ -575,8 +633,9 @@ def render_side_by_side_report_html(
             <h2 class="slice-title">${{slice.slice_label}}</h2>
           </div>
           <div class="slice-stats">
-            <span class="slice-stat">${{slice.mismatch_count}} mismatched voxels</span>
+            <span class="slice-stat">${{slice.mask_delta}} mask delta</span>
             <span class="slice-stat">${{slice.rejected_count}} rejected regions</span>
+            <span class="slice-stat">${{slice.intensity_mismatch_count}} intensity mismatches</span>
           </div>
         </header>
         <div class="panel-grid">
@@ -587,7 +646,7 @@ def render_side_by_side_report_html(
           </section>
           <section class="panel">
             <h3>${{comparisonData.verified_label}}</h3>
-            <p>Raw-derived reconstruction with only admissible overlay voxels preserved.</p>
+            <p>Raw-derived reconstruction with the policy-verified tumour mask.</p>
             <canvas data-side="verified"></canvas>
           </section>
         </div>
@@ -601,7 +660,7 @@ def render_side_by_side_report_html(
 
     function computeCellSize(rows, cols) {{
       const longestEdge = Math.max(rows, cols);
-      return Math.max(22, Math.min(44, Math.floor(360 / longestEdge)));
+      return Math.max(14, Math.min(28, Math.floor(360 / longestEdge)));
     }}
 
     function normaliseIntensity(value) {{
@@ -622,7 +681,7 @@ def render_side_by_side_report_html(
       const ctx = canvas.getContext("2d");
       const image = side === "ai" ? slice.ai_reconstruction : slice.verified_reconstruction;
       const mask = side === "ai" ? slice.ai_mask : slice.verified_mask;
-      const mismatch = slice.mismatch_mask;
+      const intensityMismatch = slice.intensity_mismatch_mask;
       const rejected = slice.rejected_mask;
 
       ctx.fillStyle = "#090d12";
@@ -642,7 +701,7 @@ def render_side_by_side_report_html(
             ctx.fillRect(x, y, cell, cell);
           }}
 
-          if (rejected[row][col]) {{
+          if (side === "ai" && rejected[row][col]) {{
             ctx.fillStyle = "rgba(255, 90, 95, 0.18)";
             ctx.fillRect(x, y, cell, cell);
             ctx.strokeStyle = "rgba(255, 90, 95, 0.92)";
@@ -655,7 +714,7 @@ def render_side_by_side_report_html(
             ctx.stroke();
           }}
 
-          if (mismatch[row][col]) {{
+          if (intensityMismatch[row][col]) {{
             ctx.strokeStyle = "rgba(255, 194, 75, 0.98)";
             ctx.lineWidth = Math.max(2, Math.floor(cell * 0.1));
             ctx.strokeRect(x + 1, y + 1, cell - 2, cell - 2);
@@ -691,59 +750,159 @@ def _difference_rows(
     ai_reconstruction: np.ndarray,
     verified_reconstruction: np.ndarray,
     ai_mask: np.ndarray,
-    mismatch_mask: np.ndarray,
+    verified_mask: np.ndarray,
+    intensity_mismatch_mask: np.ndarray,
     rejected_mask: np.ndarray,
-) -> list[dict[str, Any]]:
+    missing_mask: np.ndarray,
+) -> tuple[list[dict[str, Any]], int]:
     rows: list[dict[str, Any]] = []
-    mismatch_indices = np.argwhere(mismatch_mask)
-    for slice_index, row_index, column_index in mismatch_indices[:_MAX_DIFFERENCE_ROWS]:
-        ai_value = _round_float(float(ai_reconstruction[slice_index, row_index, column_index]))
-        verified_value = _round_float(
-            float(verified_reconstruction[slice_index, row_index, column_index])
-        )
+    total_count = 0
+
+    def _append_row(
+        *,
+        slice_index: int,
+        row_index: int,
+        column_index: int,
+        code: str,
+        status_label: str,
+        ai_value: float,
+        verified_value: float,
+        delta: float,
+        ai_masked: bool,
+        verified_masked: bool,
+    ) -> None:
+        nonlocal total_count
+        total_count += 1
+        if len(rows) >= _MAX_DIFFERENCE_ROWS:
+            return
         rows.append(
             {
                 "slice_index": int(slice_index),
                 "row_index": int(row_index),
                 "column_index": int(column_index),
-                "ai_value": ai_value,
-                "verified_value": verified_value,
-                "delta": _round_float(ai_value - verified_value),
-                "ai_masked": bool(ai_mask[slice_index, row_index, column_index]),
-                "rejected_region": bool(rejected_mask[slice_index, row_index, column_index]),
+                "code": code,
+                "status_label": status_label,
+                "ai_value": _round_float(ai_value),
+                "verified_value": _round_float(verified_value),
+                "delta": _round_float(delta),
+                "ai_masked": bool(ai_masked),
+                "verified_masked": bool(verified_masked),
             }
         )
-    return rows
+
+    for slice_index, row_index, column_index in np.argwhere(rejected_mask):
+        _append_row(
+            slice_index=int(slice_index),
+            row_index=int(row_index),
+            column_index=int(column_index),
+            code="mask_false_positive",
+            status_label="Rejected Region",
+            ai_value=float(ai_reconstruction[slice_index, row_index, column_index]),
+            verified_value=float(verified_reconstruction[slice_index, row_index, column_index]),
+            delta=float(
+                ai_reconstruction[slice_index, row_index, column_index]
+                - verified_reconstruction[slice_index, row_index, column_index]
+            ),
+            ai_masked=True,
+            verified_masked=False,
+        )
+    for slice_index, row_index, column_index in np.argwhere(missing_mask):
+        _append_row(
+            slice_index=int(slice_index),
+            row_index=int(row_index),
+            column_index=int(column_index),
+            code="mask_false_negative",
+            status_label="Missing Verified Region",
+            ai_value=float(ai_reconstruction[slice_index, row_index, column_index]),
+            verified_value=float(verified_reconstruction[slice_index, row_index, column_index]),
+            delta=float(
+                ai_reconstruction[slice_index, row_index, column_index]
+                - verified_reconstruction[slice_index, row_index, column_index]
+            ),
+            ai_masked=False,
+            verified_masked=True,
+        )
+    for slice_index, row_index, column_index in np.argwhere(intensity_mismatch_mask):
+        _append_row(
+            slice_index=int(slice_index),
+            row_index=int(row_index),
+            column_index=int(column_index),
+            code="intensity_mismatch",
+            status_label="Intensity Mismatch",
+            ai_value=float(ai_reconstruction[slice_index, row_index, column_index]),
+            verified_value=float(verified_reconstruction[slice_index, row_index, column_index]),
+            delta=float(
+                ai_reconstruction[slice_index, row_index, column_index]
+                - verified_reconstruction[slice_index, row_index, column_index]
+            ),
+            ai_masked=bool(ai_mask[slice_index, row_index, column_index]),
+            verified_masked=bool(verified_mask[slice_index, row_index, column_index]),
+        )
+    return rows, total_count
+
+
+def _build_verification_summary(*, reasons: list[dict[str, Any]]) -> dict[str, Any]:
+    if not reasons:
+        return {
+            "headline": "Verification PASSED",
+            "primary_reason_summary": "all_verification_checks_passed",
+            "reasons": [
+                {
+                    "code": "all_verification_checks_passed",
+                    "message": (
+                        "The AI reconstruction, mask, and tumour volume all match the "
+                        "deterministic policy verification path."
+                    ),
+                }
+            ],
+        }
+    primary_reason = reasons[0]
+    return {
+        "headline": "Verification FAILED",
+        "primary_reason_summary": primary_reason["summary"],
+        "reasons": [
+            {"code": reason["code"], "message": reason["message"]}
+            for reason in reasons
+        ],
+    }
 
 
 def _build_findings(
     *,
-    mismatch_count: int,
+    reasons: list[dict[str, Any]],
+    mask_delta: int,
     rejected_count: int,
-    volume_verified: bool,
+    intensity_mismatch_count: int,
     claimed_volume: float,
     computed_volume: float,
+    volume_verified: bool,
 ) -> list[str]:
+    if not reasons:
+        return [
+            "Verification passed. The AI image, tumour mask, and claimed volume all survive the ICSD guard.",
+            "No mask drift was detected between the AI overlay and the policy-derived verified mask.",
+            "No intensity manipulation was detected in the AI reconstruction.",
+        ]
     findings: list[str] = []
-    if mismatch_count == 0:
-        findings.append("No voxel mismatches detected between the AI image and the raw-derived reconstruction.")
-    else:
+    if mask_delta:
         findings.append(
-            f"{mismatch_count} voxel(s) differ from the deterministic reconstruction and are visually marked."
+            f"Mask verification failed: {mask_delta} voxel(s) differ between the AI mask and the verified mask."
         )
-    if rejected_count == 0:
-        findings.append("No tumour regions were rejected by the pixel-origin guard.")
-    else:
+    if rejected_count:
         findings.append(
-            f"{rejected_count} masked voxel(s) were rejected because the supporting pixels do not come from measured reality."
+            f"{rejected_count} AI mask voxel(s) were explicitly rejected because measured reality does not support them."
+        )
+    if intensity_mismatch_count:
+        findings.append(
+            f"Intensity verification failed: {intensity_mismatch_count} voxel(s) in the AI image do not match the raw-derived reconstruction."
         )
     if volume_verified:
         findings.append(
-            f"The claimed tumour volume ({claimed_volume} mm³) matches the verified mask geometry."
+            f"The claimed tumour volume ({claimed_volume} mm3) still matches the verified mask volume ({computed_volume} mm3)."
         )
     else:
         findings.append(
-            f"The claimed tumour volume ({claimed_volume} mm³) does not match the verified mask geometry ({computed_volume} mm³)."
+            f"Volume verification failed: claimed {claimed_volume} mm3, verified {computed_volume} mm3."
         )
     return findings
 
@@ -752,36 +911,41 @@ def _difference_table_markup(differences: dict[str, Any]) -> str:
     rows = differences["rows"]
     if not rows:
         return (
-            "<p class=\"footnote\">No mismatched voxels were recorded. The AI image and the "
-            "raw-derived reconstruction are identical at the displayed grid.</p>"
+            "<p class=\"footnote\">No difference rows were recorded. The AI image and tumour overlay "
+            "match the deterministic verification path.</p>"
         )
     body_rows = []
     for row in rows:
-        chip_class = "chip-rejected" if row["rejected_region"] else "chip-mismatch"
-        chip_label = "Rejected Region" if row["rejected_region"] else "Mismatch"
+        chip_class = {
+            "Rejected Region": "chip-rejected",
+            "Missing Verified Region": "chip-missing",
+            "Intensity Mismatch": "chip-mismatch",
+        }[row["status_label"]]
         body_rows.append(
             "<tr>"
             f"<td>{row['slice_index'] + 1}</td>"
             f"<td>{row['row_index']}</td>"
             f"<td>{row['column_index']}</td>"
+            f"<td>{escape(row['code'])}</td>"
             f"<td>{row['ai_value']}</td>"
             f"<td>{row['verified_value']}</td>"
             f"<td>{row['delta']}</td>"
             f"<td>{'Yes' if row['ai_masked'] else 'No'}</td>"
-            f"<td><span class=\"chip {chip_class}\">{chip_label}</span></td>"
+            f"<td>{'Yes' if row['verified_masked'] else 'No'}</td>"
+            f"<td><span class=\"chip {chip_class}\">{escape(row['status_label'])}</span></td>"
             "</tr>"
         )
     omitted_count = differences["omitted_count"]
     omitted_note = ""
     if omitted_count:
         omitted_note = (
-            f"<p class=\"footnote\">{omitted_count} additional mismatched voxel(s) are omitted "
+            f"<p class=\"footnote\">{omitted_count} additional difference row(s) are omitted "
             "from this table for readability.</p>"
         )
     return (
         "<table>"
-        "<thead><tr><th>Slice</th><th>Row</th><th>Column</th><th>AI</th><th>Verified</th>"
-        "<th>Delta</th><th>AI Masked</th><th>Status</th></tr></thead>"
+        "<thead><tr><th>Slice</th><th>Row</th><th>Column</th><th>Code</th><th>AI</th>"
+        "<th>Verified</th><th>Delta</th><th>AI Masked</th><th>Verified Masked</th><th>Status</th></tr></thead>"
         f"<tbody>{''.join(body_rows)}</tbody>"
         "</table>"
         f"{omitted_note}"
