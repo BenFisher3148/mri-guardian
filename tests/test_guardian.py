@@ -300,6 +300,12 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(view_model["summary"]["mask_voxel_delta"], 0)
         self.assertEqual(view_model["summary"]["rejected_region_count"], 0)
         self.assertEqual(view_model["summary"]["intensity_mismatch_voxel_count"], 0)
+        self.assertEqual(view_model["clinical_summary"]["status_label"], "VERIFIED")
+        self.assertEqual(
+            view_model["clinical_summary"]["confidence_label"],
+            "Derived from raw data (not AI)",
+        )
+        self.assertIn("...", view_model["clinical_summary"]["audit_id"])
         self.assertEqual(view_model["integration"]["ingress_label"], "Mock DICOM Input")
         self.assertEqual(view_model["integration"]["egress_label"], "Mock PACS Output")
         self.assertEqual(view_model["differences"]["rows"], [])
@@ -324,6 +330,11 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(view_model["differences"]["rows"][0]["column_index"], 0)
         self.assertEqual(view_model["differences"]["rows"][0]["code"], "mask_false_positive")
         self.assertEqual(view_model["differences"]["rows"][0]["status_label"], "Rejected Region")
+        self.assertEqual(view_model["clinical_summary"]["status_label"], "NOT VERIFIED")
+        self.assertEqual(
+            view_model["clinical_summary"]["confidence_label"],
+            "Not released from AI claim",
+        )
         self.assertEqual(view_model["integration"]["egress_label"], "PACS Output Blocked")
         self.assertEqual(view_model["slices"][0]["verified_mask"][0][0], 0)
 
@@ -337,6 +348,10 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
 
         self.assertIn("MRI Guardian Layer", html)
+        self.assertIn("Status", html)
+        self.assertIn("Tumour Volume", html)
+        self.assertIn("Confidence", html)
+        self.assertIn("Audit ID", html)
         self.assertIn("Mock DICOM Input", html)
         self.assertIn("AI Reconstruction + Proposed Tumour Mask", html)
         self.assertIn("Guardian Layer Reconstruction + Verified Mask", html)

@@ -110,6 +110,7 @@ The replay layer makes the bundle regulator-friendly: `verify_bundle(...)` does 
 
 The added viewer makes that boundary human-visible. It renders the verification proxy exactly as a reviewer would experience it:
 
+- a clinician-facing summary panel with status, verified tumour volume, raw-data confidence wording, and a deterministic audit ID
 - a mocked `DICOM Input -> MRI Guardian Layer -> PACS Output` boundary strip so the plug-in point is explicit
 - left: AI reconstruction plus the AI tumour mask proposed for downstream handoff
 - right: Guardian Layer reconstruction plus the admissible verified mask

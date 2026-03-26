@@ -7,6 +7,7 @@ from html import escape
 from typing import Any
 
 import numpy as np
+from icsd.core.serialise import hash_canonical_json
 
 from .harness import (
     MRI_GUARDIAN_POLICY_NAME,
@@ -107,6 +108,13 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
         release_eligible=bool(report["release_eligible"]),
         primary_reason=verification["primary_reason_summary"],
     )
+    clinical_summary = _build_clinical_summary(
+        state=state,
+        analysis=analysis,
+        verification=verification,
+        release_eligible=bool(report["release_eligible"]),
+        clinical_status=tiers["level_3"]["status"],
+    )
     return {
         "title": "MRI Guardian Layer",
         "subtitle": "Verification proxy between the reconstruction AI and the PACS/workstation boundary.",
@@ -118,6 +126,7 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
         "verification": verification,
         "timing": timing,
         "findings": findings,
+        "clinical_summary": clinical_summary,
         "integration": integration,
         "summary": {
             "mask_voxel_delta": mask_delta,
@@ -259,6 +268,50 @@ def render_side_by_side_report_html(
       gap: 12px;
       align-items: center;
       margin-bottom: 12px;
+    }}
+
+    .clinical-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin: 16px 0 18px;
+    }}
+
+    .clinical-card {{
+      padding: 16px 18px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }}
+
+    .clinical-label {{
+      display: block;
+      color: rgba(245, 247, 251, 0.68);
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      margin-bottom: 10px;
+    }}
+
+    .clinical-value {{
+      font-size: clamp(1rem, 2.4vw, 1.5rem);
+      font-weight: 800;
+      line-height: 1.1;
+    }}
+
+    .clinical-value-pass {{
+      color: #ddffec;
+    }}
+
+    .clinical-value-fail {{
+      color: #ffe5e6;
+    }}
+
+    .clinical-note {{
+      margin: 8px 0 0;
+      color: rgba(245, 247, 251, 0.78);
+      font-size: 0.86rem;
+      line-height: 1.45;
     }}
 
     .status-pill {{
@@ -760,6 +813,30 @@ def render_side_by_side_report_html(
         </span>
         <span class="status-pill">Policy {escape(view_model["policy_name"])} v{escape(view_model["policy_version"])}</span>
       </div>
+      <div class="clinical-grid">
+        <article class="clinical-card">
+          <span class="clinical-label">Status</span>
+          <div class="clinical-value {'clinical-value-pass' if view_model['clinical_summary']['status_state'] == 'verified' else 'clinical-value-fail'}">
+            {escape(view_model["clinical_summary"]["status_label"])} {'&#x2705;' if view_model['clinical_summary']['status_state'] == 'verified' else '&#x274C;'}
+          </div>
+          <p class="clinical-note">{escape(view_model["clinical_summary"]["status_note"])}</p>
+        </article>
+        <article class="clinical-card">
+          <span class="clinical-label">Tumour Volume</span>
+          <div class="clinical-value">{escape(view_model["clinical_summary"]["tumor_volume_cm3"])} cm<sup>3</sup></div>
+          <p class="clinical-note">{escape(view_model["clinical_summary"]["tumor_volume_note"])}</p>
+        </article>
+        <article class="clinical-card">
+          <span class="clinical-label">Confidence</span>
+          <div class="clinical-value">{escape(view_model["clinical_summary"]["confidence_label"])}</div>
+          <p class="clinical-note">{escape(view_model["clinical_summary"]["confidence_note"])}</p>
+        </article>
+        <article class="clinical-card">
+          <span class="clinical-label">Audit ID</span>
+          <div class="clinical-value">{escape(view_model["clinical_summary"]["audit_id"])}</div>
+          <p class="clinical-note">{escape(view_model["clinical_summary"]["audit_note"])}</p>
+        </article>
+      </div>
       <div class="timing-grid">
         <article class="timing-card">
           <span class="timing-label">Reconstruction</span>
@@ -1206,6 +1283,54 @@ def _build_findings(
     return findings
 
 
+def _build_clinical_summary(
+    *,
+    state: dict[str, Any],
+    analysis: dict[str, Any],
+    verification: dict[str, Any],
+    release_eligible: bool,
+    clinical_status: str,
+) -> dict[str, str]:
+    verified_volume_mm3 = analysis["computed_tumor_volume_mm3"]
+    status_label = "VERIFIED" if release_eligible else "NOT VERIFIED"
+    status_note = (
+        "Accepted for downstream PACS/workstation release."
+        if release_eligible
+        else f"Blocked before downstream handoff. Reason: {verification['primary_reason_summary']}."
+    )
+    if release_eligible and clinical_status == "warning":
+        confidence_label = "Derived from raw data (not AI)"
+        confidence_note = (
+            "Not AI-authored. Level 1 and Level 2 passed; Level 3 advisory review is still recommended."
+        )
+    elif release_eligible:
+        confidence_label = "Derived from raw data (not AI)"
+        confidence_note = "Not AI-authored. Released only from the measured MRI data path."
+    else:
+        confidence_label = "Not released from AI claim"
+        confidence_note = "The raw-data proof path did not support downstream release."
+    audit_hash = hash_canonical_json(
+        {
+            "case_id": state["case_id"],
+            "raw_hash": analysis["raw_hash"],
+            "reconstruction_hash": analysis["derived_reconstruction_hash"],
+            "verified_mask_hash": analysis["verified_mask_hash"],
+            "verified_tumor_volume_mm3": verified_volume_mm3,
+        }
+    ).upper()
+    return {
+        "status_state": "verified" if release_eligible else "blocked",
+        "status_label": status_label,
+        "status_note": status_note,
+        "tumor_volume_cm3": _format_volume_cm3(verified_volume_mm3),
+        "tumor_volume_note": f"Verified volume on measured grid: {verified_volume_mm3} mm3.",
+        "confidence_label": confidence_label,
+        "confidence_note": confidence_note,
+        "audit_id": _short_audit_id(audit_hash),
+        "audit_note": "Deterministic audit fingerprint for this verified handoff state.",
+    }
+
+
 def _build_integration_summary(
     *,
     release_eligible: bool,
@@ -1229,6 +1354,19 @@ def _build_integration_summary(
         "egress_label": egress_label,
         "egress_detail": egress_detail,
     }
+
+
+def _format_volume_cm3(volume_mm3: float) -> str:
+    volume_cm3 = volume_mm3 / 1000.0
+    if volume_cm3 >= 1:
+        return f"{volume_cm3:.3f}".rstrip("0").rstrip(".")
+    if volume_cm3 >= 0.1:
+        return f"{volume_cm3:.4f}".rstrip("0").rstrip(".")
+    return f"{volume_cm3:.5f}".rstrip("0").rstrip(".")
+
+
+def _short_audit_id(audit_hash: str) -> str:
+    return f"{audit_hash[:4]}...{audit_hash[-3:]}"
 
 
 def _ordered_tiers(tiers: dict[str, Any]) -> list[dict[str, Any]]:
