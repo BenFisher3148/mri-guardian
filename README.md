@@ -4,6 +4,24 @@ This repository contains a proof-of-concept MRI Guardian Layer: an ICSD verifica
 
 It is intentionally non-invasive. The reconstruction AI and the PACS/workstation stay in place; the Guardian Layer only verifies the handoff and blocks any output that cannot be proven from the measured MRI data.
 
+## At A Glance
+
+- What it is: a verification layer between a raw MRI AI and PACS/workstation handoff.
+- What it prevents: invented pixels, unsupported tumour masks, and incorrect tumour-volume claims moving through the Guardian path.
+- What the demo shows: accepted verification, live tamper detection, portable evidence bundles, mocked DICOM/PACS integration, and bounded performance.
+- What it is not: a replacement PACS, scanner, or reporting workstation.
+
+## Quick Review Path
+
+If you are short on time, the fastest way to understand the repo is:
+
+1. Install the general environment from [requirements.txt](requirements.txt) or the exact reviewed stack from [requirements-review.txt](requirements-review.txt).
+2. Run the deterministic demo with `python -m mri_guardian.demo --output-dir demo_artifacts --tamper-mode`.
+3. Open `demo_artifacts/comparison.html` and one of the `tamper_*.html` reports.
+4. If you want the deeper model, then read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/INTEROPERABILITY.md](docs/INTEROPERABILITY.md), and [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
+## Verification Model
+
 The core rule is simple: the downstream PACS/workstation never receives AI-supplied pixels directly. The layer treats the AI reconstruction as a claim, recomputes the displayed reconstruction from raw k-space itself, and only releases a workstation payload when all of the following are true:
 
 - the reconstructed voxel grid is mathematically consistent with the raw sensor data
