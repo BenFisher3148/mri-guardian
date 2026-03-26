@@ -72,7 +72,7 @@ def run_demo(
     )
     if not descriptor.release_semantics["final_release_allowed"]:
         if tamper_mode:
-            _write_tamper_mode_reports(output_path)
+            _write_tamper_mode_reports(output_path, profile_name=descriptor.profile_name)
         return
 
     dicom_input = build_mock_dicom_input(case_state)
@@ -164,7 +164,7 @@ def run_demo(
         encoding="utf-8",
     )
     if tamper_mode:
-        _write_tamper_mode_reports(output_path)
+        _write_tamper_mode_reports(output_path, profile_name=descriptor.profile_name)
 
 
 def main() -> int:
@@ -193,16 +193,17 @@ def main() -> int:
     return 0
 
 
-def _write_tamper_mode_reports(output_path: Path) -> None:
-    baseline_state = build_tamper_mode_base_case()
+def _write_tamper_mode_reports(output_path: Path, *, profile_name: str) -> None:
+    baseline_state = build_tamper_mode_base_case(profile_name=profile_name)
     (output_path / "tamper_baseline.html").write_text(
         render_side_by_side_report_html(
             baseline_state,
             report_title="Tamper Mode Baseline: Verified Reality",
+            profile_name=profile_name,
         ),
         encoding="utf-8",
     )
-    for scenario in build_tamper_scenarios():
+    for scenario in build_tamper_scenarios(profile_name=profile_name):
         report_path = output_path / f"tamper_{scenario['slug']}.html"
         dicom_input = build_mock_dicom_input(scenario["state"])
         pacs_block = build_mock_pacs_block_notice(scenario["state"])
@@ -214,6 +215,7 @@ def _write_tamper_mode_reports(output_path: Path) -> None:
             render_side_by_side_report_html(
                 scenario["state"],
                 report_title=scenario["title"],
+                profile_name=profile_name,
             ),
             encoding="utf-8",
         )

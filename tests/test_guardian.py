@@ -339,6 +339,16 @@ class MriGuardianHarnessTests(unittest.TestCase):
         morphology_two = build_verification_profile_descriptor("brain_t1_morphology_review")
         self.assertEqual(morphology_one["profile_digest"], morphology_two["profile_digest"])
 
+    def test_profile_descriptor_canonicalises_equivalent_mask_rules(self) -> None:
+        canonical_payload = build_verification_profile_descriptor("brain_t1_morphology_review")
+        noncanonical_payload = json.loads(canonical_json_dumps(canonical_payload))
+        del noncanonical_payload["mask_rules"]["parameters"]["opening_radius_voxels"]
+        del noncanonical_payload["mask_rules"]["parameters"]["closing_radius_voxels"]
+        reloaded = verification_profile_descriptor_from_dict(noncanonical_payload)
+
+        self.assertEqual(reloaded.to_dict(), canonical_payload)
+        self.assertEqual(reloaded.profile_digest(), canonical_payload["profile_digest"])
+
     def test_demo_case_releases_and_generates_verifiable_evidence(self) -> None:
         state, result = self._release_demo_case()
 
@@ -1185,11 +1195,22 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
         verification = run_verify_command(demo_root)
         report = json.loads((demo_root / "verification_report.json").read_text(encoding="utf-8"))
+        tamper_block = json.loads(
+            (demo_root / "tamper_fake_tumour_pacs_block.json").read_text(encoding="utf-8")
+        )
 
         self.assertTrue(verification["verified"])
         self.assertEqual(report["profile"]["profile_name"], "brain_t1_morphology_review")
         self.assertEqual(
             report["contracts"]["mask_derivation_policy"]["algorithm"],
+            MORPHOLOGY_ALGORITHM,
+        )
+        self.assertEqual(
+            tamper_block["proof_contracts"]["verification_profile_descriptor"]["profile_name"],
+            "brain_t1_morphology_review",
+        )
+        self.assertEqual(
+            tamper_block["proof_contracts"]["mask_derivation_policy"]["algorithm"],
             MORPHOLOGY_ALGORITHM,
         )
         self.assertTrue((demo_root / "tamper_fake_tumour.html").exists())

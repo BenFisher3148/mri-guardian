@@ -108,7 +108,7 @@ class VerificationProfileDescriptor:
             "icsd_policy_id": self.icsd_policy_id,
             "icsd_policy_version": self.icsd_policy_version,
             "release_semantics": deepcopy(self.release_semantics),
-            "mask_rules": deepcopy(self.mask_rules),
+            "mask_rules": deepcopy(self.canonical_mask_policy),
             "tolerance_rules": deepcopy(self.tolerance_rules),
             "authority_requirements": deepcopy(self.authority_requirements),
             "heuristic_rules": deepcopy(self.heuristic_rules),
@@ -208,6 +208,7 @@ def verification_profile_descriptor_from_dict(
             "Unsupported digest_scope: "
             f"{payload['digest_scope']!r}."
         )
+    resolved_mask_rules = deepcopy(resolve_mask_policy(dict(payload["mask_rules"])).to_dict())
     descriptor = VerificationProfileDescriptor(
         profile_name=str(payload["profile_name"]),
         profile_revision=str(payload["profile_revision"]),
@@ -219,16 +220,12 @@ def verification_profile_descriptor_from_dict(
         icsd_policy_id=str(payload["icsd_policy_id"]),
         icsd_policy_version=str(payload["icsd_policy_version"]),
         release_semantics=deepcopy(dict(payload["release_semantics"])),
-        mask_rules=deepcopy(dict(payload["mask_rules"])),
+        mask_rules=resolved_mask_rules,
         tolerance_rules=deepcopy(dict(payload["tolerance_rules"])),
         authority_requirements=deepcopy(dict(payload["authority_requirements"])),
         heuristic_rules=deepcopy(dict(payload["heuristic_rules"])),
         performance_expectations=deepcopy(dict(payload["performance_expectations"])),
     )
-    try:
-        resolve_mask_policy(descriptor.mask_rules)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Invalid mask_rules for profile {descriptor.profile_name!r}: {exc}") from exc
     expected_digest = descriptor.profile_digest()
     observed_digest = str(payload["profile_digest"])
     if expected_digest != observed_digest:
