@@ -10,7 +10,7 @@ abstract: >-
   from raw k-space before PACS or workstation handoff.
 authors:
   - family-names: Fisher
-    given-names: Benza
+    given-names: Benjamin Anthony
 keywords:
   - MRI
   - verification
