@@ -44,9 +44,11 @@ from mri_guardian.integration import (
     restore_case_state_from_dicom_input,
 )
 from mri_guardian.mask_engine import (
+    CONNECTED_COMPONENT_ALGORITHM,
     MORPHOLOGY_ALGORITHM,
     THRESHOLD_ALGORITHM,
     derive_verified_mask,
+    list_approved_mask_algorithms,
     resolve_mask_policy,
 )
 from mri_guardian.profiles import (
@@ -94,6 +96,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
             (
                 "brain_t1_baseline",
                 "brain_t1_morphology_review",
+                "brain_t1_component_review",
                 "brain_t2_baseline",
                 "contrast_enhanced_review",
                 "strict_research_mode",
@@ -143,6 +146,21 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 "slice_enabled": True,
                 "representative_budget": 90.0,
                 "worst_case_budget": 190.0,
+            },
+            "brain_t1_component_review": {
+                "algorithm": CONNECTED_COMPONENT_ALGORITHM,
+                "threshold": 2.5,
+                "authorities": (
+                    "scanner_manifest",
+                    "voxel_geometry",
+                    "model_manifest",
+                    "sequence_manifest",
+                ),
+                "mask_severity": "warning",
+                "contrast_enabled": True,
+                "slice_enabled": True,
+                "representative_budget": 95.0,
+                "worst_case_budget": 200.0,
             },
             "brain_t2_baseline": {
                 "algorithm": THRESHOLD_ALGORITHM,
@@ -236,6 +254,16 @@ class MriGuardianHarnessTests(unittest.TestCase):
                     descriptor.performance_expectations["worst_case_total_ms_budget"],
                     spec["worst_case_budget"],
                 )
+
+    def test_approved_mask_algorithm_catalogue_lists_component_engine(self) -> None:
+        self.assertEqual(
+            list_approved_mask_algorithms(),
+            (
+                THRESHOLD_ALGORITHM,
+                MORPHOLOGY_ALGORITHM,
+                CONNECTED_COMPONENT_ALGORITHM,
+            ),
+        )
 
     def test_unknown_profile_lookup_raises_value_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown Guardian runtime profile"):
@@ -339,11 +367,88 @@ class MriGuardianHarnessTests(unittest.TestCase):
         morphology_two = build_verification_profile_descriptor("brain_t1_morphology_review")
         self.assertEqual(morphology_one["profile_digest"], morphology_two["profile_digest"])
 
+        component_default = resolve_mask_policy(
+            {
+                "algorithm": CONNECTED_COMPONENT_ALGORITHM,
+                "parameters": {
+                    "threshold": 2.5,
+                    "min_component_voxels": 8,
+                },
+            }
+        )
+        component_explicit = resolve_mask_policy(
+            {
+                "algorithm": CONNECTED_COMPONENT_ALGORITHM,
+                "parameters": {
+                    "comparison": "GREATER_THAN_OR_EQUAL",
+                    "threshold": 2.5,
+                    "connectivity": "FACES",
+                    "min_component_voxels": 8,
+                    "selection_rule": "KEEP_ALL_COMPONENTS_MEETING_MIN_SIZE",
+                },
+            }
+        )
+        self.assertEqual(component_default.to_dict(), component_explicit.to_dict())
+        self.assertEqual(
+            list(component_default.parameters),
+            [
+                "comparison",
+                "threshold",
+                "connectivity",
+                "min_component_voxels",
+                "selection_rule",
+            ],
+        )
+
+    def test_component_mask_policy_rejects_invalid_connectivity_selection_and_size(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            resolve_mask_policy(
+                {
+                    "algorithm": CONNECTED_COMPONENT_ALGORITHM,
+                    "parameters": {
+                        "threshold": 2.5,
+                        "connectivity": "edges",
+                        "min_component_voxels": 8,
+                    },
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            resolve_mask_policy(
+                {
+                    "algorithm": CONNECTED_COMPONENT_ALGORITHM,
+                    "parameters": {
+                        "threshold": 2.5,
+                        "min_component_voxels": 8,
+                        "selection_rule": "keep_largest_component",
+                    },
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "must be >="):
+            resolve_mask_policy(
+                {
+                    "algorithm": CONNECTED_COMPONENT_ALGORITHM,
+                    "parameters": {
+                        "threshold": 2.5,
+                        "min_component_voxels": 0,
+                    },
+                }
+            )
+
     def test_profile_descriptor_canonicalises_equivalent_mask_rules(self) -> None:
         canonical_payload = build_verification_profile_descriptor("brain_t1_morphology_review")
         noncanonical_payload = json.loads(canonical_json_dumps(canonical_payload))
         del noncanonical_payload["mask_rules"]["parameters"]["opening_radius_voxels"]
         del noncanonical_payload["mask_rules"]["parameters"]["closing_radius_voxels"]
+        reloaded = verification_profile_descriptor_from_dict(noncanonical_payload)
+
+        self.assertEqual(reloaded.to_dict(), canonical_payload)
+        self.assertEqual(reloaded.profile_digest(), canonical_payload["profile_digest"])
+
+    def test_component_profile_descriptor_canonicalises_equivalent_mask_rules(self) -> None:
+        canonical_payload = build_verification_profile_descriptor("brain_t1_component_review")
+        noncanonical_payload = json.loads(canonical_json_dumps(canonical_payload))
+        del noncanonical_payload["mask_rules"]["parameters"]["connectivity"]
+        del noncanonical_payload["mask_rules"]["parameters"]["selection_rule"]
         reloaded = verification_profile_descriptor_from_dict(noncanonical_payload)
 
         self.assertEqual(reloaded.to_dict(), canonical_payload)
@@ -435,6 +540,28 @@ class MriGuardianHarnessTests(unittest.TestCase):
             result.after_state["workstation_payload"]["verified_mask_hash"],
             manifest["verified_mask_hash"],
         )
+
+    def test_component_profile_releases_and_keeps_mask_policy_nested(self) -> None:
+        _, result = self._release_demo_case(profile_name="brain_t1_component_review")
+        manifest = result.after_state["verified_manifest"]
+        mask_verification = manifest["mask_verification"]
+
+        self.assertEqual(manifest["profile_name"], "brain_t1_component_review")
+        self.assertEqual(
+            manifest["mask_derivation_policy"]["algorithm"],
+            CONNECTED_COMPONENT_ALGORITHM,
+        )
+        self.assertEqual(
+            mask_verification["policy"]["parameters"],
+            {
+                "comparison": "greater_than_or_equal",
+                "threshold": 2.5,
+                "connectivity": "faces",
+                "min_component_voxels": 8,
+                "selection_rule": "keep_all_components_meeting_min_size",
+            },
+        )
+        self.assertTrue(mask_verification["comparison"]["verified"])
 
     def test_profile_specific_authority_requirements_are_enforced(self) -> None:
         contrast_state = build_demo_case(profile_name="contrast_enhanced_review")
@@ -677,6 +804,124 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 self.assertTrue(np.array_equal(first, second))
                 self.assertTrue(np.array_equal(first, expected))
 
+    def test_component_engine_edge_cases_are_deterministic(self) -> None:
+        component_rules = {
+            "algorithm": CONNECTED_COMPONENT_ALGORITHM,
+            "parameters": {
+                "threshold": 2.5,
+                "min_component_voxels": 8,
+            },
+        }
+        all_one_expected = np.ones((3, 3, 3), dtype=np.int64)
+        exactly_min_expected = np.zeros((5, 5, 5), dtype=np.int64)
+        exactly_min_expected[1:3, 1:3, 1:3] = 1
+        two_eligible_expected = np.zeros((6, 6, 6), dtype=np.int64)
+        two_eligible_expected[0:2, 0:2, 0:2] = 1
+        two_eligible_expected[4:6, 4:6, 4:6] = 1
+        border_component_expected = np.zeros((5, 5, 5), dtype=np.int64)
+        border_component_expected[0:2, 0:2, 0:2] = 1
+        mixed_size_expected = np.zeros((6, 6, 6), dtype=np.int64)
+        mixed_size_expected[0:2, 0:2, 0:2] = 1
+        edge_touching_blocks = tuple(
+            list(
+                (2, y_index, x_index)
+                for y_index in range(1, 3)
+                for x_index in range(1, 3)
+            )
+            + list(
+                (3, y_index, x_index)
+                for y_index in range(1, 3)
+                for x_index in range(3, 5)
+            )
+        )
+        corner_touching_blocks = tuple(
+            list(
+                (2, y_index, x_index)
+                for y_index in range(1, 3)
+                for x_index in range(1, 3)
+            )
+            + list(
+                (3, y_index, x_index)
+                for y_index in range(3, 5)
+                for x_index in range(3, 5)
+            )
+        )
+        cases = (
+            ("all_zero", np.zeros((3, 3, 3), dtype=np.float64), np.zeros((3, 3, 3), dtype=np.int64)),
+            (
+                "all_one_bounded_volume",
+                np.full((3, 3, 3), 4.0, dtype=np.float64),
+                all_one_expected,
+            ),
+            (
+                "single_component_below_min_removed",
+                _reconstruction_with_hot_voxels(
+                    (5, 5, 5),
+                    (
+                        (1, 1, 1),
+                        (1, 1, 2),
+                        (1, 1, 3),
+                        (1, 2, 1),
+                        (1, 2, 2),
+                        (2, 1, 1),
+                        (2, 1, 2),
+                    ),
+                ),
+                np.zeros((5, 5, 5), dtype=np.int64),
+            ),
+            (
+                "single_component_exactly_min_survives",
+                _reconstruction_with_hot_voxels(
+                    (5, 5, 5),
+                    tuple((z, y, x) for z in range(1, 3) for y in range(1, 3) for x in range(1, 3)),
+                ),
+                exactly_min_expected,
+            ),
+            (
+                "mixed_size_components_keep_only_eligible",
+                _reconstruction_with_hot_voxels(
+                    (6, 6, 6),
+                    tuple((z, y, x) for z in range(0, 2) for y in range(0, 2) for x in range(0, 2))
+                    + ((4, 4, 4), (4, 4, 5), (4, 5, 4), (4, 5, 5)),
+                ),
+                mixed_size_expected,
+            ),
+            (
+                "two_eligible_components_both_survive",
+                _reconstruction_with_hot_voxels(
+                    (6, 6, 6),
+                    tuple((z, y, x) for z in range(0, 2) for y in range(0, 2) for x in range(0, 2))
+                    + tuple((z, y, x) for z in range(4, 6) for y in range(4, 6) for x in range(4, 6)),
+                ),
+                two_eligible_expected,
+            ),
+            (
+                "edge_touching_components_stay_separate_under_faces",
+                _reconstruction_with_hot_voxels((6, 6, 6), edge_touching_blocks),
+                np.zeros((6, 6, 6), dtype=np.int64),
+            ),
+            (
+                "corner_touching_components_stay_separate_under_faces",
+                _reconstruction_with_hot_voxels((6, 6, 6), corner_touching_blocks),
+                np.zeros((6, 6, 6), dtype=np.int64),
+            ),
+            (
+                "border_touching_component_survives",
+                _reconstruction_with_hot_voxels(
+                    (5, 5, 5),
+                    tuple((z, y, x) for z in range(0, 2) for y in range(0, 2) for x in range(0, 2)),
+                ),
+                border_component_expected,
+            ),
+        )
+
+        for label, reconstruction, expected in cases:
+            with self.subTest(case=label):
+                first = derive_verified_mask(reconstruction, component_rules).verified_mask
+                second = derive_verified_mask(reconstruction, component_rules).verified_mask
+                self.assertTrue(np.array_equal(first, second))
+                self.assertTrue(np.array_equal(first, expected))
+
     def test_cross_engine_policy_non_equivalence_blocks_threshold_mask_under_morphology(self) -> None:
         baseline_state = build_demo_case(profile_name="brain_t1_baseline")
         baseline_report = build_case_verification_report(
@@ -696,6 +941,34 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
         self.assertGreater(
             morphology_report["manifest"]["mask_verification"]["comparison"]["voxel_delta"],
+            0,
+        )
+
+    def test_cross_engine_policy_non_equivalence_blocks_threshold_mask_under_component(self) -> None:
+        component_state = build_demo_case(profile_name="brain_t1_component_review")
+        reconstruction = np.asarray(component_state["ai_reconstruction"], dtype=np.float64)
+        threshold_mask = (reconstruction >= 2.5).astype(np.int64)
+        component_state["tumor_mask"] = threshold_mask.tolist()
+        component_state["tumor_volume_mm3"] = round(
+            float(
+                threshold_mask.sum()
+                * np.prod(np.asarray(component_state["voxel_spacing_mm"], dtype=np.float64))
+            ),
+            9,
+        )
+
+        component_report = build_case_verification_report(
+            component_state,
+            profile_name="brain_t1_component_review",
+        )
+
+        self.assertFalse(component_report["release_eligible"])
+        self.assertEqual(
+            component_report["manifest"]["mask_derivation_policy"]["algorithm"],
+            CONNECTED_COMPONENT_ALGORITHM,
+        )
+        self.assertGreater(
+            component_report["manifest"]["mask_verification"]["comparison"]["voxel_delta"],
             0,
         )
 
@@ -848,6 +1121,31 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
         self.assertEqual(intensity_view["summary"]["intensity_mismatch_voxel_count"], 147)
 
+    def test_component_profile_tamper_mode_surfaces_micro_island_mismatch(self) -> None:
+        scenarios = {
+            scenario["slug"]: scenario
+            for scenario in build_tamper_scenarios(profile_name="brain_t1_component_review")
+        }
+
+        micro_island_view = build_side_by_side_view_model(
+            scenarios["component_micro_island"]["state"],
+            profile_name="brain_t1_component_review",
+        )
+        micro_island_report = build_case_verification_report(
+            scenarios["component_micro_island"]["state"],
+            profile_name="brain_t1_component_review",
+        )
+
+        self.assertEqual(
+            micro_island_view["verification"]["primary_reason_summary"],
+            "mask_voxel_mismatch (delta = 4 voxels)",
+        )
+        self.assertEqual(micro_island_view["summary"]["mask_voxel_delta"], 4)
+        self.assertEqual(
+            micro_island_report["contracts"]["mask_derivation_policy"]["algorithm"],
+            CONNECTED_COMPONENT_ALGORITHM,
+        )
+
     def test_timing_overlay_snapshot_is_positive_and_profile_scoped(self) -> None:
         profile = build_guardian_performance_profile("brain_t2_baseline")
         snapshot = build_timing_overlay_snapshot("brain_t2_baseline")
@@ -951,6 +1249,32 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(
             pacs_submission["verification_summary"]["profile_name"],
             "brain_t1_morphology_review",
+        )
+
+    def test_component_profile_bundle_and_mock_pacs_flow_replay_identically(self) -> None:
+        _, result = self._release_demo_case(profile_name="brain_t1_component_review")
+        bundle_path = self.runtime_root / f"component{MRI_GUARD_BUNDLE_EXTENSION}"
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        verification = verify_bundle(bundle_path)
+        pacs_submission = build_mock_pacs_submission(
+            result,
+            bundle_reference=bundle_path.name,
+        )
+
+        self.assertTrue(verification["verified"])
+        self.assertTrue(verification["details"]["replay_verified"])
+        self.assertEqual(
+            pacs_submission["proof_contracts"]["mask_derivation_policy"]["algorithm"],
+            CONNECTED_COMPONENT_ALGORITHM,
+        )
+        self.assertEqual(
+            pacs_submission["verification_summary"]["profile_name"],
+            "brain_t1_component_review",
         )
 
     def test_replay_uses_embedded_profile_when_runtime_default_changes(self) -> None:
@@ -1214,6 +1538,38 @@ class MriGuardianHarnessTests(unittest.TestCase):
             MORPHOLOGY_ALGORITHM,
         )
         self.assertTrue((demo_root / "tamper_fake_tumour.html").exists())
+
+    def test_run_demo_component_profile_emits_verified_artifacts(self) -> None:
+        demo_root = self.runtime_root / "component_demo"
+
+        run_demo(
+            output_dir=demo_root,
+            profile_name="brain_t1_component_review",
+            tamper_mode=True,
+        )
+        verification = run_verify_command(demo_root)
+        report = json.loads((demo_root / "verification_report.json").read_text(encoding="utf-8"))
+        tamper_block = json.loads(
+            (demo_root / "tamper_component_micro_island_pacs_block.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertTrue(verification["verified"])
+        self.assertEqual(report["profile"]["profile_name"], "brain_t1_component_review")
+        self.assertEqual(
+            report["contracts"]["mask_derivation_policy"]["algorithm"],
+            CONNECTED_COMPONENT_ALGORITHM,
+        )
+        self.assertEqual(
+            tamper_block["proof_contracts"]["verification_profile_descriptor"]["profile_name"],
+            "brain_t1_component_review",
+        )
+        self.assertEqual(
+            tamper_block["proof_contracts"]["mask_derivation_policy"]["algorithm"],
+            CONNECTED_COMPONENT_ALGORITHM,
+        )
+        self.assertTrue((demo_root / "tamper_component_micro_island.html").exists())
 
     def test_guardian_integration_narrative_is_fail_closed_and_gateway_positioned(self) -> None:
         narrative = build_guardian_integration_narrative(current_guardian_decision="blocked")

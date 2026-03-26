@@ -85,6 +85,9 @@ Defined in [`../mri_guardian/contracts.py`](../mri_guardian/contracts.py).
 - `VerificationProfileDescriptor.mask_rules` stores the canonical approved mask policy object used by the selected profile.
 - `mask_rules.algorithm` is a proof-significant stable identifier, not a display label.
 - `mask_rules.parameters` is resolved canonically before execution. Unknown or algorithm-inapplicable parameters are rejected rather than ignored.
+- The connected-component family uses an explicit proof-significant `connectivity` field, but this milestone approves only `faces`; other values are rejected during canonical resolution.
+- Morphology connectivity is encoded by the structuring element definition rather than a separate connectivity field.
+- Component labels are deterministic internal execution state and are intentionally excluded from proof artifacts.
 - Runtime metadata from mask execution, such as timing or internal operation counts, is intentionally excluded from proof artifacts.
 
 ### Mask Verification Shape

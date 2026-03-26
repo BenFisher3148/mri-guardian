@@ -67,6 +67,7 @@ Built-in profiles:
 
 - `brain_t1_baseline`
 - `brain_t1_morphology_review`
+- `brain_t1_component_review`
 - `brain_t2_baseline`
 - `contrast_enhanced_review`
 - `strict_research_mode`
@@ -109,6 +110,12 @@ Built-in approved algorithms:
 
 - `threshold_on_raw_derived_reconstruction`
 - `morphology_constrained_threshold_on_raw_derived_reconstruction`
+- `connected_component_constrained_threshold_on_raw_derived_reconstruction`
+
+For the component-constrained family, `connectivity` is an explicit proof-significant
+parameter. This milestone approves only `faces`; any other value is rejected during
+canonical resolution. Component labels remain internal deterministic execution
+state and are not part of the proof-significant output surface.
 
 ## Structure
 

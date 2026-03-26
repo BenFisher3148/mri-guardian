@@ -7,6 +7,7 @@ artifacts.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -18,9 +19,22 @@ CANONICAL_MASK_OUTPUT_SEMANTICS = "verified_mask"
 
 THRESHOLD_ALGORITHM = "threshold_on_raw_derived_reconstruction"
 MORPHOLOGY_ALGORITHM = "morphology_constrained_threshold_on_raw_derived_reconstruction"
+CONNECTED_COMPONENT_ALGORITHM = (
+    "connected_component_constrained_threshold_on_raw_derived_reconstruction"
+)
 
 _CANONICAL_COMPARISONS = ("greater_than_or_equal",)
+_CANONICAL_CONNECTIVITIES = ("faces",)
+_CANONICAL_SELECTION_RULES = ("keep_all_components_meeting_min_size",)
 _ALGORITHM_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789_")
+_FACES_NEIGHBOR_OFFSETS = (
+    (-1, 0, 0),
+    (1, 0, 0),
+    (0, -1, 0),
+    (0, 1, 0),
+    (0, 0, -1),
+    (0, 0, 1),
+)
 _REQUIRED = object()
 
 
@@ -225,6 +239,45 @@ def _morphology_execution(
     )
 
 
+def _connected_component_execution(
+    reconstruction: np.ndarray,
+    policy: ResolvedMaskPolicy,
+) -> MaskEngineExecution:
+    seed_mask = _threshold_seed_mask(reconstruction, policy.parameters)
+    labels, component_sizes = _label_connected_components(
+        seed_mask,
+        connectivity=str(policy.parameters["connectivity"]),
+    )
+    selection_rule = str(policy.parameters["selection_rule"])
+    if selection_rule != "keep_all_components_meeting_min_size":
+        raise ValueError(f"Unsupported component selection rule: {selection_rule!r}.")
+    min_component_voxels = int(policy.parameters["min_component_voxels"])
+    retained_labels = tuple(
+        label
+        for label, size in component_sizes.items()
+        if size >= min_component_voxels
+    )
+    retained_mask = np.zeros(seed_mask.shape, dtype=bool)
+    for label in retained_labels:
+        retained_mask |= labels == label
+    return MaskEngineExecution(
+        verified_mask=retained_mask.astype(np.int64),
+        policy=policy,
+        runtime_metadata=MaskEngineRuntimeMetadata(
+            operation_counts={
+                "threshold_comparison_passes": 1,
+                "component_count": len(component_sizes),
+                "retained_component_count": len(retained_labels),
+                "rejected_component_count": len(component_sizes) - len(retained_labels),
+            },
+            debug_notes=(
+                "component_labels_are_internal_execution_state_only",
+                "component_traversal_uses_queue_based_bfs",
+            ),
+        ),
+    )
+
+
 def _threshold_seed_mask(
     reconstruction: np.ndarray,
     parameters: Mapping[str, Any],
@@ -234,6 +287,52 @@ def _threshold_seed_mask(
     if comparison != "greater_than_or_equal":
         raise ValueError(f"Unsupported threshold comparison: {comparison!r}.")
     return reconstruction >= threshold
+
+
+def _label_connected_components(
+    seed_mask: np.ndarray,
+    *,
+    connectivity: str,
+) -> tuple[np.ndarray, dict[int, int]]:
+    if connectivity != "faces":
+        raise ValueError(f"Unsupported connected-component connectivity: {connectivity!r}.")
+    seed = np.asarray(seed_mask, dtype=bool)
+    labels = np.zeros(seed.shape, dtype=np.int32)
+    component_sizes: dict[int, int] = {}
+    next_label = 1
+    z_size, y_size, x_size = seed.shape
+    for z_index in range(z_size):
+        for y_index in range(y_size):
+            for x_index in range(x_size):
+                if not seed[z_index, y_index, x_index] or labels[z_index, y_index, x_index] != 0:
+                    continue
+                # Component labels are deterministic internal state only. Traversal
+                # order is fixed now so future ranking-based families cannot drift.
+                queue: deque[tuple[int, int, int]] = deque([(z_index, y_index, x_index)])
+                labels[z_index, y_index, x_index] = next_label
+                component_size = 0
+                while queue:
+                    current_z, current_y, current_x = queue.popleft()
+                    component_size += 1
+                    for delta_z, delta_y, delta_x in _FACES_NEIGHBOR_OFFSETS:
+                        neighbor_z = current_z + delta_z
+                        neighbor_y = current_y + delta_y
+                        neighbor_x = current_x + delta_x
+                        if not (
+                            0 <= neighbor_z < z_size
+                            and 0 <= neighbor_y < y_size
+                            and 0 <= neighbor_x < x_size
+                        ):
+                            continue
+                        if not seed[neighbor_z, neighbor_y, neighbor_x]:
+                            continue
+                        if labels[neighbor_z, neighbor_y, neighbor_x] != 0:
+                            continue
+                        labels[neighbor_z, neighbor_y, neighbor_x] = next_label
+                        queue.append((neighbor_z, neighbor_y, neighbor_x))
+                component_sizes[next_label] = component_size
+                next_label += 1
+    return labels, component_sizes
 
 
 def _binary_erosion(mask: np.ndarray, radius: int) -> np.ndarray:
@@ -427,6 +526,36 @@ _APPROVED_ALGORITHM_TABLE = _validate_catalogue(
                 ),
             ),
             implementation=_morphology_execution,
+        ),
+        _MaskAlgorithmSpec(
+            algorithm=CONNECTED_COMPONENT_ALGORITHM,
+            parameter_specs=(
+                ParameterSpec(
+                    name="comparison",
+                    kind="enum",
+                    default="greater_than_or_equal",
+                    allowed_values=_CANONICAL_COMPARISONS,
+                ),
+                ParameterSpec(name="threshold", kind="float"),
+                ParameterSpec(
+                    name="connectivity",
+                    kind="enum",
+                    default="faces",
+                    allowed_values=_CANONICAL_CONNECTIVITIES,
+                ),
+                ParameterSpec(
+                    name="min_component_voxels",
+                    kind="int",
+                    minimum=1,
+                ),
+                ParameterSpec(
+                    name="selection_rule",
+                    kind="enum",
+                    default="keep_all_components_meeting_min_size",
+                    allowed_values=_CANONICAL_SELECTION_RULES,
+                ),
+            ),
+            implementation=_connected_component_execution,
         ),
     )
 )

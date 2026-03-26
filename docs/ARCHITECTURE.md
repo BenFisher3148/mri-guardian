@@ -53,6 +53,7 @@ The verified-mask layer uses a fixed approved algorithm catalogue and canonical 
 - Algorithm identifiers are proof-significant names and must remain stable once published.
 - Canonical parameter resolution happens before execution, rejects unknown or algorithm-inapplicable parameters, and serializes one resolved parameter object into all proof surfaces.
 - Runtime metadata such as timing, operation counts, and debug notes is explicitly non-canonical and excluded from manifests, bundle hashes, and replay material.
+- The connected-component family uses explicit `faces` connectivity with fixed queue-based BFS traversal and a fixed face-neighbor order. Component labels are internal deterministic execution state only.
 
 ## Major Components
 

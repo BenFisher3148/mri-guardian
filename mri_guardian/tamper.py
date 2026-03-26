@@ -9,6 +9,7 @@ import numpy as np
 
 from .contracts import build_verification_profile_contract
 from .harness import _derive_verified_mask, _float_array_to_list, _round_float
+from .mask_engine import CONNECTED_COMPONENT_ALGORITHM
 from .profiles import DEFAULT_PROFILE_NAME, get_verification_profile
 
 _TAMPER_VOXEL_SPACING_MM = np.asarray([0.8, 0.8, 1.8], dtype=np.float64)
@@ -20,7 +21,7 @@ def build_tamper_mode_base_case(
 ) -> dict[str, Any]:
     """Return a larger deterministic case suitable for visual tamper demonstrations."""
     descriptor = get_verification_profile(profile_name)
-    source_reconstruction = _build_tamper_reconstruction()
+    source_reconstruction = _build_tamper_reconstruction(descriptor)
     raw_kspace = np.fft.fft2(source_reconstruction, axes=(-2, -1))
     raw_real = _float_array_to_list(raw_kspace.real)
     raw_imag = _float_array_to_list(raw_kspace.imag)
@@ -60,12 +61,16 @@ def build_tamper_scenarios(
     profile_name: str = DEFAULT_PROFILE_NAME,
 ) -> tuple[dict[str, Any], ...]:
     """Return deterministic tamper scenarios with expected top-level failure reasons."""
+    descriptor = get_verification_profile(profile_name)
     base_case = build_tamper_mode_base_case(profile_name=profile_name)
-    return (
+    scenarios: list[dict[str, Any]] = [
         _build_fake_tumour_scenario(base_case),
         _build_shifted_mask_scenario(base_case),
         _build_intensity_manipulation_scenario(base_case),
-    )
+    ]
+    if descriptor.mask_algorithm == CONNECTED_COMPONENT_ALGORITHM:
+        scenarios.append(_build_component_micro_island_scenario(base_case, descriptor))
+    return tuple(scenarios)
 
 
 def _build_fake_tumour_scenario(base_case: dict[str, Any]) -> dict[str, Any]:
@@ -126,7 +131,32 @@ def _build_intensity_manipulation_scenario(base_case: dict[str, Any]) -> dict[st
     }
 
 
-def _build_tamper_reconstruction() -> np.ndarray:
+def _build_component_micro_island_scenario(
+    base_case: dict[str, Any],
+    descriptor: Any,
+) -> dict[str, Any]:
+    state = deepcopy(base_case)
+    reconstruction = np.asarray(state["ai_reconstruction"], dtype=np.float64)
+    threshold_seed = reconstruction >= descriptor.mask_threshold
+    threshold_mask = threshold_seed.astype(np.int64)
+    verified_mask = np.asarray(base_case["tumor_mask"], dtype=np.int64)
+    state["tumor_mask"] = threshold_mask.tolist()
+    state["case_id"] = "mri-case-tamper-component-micro-island"
+    expected_delta = int(np.count_nonzero(threshold_mask != verified_mask))
+    return {
+        "slug": "component_micro_island",
+        "title": "Tamper Mode: Detached Micro-Island Restored",
+        "description": (
+            "Restore a detached threshold-positive micro-island that the connected-component "
+            "policy deterministically rejects."
+        ),
+        "state": state,
+        "expected_primary_reason": "mask_voxel_mismatch",
+        "expected_delta": expected_delta,
+    }
+
+
+def _build_tamper_reconstruction(descriptor: Any) -> np.ndarray:
     z_index, y_index, x_index = np.indices((6, 24, 24))
     reconstruction = (
         0.15 * z_index
@@ -140,4 +170,6 @@ def _build_tamper_reconstruction() -> np.ndarray:
         <= 1.0
     )
     reconstruction += tumour_body * 3.2
+    if descriptor.mask_algorithm == CONNECTED_COMPONENT_ALGORITHM:
+        reconstruction[0, 1:3, 20:22] = 3.4
     return reconstruction

@@ -23,7 +23,11 @@ from .contracts import (
     build_verification_tolerance_policy,
     build_verified_reconstruction_trace,
 )
-from .mask_engine import MORPHOLOGY_ALGORITHM, derive_verified_mask
+from .mask_engine import (
+    CONNECTED_COMPONENT_ALGORITHM,
+    MORPHOLOGY_ALGORITHM,
+    derive_verified_mask,
+)
 from .profiles import (
     DECISION_CLASS_TRIAGE_ONLY,
     DEFAULT_PROFILE_NAME,
@@ -220,6 +224,13 @@ def _build_demo_reconstruction(descriptor: Any) -> np.ndarray:
         reconstruction = np.zeros((8, 8, 8), dtype=np.float64)
         reconstruction[2:5, :, :] = 4.0
         return reconstruction
+    if descriptor.mask_algorithm == CONNECTED_COMPONENT_ALGORITHM:
+        reconstruction = np.zeros((8, 8, 8), dtype=np.float64)
+        # Use a higher deterministic signal floor here so the rounded FFT/IFFT demo
+        # path stays inside the existing global reconstruction tolerance.
+        reconstruction[2:5, 2:4, 2:4] = 40.0
+        reconstruction[5, 5:7, 5:7] = 40.0
+        return reconstruction
     return np.asarray(
         [
             [[0.0, 1.0], [0.0, 4.0]],
@@ -230,7 +241,11 @@ def _build_demo_reconstruction(descriptor: Any) -> np.ndarray:
 
 
 def _demo_sequence_id(profile_name: str) -> str:
-    if profile_name == "brain_t1_baseline":
+    if profile_name in {
+        "brain_t1_baseline",
+        "brain_t1_morphology_review",
+        "brain_t1_component_review",
+    }:
         return "t1-pre-contrast"
     if profile_name == "brain_t2_baseline":
         return "t2-weighted"

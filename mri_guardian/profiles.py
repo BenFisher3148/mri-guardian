@@ -10,6 +10,7 @@ from icsd.core.invariants import Invariant, InvariantProfile, InvariantProfileRe
 from icsd.core.serialise import canonical_json_dumps, hash_canonical_json
 
 from .mask_engine import (
+    CONNECTED_COMPONENT_ALGORITHM,
     MORPHOLOGY_ALGORITHM,
     THRESHOLD_ALGORITHM,
     resolve_mask_policy,
@@ -428,6 +429,27 @@ def _morphology_mask_rules(
         },
     }
 
+
+def _component_mask_rules(
+    *,
+    threshold: float,
+    comparison: str = "greater_than_or_equal",
+    connectivity: str = "faces",
+    min_component_voxels: int = 8,
+    selection_rule: str = "keep_all_components_meeting_min_size",
+) -> dict[str, Any]:
+    return {
+        "algorithm": CONNECTED_COMPONENT_ALGORITHM,
+        "parameters": {
+            "comparison": comparison,
+            "threshold": float(threshold),
+            "connectivity": connectivity,
+            "min_component_voxels": int(min_component_voxels),
+            "selection_rule": selection_rule,
+        },
+    }
+
+
 _COMMON_FINAL_AUTHORITIES = (
     "scanner_manifest",
     "voxel_geometry",
@@ -512,6 +534,52 @@ _PROFILES = {
         },
         representative_total_ms_budget=90.0,
         worst_case_total_ms_budget=190.0,
+        final_release_allowed=True,
+        portable_bundle_allowed=True,
+        transparency_artifact_allowed=True,
+        requires_operator_review_on_warning=True,
+        success_decision_class=DECISION_CLASS_FINAL_RELEASE,
+        **_COMMON_TOLERANCES,
+    ),
+    "brain_t1_component_review": _profile(
+        profile_name="brain_t1_component_review",
+        sequence_family="brain_t1",
+        clinical_mode="component_review_final_release",
+        purpose=(
+            "Showcase deterministic connected-component-constrained mask verification "
+            "on T1 studies."
+        ),
+        risk_posture="review",
+        operator_interpretation=(
+            "Review posture that suppresses detached threshold-positive micro-islands "
+            "through a deterministic connected-component policy family."
+        ),
+        icsd_policy_id="policy/mri-guardian/brain-t1-component-review",
+        mask_rules=_component_mask_rules(threshold=2.5, min_component_voxels=8),
+        guard_band_fraction=0.8,
+        required_authority_source_types=_COMMON_FINAL_AUTHORITIES,
+        heuristic_rules={
+            "mask_fraction_guardrail": _heuristic(
+                label="Verified occupancy fraction",
+                severity=HEURISTIC_WARNING,
+                comparison="less_than_or_equal",
+                threshold=0.35,
+            ),
+            "inside_outside_contrast": _heuristic(
+                label="Inside/outside contrast delta",
+                severity=HEURISTIC_WARNING,
+                comparison="greater_than_or_equal",
+                threshold=0.75,
+            ),
+            "slice_span": _heuristic(
+                label="Slice span",
+                severity=HEURISTIC_WARNING,
+                comparison="greater_than_or_equal",
+                threshold=2.0,
+            ),
+        },
+        representative_total_ms_budget=95.0,
+        worst_case_total_ms_budget=200.0,
         final_release_allowed=True,
         portable_bundle_allowed=True,
         transparency_artifact_allowed=True,

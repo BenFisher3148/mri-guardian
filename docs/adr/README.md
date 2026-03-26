@@ -10,6 +10,7 @@ This directory records architecture decisions that materially affect invariants,
 - [`0004-replayable-evidence-bundles.md`](0004-replayable-evidence-bundles.md)
 - [`0005-performance-bounds-and-streaming-validation.md`](0005-performance-bounds-and-streaming-validation.md)
 - [`0006-canonical-deterministic-mask-engine-catalogue.md`](0006-canonical-deterministic-mask-engine-catalogue.md)
+- [`0007-connected-component-mask-policy-family.md`](0007-connected-component-mask-policy-family.md)
 
 ## ADR Rules
 

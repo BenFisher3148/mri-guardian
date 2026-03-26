@@ -30,6 +30,7 @@ The trust boundary sits at the Guardian Layer:
 - Deterministic reconstruction from raw k-space.
 - Deterministic verified mask derivation.
 - Fixed approved mask-algorithm catalogue with canonical parameter resolution before execution.
+- Explicit connected-component policy support with proof-significant `faces` connectivity and deterministic queue-based traversal.
 - Canonical runtime profile descriptors with embedded digest identity.
 - Explicit claim-to-proof interfaces with stable hashes.
 - Fail-closed Guardian release gate for blocking proof failures.
@@ -72,7 +73,7 @@ The demo uses pseudonymised study identifiers and does not model a full hospital
 ## Known Limits
 
 - The DICOM objects are mocked and do not claim standards certification.
-- The baseline release profiles still use deterministic threshold masks; the morphology-constrained profile is a deterministic showcase rather than a production tumour segmentation model.
+- The baseline release profiles still use deterministic threshold masks; the morphology-constrained and component-constrained profiles are deterministic showcases rather than production tumour segmentation models.
 - The prototype proves integrity of the handoff path; it does not by itself prove diagnostic correctness.
 
 ## Related Material

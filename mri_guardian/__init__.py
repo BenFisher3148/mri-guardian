@@ -36,6 +36,7 @@ from .integration import (
     restore_case_state_from_dicom_input,
 )
 from .mask_engine import (
+    CONNECTED_COMPONENT_ALGORITHM,
     MORPHOLOGY_ALGORITHM,
     THRESHOLD_ALGORITHM,
     derive_verified_mask,
@@ -96,6 +97,7 @@ __all__ = [
     "restore_case_state_from_dicom_input",
     "THRESHOLD_ALGORITHM",
     "MORPHOLOGY_ALGORITHM",
+    "CONNECTED_COMPONENT_ALGORITHM",
     "resolve_mask_policy",
     "derive_verified_mask",
     "list_approved_mask_algorithms",
