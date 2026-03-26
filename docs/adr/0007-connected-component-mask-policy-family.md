@@ -21,6 +21,8 @@ assignment order, neighbor order, or traversal strategy as arbitrary.
 Introduce the approved algorithm
 `connected_component_constrained_threshold_on_raw_derived_reconstruction`.
 
+- This family extends the deterministic policy catalogue; it does not introduce
+  runtime-selectable algorithm freedom for released verification.
 - The engine first computes the canonical threshold seed mask from the `float64`
   raw-derived reconstruction.
 - The canonical schema includes a proof-significant `connectivity` field, but
