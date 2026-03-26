@@ -20,8 +20,9 @@ This document is the developer-facing operating guide for the MRI Guardian Layer
 
 The repository is now bootstrapped by:
 
-- [`../pyproject.toml`](../pyproject.toml) for package metadata
-- [`../requirements.txt`](../requirements.txt) for a pinned review environment
+- [`../pyproject.toml`](../pyproject.toml) for package metadata and dependency ranges
+- [`../requirements.txt`](../requirements.txt) for a general development environment
+- [`../requirements-review.txt`](../requirements-review.txt) for the pinned reproducible review stack
 
 Recommended first-run path:
 
@@ -30,6 +31,12 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+If you need the exact reviewed environment used by the current docs and generated demo artifacts:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-review.txt
 ```
 
 Optional local package install:
@@ -44,7 +51,7 @@ Optional local package install with the speed extra:
 .\.venv\Scripts\python.exe -m pip install -e ".[speed]"
 ```
 
-Pinned review stack:
+Pinned review stack in `requirements-review.txt`:
 
 - `dpa-icsd==1.1.0`
 - `numpy==2.4.3`

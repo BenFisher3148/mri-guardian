@@ -13,18 +13,18 @@ authors = [
 ]
 keywords = ["MRI", "verification", "ICSD", "DICOM", "PACS"]
 dependencies = [
-  "dpa-icsd==1.1.0",
-  "numpy==2.4.3",
+  "dpa-icsd[speed-numba]>=1.1,<2",
+  "numpy>=1.26,<3",
 ]
 
 [project.optional-dependencies]
 speed = [
-  "numba==0.64.0",
-  "cython==3.2.4",
+  "dpa-icsd[speed-extensions]>=1.1,<2",
+  "cython>=3,<4",
 ]
 dev = [
-  "numba==0.64.0",
-  "cython==3.2.4",
+  "dpa-icsd[speed-extensions]>=1.1,<2",
+  "cython>=3,<4",
 ]
 
 [tool.setuptools.packages.find]
