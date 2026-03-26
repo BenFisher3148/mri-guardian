@@ -46,6 +46,14 @@ Inspect the portable proof artifact:
 - `demo_artifacts/mri-case-0001.mri-guard-bundle`
 - `demo_artifacts/bundle_verification.json`
 
+Verify the archive or an extracted `bundle.json` replay package in Python:
+
+```python
+from mri_guardian import verify_bundle
+
+result = verify_bundle("demo_artifacts/mri-case-0001.mri-guard-bundle")
+```
+
 Open the visual comparison outputs:
 
 - `demo_artifacts/comparison.html`
@@ -79,11 +87,14 @@ The portable bundle pushes that one step further. Each accepted case now emits a
 - the ICSD evidence envelope
 - the released state and workstation payload
 - a deterministic verification transcript
+- the original input state plus replay context
 - the transparency-log snapshot that anchored the release
 - portable integrity signatures over the bundle members
 - top-level hashes for raw k-space, reconstruction, and mask state
 
 That means a reviewer can carry the artifact elsewhere, verify it offline, and still check that the scan remained anchored to the same measured data and release proof.
+
+The replay layer makes the bundle regulator-friendly: `verify_bundle(...)` does not just check static integrity. It replays the release from the bundled `input_state.json`, `replay.json`, and transparency-log prefix, then confirms that the regenerated released state, evidence payload, and bundle members are identical.
 
 The added viewer makes that boundary human-visible. It renders:
 

@@ -11,7 +11,7 @@ import numpy as np
 
 from mri_guardian.bundle import (
     MRI_GUARD_BUNDLE_EXTENSION,
-    verify_portable_evidence_bundle,
+    verify_bundle,
     write_portable_evidence_bundle,
 )
 from icsd.core.serialise import canonical_json_dumps
@@ -67,7 +67,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
             "passed",
         )
 
-    def test_portable_bundle_round_trips_and_verifies_offline(self) -> None:
+    def test_portable_bundle_round_trips_and_replays_identically(self) -> None:
         state = build_demo_case()
         harness = self._build_harness()
         result = harness.release_case(
@@ -83,13 +83,15 @@ class MriGuardianHarnessTests(unittest.TestCase):
             transparency_log_path=self.runtime_root / "transparency-log.jsonl",
             output_path=bundle_path,
         )
-        verification = verify_portable_evidence_bundle(bundle_path)
+        verification = verify_bundle(bundle_path)
 
         self.assertTrue(verification["verified"])
+        self.assertTrue(verification["details"]["replay_verified"])
         with ZipFile(bundle_path, mode="r") as archive:
-            manifest = self._read_bundle_json(archive, "manifest.json")
+            manifest = self._read_bundle_json(archive, "bundle.json")
             transcript = self._read_bundle_json(archive, "transcript.json")
             signatures = self._read_bundle_json(archive, "signatures.json")
+            replay = self._read_bundle_json(archive, "replay.json")
 
         self.assertEqual(manifest["verdict"], "This scan is verifiably correct.")
         self.assertEqual(
@@ -106,9 +108,38 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
         self.assertEqual(transcript["statement"], "This scan is verifiably correct.")
         self.assertEqual(
+            replay["expected_hashes"]["released_state_hash"],
+            manifest["hashes"]["released_state_hash"],
+        )
+        self.assertEqual(
             signatures["members"][0]["algorithm"],
             "sha256",
         )
+
+    def test_verify_bundle_accepts_extracted_bundle_json(self) -> None:
+        state = build_demo_case()
+        harness = self._build_harness()
+        result = harness.release_case(
+            state=state,
+            actor="guardian:test",
+            authority_sources=build_demo_authority_sources(case_id=state["case_id"]),
+            timestamp="2026-03-26T00:00:00Z",
+        )
+        bundle_path = self.runtime_root / f"{state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
+        extracted_root = self.runtime_root / "extracted_bundle"
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        with ZipFile(bundle_path, mode="r") as archive:
+            archive.extractall(extracted_root)
+
+        verification = verify_bundle(extracted_root / "bundle.json")
+
+        self.assertTrue(verification["verified"])
+        self.assertEqual(verification["details"]["source_kind"], "directory")
 
     def test_portable_bundle_detects_transcript_tampering(self) -> None:
         state = build_demo_case()
@@ -137,7 +168,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
             payload=self._json_bytes(transcript),
         )
 
-        verification = verify_portable_evidence_bundle(tampered_path)
+        verification = verify_bundle(tampered_path)
 
         self.assertFalse(verification["verified"])
         self.assertTrue(

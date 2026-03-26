@@ -9,7 +9,7 @@ from icsd.core.serialise import canonical_json_dumps
 
 from .bundle import (
     MRI_GUARD_BUNDLE_EXTENSION,
-    verify_portable_evidence_bundle,
+    verify_bundle,
     write_portable_evidence_bundle,
 )
 from .harness import (
@@ -57,7 +57,7 @@ def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
         transparency_log_path=output_path / "transparency-log.jsonl",
         output_path=bundle_path,
     )
-    bundle_verification = verify_portable_evidence_bundle(bundle_path)
+    bundle_verification = verify_bundle(bundle_path)
     if not bundle_verification["verified"]:
         msg = f"Portable bundle verification failed: {bundle_verification['failures']!r}"
         raise ValueError(msg)

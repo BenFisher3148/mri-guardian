@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import numpy as np
 
@@ -49,6 +50,7 @@ class MriGuardianHarness:
         actor: str,
         authority_sources: Iterable[AuthoritySource | Mapping[str, Any]],
         timestamp: str | None = None,
+        transition_id: str | UUID | None = None,
     ) -> TransitionResult:
         return self._transition.apply(
             state=state,
@@ -59,6 +61,7 @@ class MriGuardianHarness:
             profile=MRI_GUARDIAN_POLICY_NAME,
             policy_version=MRI_GUARDIAN_POLICY_VERSION,
             timestamp=timestamp,
+            transition_id=transition_id,
         )
 
     def verify_evidence(

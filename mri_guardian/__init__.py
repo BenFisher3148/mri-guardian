@@ -2,6 +2,7 @@
 
 from .bundle import (
     MRI_GUARD_BUNDLE_EXTENSION,
+    verify_bundle,
     verify_portable_evidence_bundle,
     write_portable_evidence_bundle,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "RELEASE_STATUS_PENDING",
     "RELEASE_STATUS_RELEASED",
     "MriGuardianHarness",
+    "verify_bundle",
     "verify_portable_evidence_bundle",
     "write_portable_evidence_bundle",
     "build_case_verification_report",
