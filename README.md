@@ -31,7 +31,7 @@ The ICSD verification layer makes the release state invariant-closed. A case is 
 - [mri_guardian/transparency.py](mri_guardian/transparency.py) implements a file-backed append-only hash chain for ICSD transparency receipts.
 - [mri_guardian/demo.py](mri_guardian/demo.py) writes a deterministic demo evidence bundle and downstream workstation payload.
 - [mri_guardian/viewer.py](mri_guardian/viewer.py) renders the side-by-side Guardian Layer review page with mismatch and rejected-region highlights.
-- [tests/test_guardian.py](tests/test_guardian.py) covers the happy path and two rejection paths.
+- [tests/test_guardian.py](tests/test_guardian.py) covers release, bundle replay, tamper rejection, mocked DICOM/PACS integration, viewer rendering, and performance-profile regressions.
 
 ## Documentation
 
