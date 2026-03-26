@@ -9,7 +9,7 @@ import numpy as np
 
 from .contracts import build_verification_profile_contract
 from .harness import _derive_verified_mask, _float_array_to_list, _round_float
-from .mask_engine import CONNECTED_COMPONENT_ALGORITHM
+from .mask_engine import CONNECTED_COMPONENT_ALGORITHM, SLICE_CONSISTENCY_ALGORITHM
 from .profiles import DEFAULT_PROFILE_NAME, get_verification_profile
 
 _TAMPER_VOXEL_SPACING_MM = np.asarray([0.8, 0.8, 1.8], dtype=np.float64)
@@ -70,6 +70,8 @@ def build_tamper_scenarios(
     ]
     if descriptor.mask_algorithm == CONNECTED_COMPONENT_ALGORITHM:
         scenarios.append(_build_component_micro_island_scenario(base_case, descriptor))
+    if descriptor.mask_algorithm == SLICE_CONSISTENCY_ALGORITHM:
+        scenarios.append(_build_slice_single_slice_island_scenario(base_case, descriptor))
     return tuple(scenarios)
 
 
@@ -156,6 +158,30 @@ def _build_component_micro_island_scenario(
     }
 
 
+def _build_slice_single_slice_island_scenario(
+    base_case: dict[str, Any],
+    descriptor: Any,
+) -> dict[str, Any]:
+    state = deepcopy(base_case)
+    reconstruction = np.asarray(state["ai_reconstruction"], dtype=np.float64)
+    threshold_mask = (reconstruction >= descriptor.mask_threshold).astype(np.int64)
+    verified_mask = np.asarray(base_case["tumor_mask"], dtype=np.int64)
+    state["tumor_mask"] = threshold_mask.tolist()
+    state["case_id"] = "mri-case-tamper-slice-single-slice-island"
+    expected_delta = int(np.count_nonzero(threshold_mask != verified_mask))
+    return {
+        "slug": "slice_single_slice_island",
+        "title": "Tamper Mode: Single-Slice Island Restored",
+        "description": (
+            "Restore a detached single-slice threshold-positive island that the "
+            "slice-consistency policy deterministically rejects."
+        ),
+        "state": state,
+        "expected_primary_reason": "mask_voxel_mismatch",
+        "expected_delta": expected_delta,
+    }
+
+
 def _build_tamper_reconstruction(descriptor: Any) -> np.ndarray:
     z_index, y_index, x_index = np.indices((6, 24, 24))
     reconstruction = (
@@ -171,5 +197,7 @@ def _build_tamper_reconstruction(descriptor: Any) -> np.ndarray:
     )
     reconstruction += tumour_body * 3.2
     if descriptor.mask_algorithm == CONNECTED_COMPONENT_ALGORITHM:
+        reconstruction[0, 1:3, 20:22] = 3.4
+    if descriptor.mask_algorithm == SLICE_CONSISTENCY_ALGORITHM:
         reconstruction[0, 1:3, 20:22] = 3.4
     return reconstruction

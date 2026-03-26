@@ -46,6 +46,7 @@ from mri_guardian.integration import (
 from mri_guardian.mask_engine import (
     CONNECTED_COMPONENT_ALGORITHM,
     MORPHOLOGY_ALGORITHM,
+    SLICE_CONSISTENCY_ALGORITHM,
     THRESHOLD_ALGORITHM,
     derive_verified_mask,
     list_approved_mask_algorithms,
@@ -97,6 +98,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 "brain_t1_baseline",
                 "brain_t1_morphology_review",
                 "brain_t1_component_review",
+                "brain_t1_slice_review",
                 "brain_t2_baseline",
                 "contrast_enhanced_review",
                 "strict_research_mode",
@@ -161,6 +163,21 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 "slice_enabled": True,
                 "representative_budget": 95.0,
                 "worst_case_budget": 200.0,
+            },
+            "brain_t1_slice_review": {
+                "algorithm": SLICE_CONSISTENCY_ALGORITHM,
+                "threshold": 2.5,
+                "authorities": (
+                    "scanner_manifest",
+                    "voxel_geometry",
+                    "model_manifest",
+                    "sequence_manifest",
+                ),
+                "mask_severity": "warning",
+                "contrast_enabled": True,
+                "slice_enabled": True,
+                "representative_budget": 100.0,
+                "worst_case_budget": 210.0,
             },
             "brain_t2_baseline": {
                 "algorithm": THRESHOLD_ALGORITHM,
@@ -255,13 +272,14 @@ class MriGuardianHarnessTests(unittest.TestCase):
                     spec["worst_case_budget"],
                 )
 
-    def test_approved_mask_algorithm_catalogue_lists_component_engine(self) -> None:
+    def test_approved_mask_algorithm_catalogue_lists_all_approved_engines(self) -> None:
         self.assertEqual(
             list_approved_mask_algorithms(),
             (
                 THRESHOLD_ALGORITHM,
                 MORPHOLOGY_ALGORITHM,
                 CONNECTED_COMPONENT_ALGORITHM,
+                SLICE_CONSISTENCY_ALGORITHM,
             ),
         )
 
@@ -400,6 +418,44 @@ class MriGuardianHarnessTests(unittest.TestCase):
             ],
         )
 
+        slice_default = resolve_mask_policy(
+            {
+                "algorithm": SLICE_CONSISTENCY_ALGORITHM,
+                "parameters": {
+                    "threshold": 2.5,
+                    "min_consecutive_slices": 2,
+                },
+            }
+        )
+        slice_explicit = resolve_mask_policy(
+            {
+                "algorithm": SLICE_CONSISTENCY_ALGORITHM,
+                "parameters": {
+                    "comparison": "GREATER_THAN_OR_EQUAL",
+                    "threshold": 2.5,
+                    "consistency_unit": "IN_SLICE_COMPONENT",
+                    "in_slice_connectivity": "FACES_2D",
+                    "min_consecutive_slices": 2,
+                    "overlap_rule": "ANY_OVERLAP",
+                },
+            }
+        )
+        self.assertEqual(slice_default.to_dict(), slice_explicit.to_dict())
+        self.assertEqual(
+            list(slice_default.parameters),
+            [
+                "comparison",
+                "threshold",
+                "consistency_unit",
+                "in_slice_connectivity",
+                "min_consecutive_slices",
+                "overlap_rule",
+            ],
+        )
+        slice_one = build_verification_profile_descriptor("brain_t1_slice_review")
+        slice_two = build_verification_profile_descriptor("brain_t1_slice_review")
+        self.assertEqual(slice_one["profile_digest"], slice_two["profile_digest"])
+
     def test_component_mask_policy_rejects_invalid_connectivity_selection_and_size(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be one of"):
             resolve_mask_policy(
@@ -434,11 +490,67 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 }
             )
 
+    def test_slice_mask_policy_rejects_invalid_unit_connectivity_overlap_and_run_length(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            resolve_mask_policy(
+                {
+                    "algorithm": SLICE_CONSISTENCY_ALGORITHM,
+                    "parameters": {
+                        "threshold": 2.5,
+                        "consistency_unit": "voxel",
+                        "min_consecutive_slices": 2,
+                    },
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            resolve_mask_policy(
+                {
+                    "algorithm": SLICE_CONSISTENCY_ALGORITHM,
+                    "parameters": {
+                        "threshold": 2.5,
+                        "min_consecutive_slices": 2,
+                        "in_slice_connectivity": "edges_2d",
+                    },
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            resolve_mask_policy(
+                {
+                    "algorithm": SLICE_CONSISTENCY_ALGORITHM,
+                    "parameters": {
+                        "threshold": 2.5,
+                        "min_consecutive_slices": 2,
+                        "overlap_rule": "min_overlap_fraction",
+                    },
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "must be >="):
+            resolve_mask_policy(
+                {
+                    "algorithm": SLICE_CONSISTENCY_ALGORITHM,
+                    "parameters": {
+                        "threshold": 2.5,
+                        "min_consecutive_slices": 1,
+                    },
+                }
+            )
+
     def test_profile_descriptor_canonicalises_equivalent_mask_rules(self) -> None:
         canonical_payload = build_verification_profile_descriptor("brain_t1_morphology_review")
         noncanonical_payload = json.loads(canonical_json_dumps(canonical_payload))
         del noncanonical_payload["mask_rules"]["parameters"]["opening_radius_voxels"]
         del noncanonical_payload["mask_rules"]["parameters"]["closing_radius_voxels"]
+        reloaded = verification_profile_descriptor_from_dict(noncanonical_payload)
+
+        self.assertEqual(reloaded.to_dict(), canonical_payload)
+        self.assertEqual(reloaded.profile_digest(), canonical_payload["profile_digest"])
+
+    def test_slice_profile_descriptor_canonicalises_equivalent_mask_rules(self) -> None:
+        canonical_payload = build_verification_profile_descriptor("brain_t1_slice_review")
+        noncanonical_payload = json.loads(canonical_json_dumps(canonical_payload))
+        del noncanonical_payload["mask_rules"]["parameters"]["consistency_unit"]
+        del noncanonical_payload["mask_rules"]["parameters"]["in_slice_connectivity"]
+        del noncanonical_payload["mask_rules"]["parameters"]["overlap_rule"]
         reloaded = verification_profile_descriptor_from_dict(noncanonical_payload)
 
         self.assertEqual(reloaded.to_dict(), canonical_payload)
@@ -559,6 +671,29 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 "connectivity": "faces",
                 "min_component_voxels": 8,
                 "selection_rule": "keep_all_components_meeting_min_size",
+            },
+        )
+        self.assertTrue(mask_verification["comparison"]["verified"])
+
+    def test_slice_profile_releases_and_keeps_mask_policy_nested(self) -> None:
+        _, result = self._release_demo_case(profile_name="brain_t1_slice_review")
+        manifest = result.after_state["verified_manifest"]
+        mask_verification = manifest["mask_verification"]
+
+        self.assertEqual(manifest["profile_name"], "brain_t1_slice_review")
+        self.assertEqual(
+            manifest["mask_derivation_policy"]["algorithm"],
+            SLICE_CONSISTENCY_ALGORITHM,
+        )
+        self.assertEqual(
+            mask_verification["policy"]["parameters"],
+            {
+                "comparison": "greater_than_or_equal",
+                "threshold": 2.5,
+                "consistency_unit": "in_slice_component",
+                "in_slice_connectivity": "faces_2d",
+                "min_consecutive_slices": 2,
+                "overlap_rule": "any_overlap",
             },
         )
         self.assertTrue(mask_verification["comparison"]["verified"])
@@ -922,6 +1057,154 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 self.assertTrue(np.array_equal(first, second))
                 self.assertTrue(np.array_equal(first, expected))
 
+    def test_slice_engine_edge_cases_are_deterministic(self) -> None:
+        slice_rules = {
+            "algorithm": SLICE_CONSISTENCY_ALGORITHM,
+            "parameters": {
+                "threshold": 2.5,
+                "min_consecutive_slices": 2,
+            },
+        }
+        all_one_expected = np.ones((3, 3, 3), dtype=np.int64)
+        overlapping_pair_expected = np.zeros((2, 4, 4), dtype=np.int64)
+        overlapping_pair_expected[:, 1:3, 1:3] = 1
+        border_pair_expected = np.zeros((2, 4, 4), dtype=np.int64)
+        border_pair_expected[:, 0:2, 0:2] = 1
+        corner_touching_same_slice = (
+            (1, 1, 1),
+            (1, 1, 2),
+            (1, 2, 1),
+            (1, 2, 2),
+            (1, 3, 3),
+            (1, 3, 4),
+            (1, 4, 3),
+            (1, 4, 4),
+        )
+        cases = (
+            ("all_zero", np.zeros((3, 3, 3), dtype=np.float64), np.zeros((3, 3, 3), dtype=np.int64)),
+            (
+                "all_one_multi_slice_volume_survives",
+                np.full((3, 3, 3), 4.0, dtype=np.float64),
+                all_one_expected,
+            ),
+            (
+                "single_slice_component_removed",
+                _reconstruction_with_hot_voxels(
+                    (3, 4, 4),
+                    tuple((1, y_index, x_index) for y_index in range(1, 3) for x_index in range(1, 3)),
+                ),
+                np.zeros((3, 4, 4), dtype=np.int64),
+            ),
+            (
+                "exactly_two_overlapping_consecutive_slices_survive",
+                _reconstruction_with_hot_voxels(
+                    (2, 4, 4),
+                    tuple((z_index, y_index, x_index) for z_index in range(2) for y_index in range(1, 3) for x_index in range(1, 3)),
+                ),
+                overlapping_pair_expected,
+            ),
+            (
+                "two_adjacent_slices_with_no_overlap_are_removed",
+                _reconstruction_with_hot_voxels(
+                    (2, 5, 5),
+                    tuple((0, y_index, x_index) for y_index in range(0, 2) for x_index in range(0, 2))
+                    + tuple((1, y_index, x_index) for y_index in range(3, 5) for x_index in range(3, 5)),
+                ),
+                np.zeros((2, 5, 5), dtype=np.int64),
+            ),
+            (
+                "run_with_one_slice_gap_does_not_survive",
+                _reconstruction_with_hot_voxels(
+                    (3, 4, 4),
+                    tuple((z_index, y_index, x_index) for z_index in (0, 2) for y_index in range(1, 3) for x_index in range(1, 3)),
+                ),
+                np.zeros((3, 4, 4), dtype=np.int64),
+            ),
+            (
+                "corner_touching_regions_stay_separate_under_faces_2d",
+                _reconstruction_with_hot_voxels((3, 6, 6), corner_touching_same_slice),
+                np.zeros((3, 6, 6), dtype=np.int64),
+            ),
+            (
+                "border_touching_component_survives_with_adjacent_support",
+                _reconstruction_with_hot_voxels(
+                    (2, 4, 4),
+                    tuple((z_index, y_index, x_index) for z_index in range(2) for y_index in range(0, 2) for x_index in range(0, 2)),
+                ),
+                border_pair_expected,
+            ),
+        )
+
+        for label, reconstruction, expected in cases:
+            with self.subTest(case=label):
+                first_execution = derive_verified_mask(reconstruction, slice_rules)
+                second_execution = derive_verified_mask(reconstruction, slice_rules)
+                self.assertTrue(np.array_equal(first_execution.verified_mask, second_execution.verified_mask))
+                self.assertTrue(np.array_equal(first_execution.verified_mask, expected))
+                self.assertIn(
+                    "slice_component_survival_is_defined_by_qualifying_run_membership_not_label_rank",
+                    first_execution.runtime_metadata.debug_notes,
+                )
+
+    def test_slice_engine_three_slice_chain_with_middle_branch_retains_all_components_on_qualifying_paths(self) -> None:
+        slice_rules = {
+            "algorithm": SLICE_CONSISTENCY_ALGORITHM,
+            "parameters": {
+                "threshold": 2.5,
+                "min_consecutive_slices": 3,
+            },
+        }
+        hot_voxels = (
+            (0, 2, 1),
+            (0, 2, 2),
+            (0, 2, 3),
+            (1, 2, 1),
+            (1, 2, 3),
+            (2, 2, 1),
+            (2, 2, 2),
+            (2, 2, 3),
+        )
+        expected = np.zeros((3, 5, 5), dtype=np.int64)
+        expected[0, 2, 1:4] = 1
+        expected[1, 2, 1] = 1
+        expected[1, 2, 3] = 1
+        expected[2, 2, 1:4] = 1
+
+        verified = derive_verified_mask(
+            _reconstruction_with_hot_voxels((3, 5, 5), hot_voxels),
+            slice_rules,
+        ).verified_mask
+
+        self.assertTrue(np.array_equal(verified, expected))
+
+    def test_slice_engine_only_retains_components_on_qualifying_paths(self) -> None:
+        slice_rules = {
+            "algorithm": SLICE_CONSISTENCY_ALGORITHM,
+            "parameters": {
+                "threshold": 2.5,
+                "min_consecutive_slices": 3,
+            },
+        }
+        hot_voxels = (
+            (0, 2, 1),
+            (0, 2, 2),
+            (0, 2, 3),
+            (1, 2, 1),
+            (1, 2, 3),
+            (2, 2, 1),
+        )
+        expected = np.zeros((3, 5, 5), dtype=np.int64)
+        expected[0, 2, 1:4] = 1
+        expected[1, 2, 1] = 1
+        expected[2, 2, 1] = 1
+
+        verified = derive_verified_mask(
+            _reconstruction_with_hot_voxels((3, 5, 5), hot_voxels),
+            slice_rules,
+        ).verified_mask
+
+        self.assertTrue(np.array_equal(verified, expected))
+
     def test_cross_engine_policy_non_equivalence_blocks_threshold_mask_under_morphology(self) -> None:
         baseline_state = build_demo_case(profile_name="brain_t1_baseline")
         baseline_report = build_case_verification_report(
@@ -969,6 +1252,34 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
         self.assertGreater(
             component_report["manifest"]["mask_verification"]["comparison"]["voxel_delta"],
+            0,
+        )
+
+    def test_cross_engine_policy_non_equivalence_blocks_threshold_mask_under_slice_consistency(self) -> None:
+        slice_state = build_demo_case(profile_name="brain_t1_slice_review")
+        reconstruction = np.asarray(slice_state["ai_reconstruction"], dtype=np.float64)
+        threshold_mask = (reconstruction >= 2.5).astype(np.int64)
+        slice_state["tumor_mask"] = threshold_mask.tolist()
+        slice_state["tumor_volume_mm3"] = round(
+            float(
+                threshold_mask.sum()
+                * np.prod(np.asarray(slice_state["voxel_spacing_mm"], dtype=np.float64))
+            ),
+            9,
+        )
+
+        slice_report = build_case_verification_report(
+            slice_state,
+            profile_name="brain_t1_slice_review",
+        )
+
+        self.assertFalse(slice_report["release_eligible"])
+        self.assertEqual(
+            slice_report["manifest"]["mask_derivation_policy"]["algorithm"],
+            SLICE_CONSISTENCY_ALGORITHM,
+        )
+        self.assertGreater(
+            slice_report["manifest"]["mask_verification"]["comparison"]["voxel_delta"],
             0,
         )
 
@@ -1146,6 +1457,31 @@ class MriGuardianHarnessTests(unittest.TestCase):
             CONNECTED_COMPONENT_ALGORITHM,
         )
 
+    def test_slice_profile_tamper_mode_surfaces_single_slice_island_mismatch(self) -> None:
+        scenarios = {
+            scenario["slug"]: scenario
+            for scenario in build_tamper_scenarios(profile_name="brain_t1_slice_review")
+        }
+
+        single_slice_view = build_side_by_side_view_model(
+            scenarios["slice_single_slice_island"]["state"],
+            profile_name="brain_t1_slice_review",
+        )
+        single_slice_report = build_case_verification_report(
+            scenarios["slice_single_slice_island"]["state"],
+            profile_name="brain_t1_slice_review",
+        )
+
+        self.assertEqual(
+            single_slice_view["verification"]["primary_reason_summary"],
+            "mask_voxel_mismatch (delta = 4 voxels)",
+        )
+        self.assertEqual(single_slice_view["summary"]["mask_voxel_delta"], 4)
+        self.assertEqual(
+            single_slice_report["contracts"]["mask_derivation_policy"]["algorithm"],
+            SLICE_CONSISTENCY_ALGORITHM,
+        )
+
     def test_timing_overlay_snapshot_is_positive_and_profile_scoped(self) -> None:
         profile = build_guardian_performance_profile("brain_t2_baseline")
         snapshot = build_timing_overlay_snapshot("brain_t2_baseline")
@@ -1275,6 +1611,32 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(
             pacs_submission["verification_summary"]["profile_name"],
             "brain_t1_component_review",
+        )
+
+    def test_slice_profile_bundle_and_mock_pacs_flow_replay_identically(self) -> None:
+        _, result = self._release_demo_case(profile_name="brain_t1_slice_review")
+        bundle_path = self.runtime_root / f"slice{MRI_GUARD_BUNDLE_EXTENSION}"
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        verification = verify_bundle(bundle_path)
+        pacs_submission = build_mock_pacs_submission(
+            result,
+            bundle_reference=bundle_path.name,
+        )
+
+        self.assertTrue(verification["verified"])
+        self.assertTrue(verification["details"]["replay_verified"])
+        self.assertEqual(
+            pacs_submission["proof_contracts"]["mask_derivation_policy"]["algorithm"],
+            SLICE_CONSISTENCY_ALGORITHM,
+        )
+        self.assertEqual(
+            pacs_submission["verification_summary"]["profile_name"],
+            "brain_t1_slice_review",
         )
 
     def test_replay_uses_embedded_profile_when_runtime_default_changes(self) -> None:
@@ -1570,6 +1932,38 @@ class MriGuardianHarnessTests(unittest.TestCase):
             CONNECTED_COMPONENT_ALGORITHM,
         )
         self.assertTrue((demo_root / "tamper_component_micro_island.html").exists())
+
+    def test_run_demo_slice_profile_emits_verified_artifacts(self) -> None:
+        demo_root = self.runtime_root / "slice_demo"
+
+        run_demo(
+            output_dir=demo_root,
+            profile_name="brain_t1_slice_review",
+            tamper_mode=True,
+        )
+        verification = run_verify_command(demo_root)
+        report = json.loads((demo_root / "verification_report.json").read_text(encoding="utf-8"))
+        tamper_block = json.loads(
+            (demo_root / "tamper_slice_single_slice_island_pacs_block.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertTrue(verification["verified"])
+        self.assertEqual(report["profile"]["profile_name"], "brain_t1_slice_review")
+        self.assertEqual(
+            report["contracts"]["mask_derivation_policy"]["algorithm"],
+            SLICE_CONSISTENCY_ALGORITHM,
+        )
+        self.assertEqual(
+            tamper_block["proof_contracts"]["verification_profile_descriptor"]["profile_name"],
+            "brain_t1_slice_review",
+        )
+        self.assertEqual(
+            tamper_block["proof_contracts"]["mask_derivation_policy"]["algorithm"],
+            SLICE_CONSISTENCY_ALGORITHM,
+        )
+        self.assertTrue((demo_root / "tamper_slice_single_slice_island.html").exists())
 
     def test_guardian_integration_narrative_is_fail_closed_and_gateway_positioned(self) -> None:
         narrative = build_guardian_integration_narrative(current_guardian_decision="blocked")

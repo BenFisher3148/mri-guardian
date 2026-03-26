@@ -54,6 +54,8 @@ The verified-mask layer uses a fixed approved algorithm catalogue and canonical 
 - Canonical parameter resolution happens before execution, rejects unknown or algorithm-inapplicable parameters, and serializes one resolved parameter object into all proof surfaces.
 - Runtime metadata such as timing, operation counts, and debug notes is explicitly non-canonical and excluded from manifests, bundle hashes, and replay material.
 - The connected-component family uses explicit `faces` connectivity with fixed queue-based BFS traversal and a fixed face-neighbor order. Component labels are internal deterministic execution state only.
+- The slice-consistency family uses deterministic 2D in-slice components, fixed queue-based BFS traversal with fixed face-neighbor order, and an undirected layered overlap graph whose edges only cross adjacent slices `z` and `z+1`.
+- Slice-consistency overlap is defined by non-empty intersection of adjacent components' `(y, x)` footprint sets. Whole-component retention is intentional: survival is governed by qualifying-run membership, not by a shared-overlap core.
 
 ## Major Components
 

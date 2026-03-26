@@ -38,6 +38,7 @@ from .integration import (
 from .mask_engine import (
     CONNECTED_COMPONENT_ALGORITHM,
     MORPHOLOGY_ALGORITHM,
+    SLICE_CONSISTENCY_ALGORITHM,
     THRESHOLD_ALGORITHM,
     derive_verified_mask,
     list_approved_mask_algorithms,
@@ -98,6 +99,7 @@ __all__ = [
     "THRESHOLD_ALGORITHM",
     "MORPHOLOGY_ALGORITHM",
     "CONNECTED_COMPONENT_ALGORITHM",
+    "SLICE_CONSISTENCY_ALGORITHM",
     "resolve_mask_policy",
     "derive_verified_mask",
     "list_approved_mask_algorithms",

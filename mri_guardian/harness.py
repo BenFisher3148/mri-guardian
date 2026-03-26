@@ -26,6 +26,7 @@ from .contracts import (
 from .mask_engine import (
     CONNECTED_COMPONENT_ALGORITHM,
     MORPHOLOGY_ALGORITHM,
+    SLICE_CONSISTENCY_ALGORITHM,
     derive_verified_mask,
 )
 from .profiles import (
@@ -231,6 +232,14 @@ def _build_demo_reconstruction(descriptor: Any) -> np.ndarray:
         reconstruction[2:5, 2:4, 2:4] = 40.0
         reconstruction[5, 5:7, 5:7] = 40.0
         return reconstruction
+    if descriptor.mask_algorithm == SLICE_CONSISTENCY_ALGORITHM:
+        reconstruction = np.zeros((8, 8, 8), dtype=np.float64)
+        # Keep one lesion footprint on consecutive slices so the slice-consistency
+        # policy has an accepted run, plus one detached single-slice island that
+        # the policy rejects while the threshold seed would keep.
+        reconstruction[2:4, 2:4, 2:4] = 40.0
+        reconstruction[6, 5:7, 5:7] = 40.0
+        return reconstruction
     return np.asarray(
         [
             [[0.0, 1.0], [0.0, 4.0]],
@@ -245,6 +254,7 @@ def _demo_sequence_id(profile_name: str) -> str:
         "brain_t1_baseline",
         "brain_t1_morphology_review",
         "brain_t1_component_review",
+        "brain_t1_slice_review",
     }:
         return "t1-pre-contrast"
     if profile_name == "brain_t2_baseline":

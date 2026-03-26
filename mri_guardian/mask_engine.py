@@ -22,10 +22,16 @@ MORPHOLOGY_ALGORITHM = "morphology_constrained_threshold_on_raw_derived_reconstr
 CONNECTED_COMPONENT_ALGORITHM = (
     "connected_component_constrained_threshold_on_raw_derived_reconstruction"
 )
+SLICE_CONSISTENCY_ALGORITHM = (
+    "slice_consistency_constrained_threshold_on_raw_derived_reconstruction"
+)
 
 _CANONICAL_COMPARISONS = ("greater_than_or_equal",)
 _CANONICAL_CONNECTIVITIES = ("faces",)
 _CANONICAL_SELECTION_RULES = ("keep_all_components_meeting_min_size",)
+_CANONICAL_CONSISTENCY_UNITS = ("in_slice_component",)
+_CANONICAL_IN_SLICE_CONNECTIVITIES = ("faces_2d",)
+_CANONICAL_OVERLAP_RULES = ("any_overlap",)
 _ALGORITHM_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789_")
 _FACES_NEIGHBOR_OFFSETS = (
     (-1, 0, 0),
@@ -34,6 +40,12 @@ _FACES_NEIGHBOR_OFFSETS = (
     (0, 1, 0),
     (0, 0, -1),
     (0, 0, 1),
+)
+_FACES_2D_NEIGHBOR_OFFSETS = (
+    (-1, 0),
+    (1, 0),
+    (0, -1),
+    (0, 1),
 )
 _REQUIRED = object()
 
@@ -91,6 +103,13 @@ class _MaskAlgorithmSpec:
     algorithm: str
     parameter_specs: tuple[ParameterSpec, ...]
     implementation: Callable[[np.ndarray, ResolvedMaskPolicy], MaskEngineExecution]
+
+
+@dataclass(frozen=True)
+class _SliceComponentNode:
+    node_id: int
+    slice_index: int
+    footprint: frozenset[tuple[int, int]]
 
 
 def list_approved_mask_algorithms() -> tuple[str, ...]:
@@ -278,6 +297,67 @@ def _connected_component_execution(
     )
 
 
+def _slice_consistency_execution(
+    reconstruction: np.ndarray,
+    policy: ResolvedMaskPolicy,
+) -> MaskEngineExecution:
+    seed_mask = _threshold_seed_mask(reconstruction, policy.parameters)
+    consistency_unit = str(policy.parameters["consistency_unit"])
+    if consistency_unit != "in_slice_component":
+        raise ValueError(f"Unsupported slice consistency unit: {consistency_unit!r}.")
+    nodes_by_slice = _label_in_slice_components(
+        seed_mask,
+        connectivity=str(policy.parameters["in_slice_connectivity"]),
+    )
+    overlap_rule = str(policy.parameters["overlap_rule"])
+    if overlap_rule != "any_overlap":
+        raise ValueError(f"Unsupported slice overlap rule: {overlap_rule!r}.")
+    adjacency = _build_slice_overlap_graph(nodes_by_slice, overlap_rule=overlap_rule)
+    max_run_ending_at = _build_forward_run_lengths(nodes_by_slice, adjacency)
+    max_run_starting_at = _build_reverse_run_lengths(nodes_by_slice, adjacency)
+    min_consecutive_slices = int(policy.parameters["min_consecutive_slices"])
+    retained_node_ids = {
+        node.node_id
+        for slice_nodes in nodes_by_slice
+        for node in slice_nodes
+        if (
+            max_run_ending_at[node.node_id]
+            + max_run_starting_at[node.node_id]
+            - 1
+            >= min_consecutive_slices
+        )
+    }
+    retained_mask = np.zeros(seed_mask.shape, dtype=bool)
+    for slice_nodes in nodes_by_slice:
+        for node in slice_nodes:
+            if node.node_id not in retained_node_ids:
+                continue
+            for y_index, x_index in sorted(node.footprint):
+                retained_mask[node.slice_index, y_index, x_index] = True
+    slice_component_count = sum(len(slice_nodes) for slice_nodes in nodes_by_slice)
+    retained_component_count = len(retained_node_ids)
+    return MaskEngineExecution(
+        verified_mask=retained_mask.astype(np.int64),
+        policy=policy,
+        runtime_metadata=MaskEngineRuntimeMetadata(
+            operation_counts={
+                "threshold_comparison_passes": 1,
+                "slice_component_count": slice_component_count,
+                "retained_component_count": retained_component_count,
+                "rejected_component_count": slice_component_count - retained_component_count,
+                "overlap_edge_count": sum(len(neighbors) for neighbors in adjacency.values()) // 2,
+            },
+            debug_notes=(
+                "slice_component_labels_are_internal_execution_state_only",
+                "overlap_graph_node_ids_are_internal_execution_state_only",
+                "qualifying_run_ids_are_internal_execution_state_only",
+                "slice_component_traversal_uses_queue_based_bfs",
+                "slice_component_survival_is_defined_by_qualifying_run_membership_not_label_rank",
+            ),
+        ),
+    )
+
+
 def _threshold_seed_mask(
     reconstruction: np.ndarray,
     parameters: Mapping[str, Any],
@@ -333,6 +413,129 @@ def _label_connected_components(
                 component_sizes[next_label] = component_size
                 next_label += 1
     return labels, component_sizes
+
+
+def _label_in_slice_components(
+    seed_mask: np.ndarray,
+    *,
+    connectivity: str,
+) -> tuple[tuple[_SliceComponentNode, ...], ...]:
+    if connectivity != "faces_2d":
+        raise ValueError(f"Unsupported in-slice connectivity: {connectivity!r}.")
+    seed = np.asarray(seed_mask, dtype=bool)
+    z_size, y_size, x_size = seed.shape
+    next_node_id = 1
+    nodes_by_slice: list[tuple[_SliceComponentNode, ...]] = []
+    for z_index in range(z_size):
+        slice_seed = seed[z_index]
+        slice_labels = np.zeros(slice_seed.shape, dtype=np.int32)
+        slice_nodes: list[_SliceComponentNode] = []
+        for y_index in range(y_size):
+            for x_index in range(x_size):
+                if not slice_seed[y_index, x_index] or slice_labels[y_index, x_index] != 0:
+                    continue
+                # Traversal order is fixed for deterministic labelling and
+                # reproducibility only; retention is governed by qualifying-run
+                # membership rather than label rank.
+                queue: deque[tuple[int, int]] = deque([(y_index, x_index)])
+                slice_labels[y_index, x_index] = next_node_id
+                footprint: list[tuple[int, int]] = []
+                while queue:
+                    current_y, current_x = queue.popleft()
+                    footprint.append((current_y, current_x))
+                    for delta_y, delta_x in _FACES_2D_NEIGHBOR_OFFSETS:
+                        neighbor_y = current_y + delta_y
+                        neighbor_x = current_x + delta_x
+                        if not (0 <= neighbor_y < y_size and 0 <= neighbor_x < x_size):
+                            continue
+                        if not slice_seed[neighbor_y, neighbor_x]:
+                            continue
+                        if slice_labels[neighbor_y, neighbor_x] != 0:
+                            continue
+                        slice_labels[neighbor_y, neighbor_x] = next_node_id
+                        queue.append((neighbor_y, neighbor_x))
+                slice_nodes.append(
+                    _SliceComponentNode(
+                        node_id=next_node_id,
+                        slice_index=z_index,
+                        footprint=frozenset(footprint),
+                    )
+                )
+                next_node_id += 1
+        nodes_by_slice.append(tuple(slice_nodes))
+    return tuple(nodes_by_slice)
+
+
+def _build_slice_overlap_graph(
+    nodes_by_slice: tuple[tuple[_SliceComponentNode, ...], ...],
+    *,
+    overlap_rule: str,
+) -> dict[int, set[int]]:
+    if overlap_rule != "any_overlap":
+        raise ValueError(f"Unsupported slice overlap rule: {overlap_rule!r}.")
+    adjacency = {
+        node.node_id: set()
+        for slice_nodes in nodes_by_slice
+        for node in slice_nodes
+    }
+    for z_index in range(len(nodes_by_slice) - 1):
+        current_nodes = nodes_by_slice[z_index]
+        next_nodes = nodes_by_slice[z_index + 1]
+        for current_node in current_nodes:
+            for next_node in next_nodes:
+                if current_node.footprint.isdisjoint(next_node.footprint):
+                    continue
+                adjacency[current_node.node_id].add(next_node.node_id)
+                adjacency[next_node.node_id].add(current_node.node_id)
+    return adjacency
+
+
+def _build_forward_run_lengths(
+    nodes_by_slice: tuple[tuple[_SliceComponentNode, ...], ...],
+    adjacency: Mapping[int, set[int]],
+) -> dict[int, int]:
+    node_to_slice = _build_node_to_slice_index(nodes_by_slice)
+    max_run_ending_at: dict[int, int] = {}
+    for z_index, slice_nodes in enumerate(nodes_by_slice):
+        for node in slice_nodes:
+            predecessor_lengths = [
+                max_run_ending_at[neighbor_id]
+                for neighbor_id in adjacency[node.node_id]
+                if node_to_slice[neighbor_id] == z_index - 1
+            ]
+            max_run_ending_at[node.node_id] = (
+                1 + max(predecessor_lengths) if predecessor_lengths else 1
+            )
+    return max_run_ending_at
+
+
+def _build_reverse_run_lengths(
+    nodes_by_slice: tuple[tuple[_SliceComponentNode, ...], ...],
+    adjacency: Mapping[int, set[int]],
+) -> dict[int, int]:
+    node_to_slice = _build_node_to_slice_index(nodes_by_slice)
+    max_run_starting_at: dict[int, int] = {}
+    for z_index in range(len(nodes_by_slice) - 1, -1, -1):
+        for node in nodes_by_slice[z_index]:
+            successor_lengths = [
+                max_run_starting_at[neighbor_id]
+                for neighbor_id in adjacency[node.node_id]
+                if node_to_slice[neighbor_id] == z_index + 1
+            ]
+            max_run_starting_at[node.node_id] = (
+                1 + max(successor_lengths) if successor_lengths else 1
+            )
+    return max_run_starting_at
+
+
+def _build_node_to_slice_index(
+    nodes_by_slice: tuple[tuple[_SliceComponentNode, ...], ...],
+) -> dict[int, int]:
+    return {
+        node.node_id: node.slice_index
+        for slice_nodes in nodes_by_slice
+        for node in slice_nodes
+    }
 
 
 def _binary_erosion(mask: np.ndarray, radius: int) -> np.ndarray:
@@ -556,6 +759,42 @@ _APPROVED_ALGORITHM_TABLE = _validate_catalogue(
                 ),
             ),
             implementation=_connected_component_execution,
+        ),
+        _MaskAlgorithmSpec(
+            algorithm=SLICE_CONSISTENCY_ALGORITHM,
+            parameter_specs=(
+                ParameterSpec(
+                    name="comparison",
+                    kind="enum",
+                    default="greater_than_or_equal",
+                    allowed_values=_CANONICAL_COMPARISONS,
+                ),
+                ParameterSpec(name="threshold", kind="float"),
+                ParameterSpec(
+                    name="consistency_unit",
+                    kind="enum",
+                    default="in_slice_component",
+                    allowed_values=_CANONICAL_CONSISTENCY_UNITS,
+                ),
+                ParameterSpec(
+                    name="in_slice_connectivity",
+                    kind="enum",
+                    default="faces_2d",
+                    allowed_values=_CANONICAL_IN_SLICE_CONNECTIVITIES,
+                ),
+                ParameterSpec(
+                    name="min_consecutive_slices",
+                    kind="int",
+                    minimum=2,
+                ),
+                ParameterSpec(
+                    name="overlap_rule",
+                    kind="enum",
+                    default="any_overlap",
+                    allowed_values=_CANONICAL_OVERLAP_RULES,
+                ),
+            ),
+            implementation=_slice_consistency_execution,
         ),
     )
 )

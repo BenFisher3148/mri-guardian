@@ -86,8 +86,11 @@ Defined in [`../mri_guardian/contracts.py`](../mri_guardian/contracts.py).
 - `mask_rules.algorithm` is a proof-significant stable identifier, not a display label.
 - `mask_rules.parameters` is resolved canonically before execution. Unknown or algorithm-inapplicable parameters are rejected rather than ignored.
 - The connected-component family uses an explicit proof-significant `connectivity` field, but this milestone approves only `faces`; other values are rejected during canonical resolution.
+- The slice-consistency family uses explicit proof-significant `consistency_unit`, `in_slice_connectivity`, `min_consecutive_slices`, and `overlap_rule` fields. This milestone approves only `in_slice_component`, `faces_2d`, and `any_overlap`.
 - Morphology connectivity is encoded by the structuring element definition rather than a separate connectivity field.
 - Component labels are deterministic internal execution state and are intentionally excluded from proof artifacts.
+- Slice-consistency labels, overlap-graph node ids, and qualifying-run ids are deterministic internal execution state and are intentionally excluded from proof artifacts.
+- Slice-consistency overlap is evaluated as non-empty intersection of adjacent components' `(y, x)` footprint sets on slices `z` and `z+1`; skipped-slice bridging is not permitted.
 - Runtime metadata from mask execution, such as timing or internal operation counts, is intentionally excluded from proof artifacts.
 
 ### Mask Verification Shape

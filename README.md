@@ -68,6 +68,7 @@ Built-in profiles:
 - `brain_t1_baseline`
 - `brain_t1_morphology_review`
 - `brain_t1_component_review`
+- `brain_t1_slice_review`
 - `brain_t2_baseline`
 - `contrast_enhanced_review`
 - `strict_research_mode`
@@ -111,11 +112,18 @@ Built-in approved algorithms:
 - `threshold_on_raw_derived_reconstruction`
 - `morphology_constrained_threshold_on_raw_derived_reconstruction`
 - `connected_component_constrained_threshold_on_raw_derived_reconstruction`
+- `slice_consistency_constrained_threshold_on_raw_derived_reconstruction`
 
 For the component-constrained family, `connectivity` is an explicit proof-significant
 parameter. This milestone approves only `faces`; any other value is rejected during
 canonical resolution. Component labels remain internal deterministic execution
 state and are not part of the proof-significant output surface.
+
+For the slice-consistency family, each vertex belongs to exactly one slice index and
+edges are permitted only between vertices from slices `z` and `z+1`. Adjacent-slice
+overlap uses non-empty intersection of the two components' `(y, x)` footprint sets.
+Traversal order is fixed for reproducibility only; survival is defined by membership
+in a qualifying no-gap run of consecutive slices, not by label rank.
 
 ## Structure
 
@@ -308,6 +316,7 @@ The tamper-mode reports make failure detection explicit:
 - `shifted_mask` moves the overlay off the verified anatomy and fails with `mask_voxel_mismatch`
 - `intensity_manipulation` alters the AI image while raw k-space stays fixed and fails with `intensity_manipulation_detected`
 - `component_micro_island` appears under `brain_t1_component_review` and fails when the AI restores a detached threshold-positive island that the component policy rejects
+- `slice_single_slice_island` appears under `brain_t1_slice_review` and fails when the AI restores a detached single-slice threshold-positive island that the slice-consistency policy rejects
 
 The fake integration layer answers the operational question directly. The demo now shows:
 
@@ -321,7 +330,7 @@ The PACS integration narrative is now explicit rather than conceptual:
 - the hospital-placement story states that it sits after the reconstruction AI and before PACS/workstation import, behaving like a gateway or sidecar rather than a new clinical system
 - the failure behaviour is fail-closed for the Guardian-verified handoff: if proof fails or the proxy is unavailable, no verified reconstruction, segmentation, manifest, or evidence series are auto-forwarded from the Guardian path
 
-The baseline release profiles still use a deterministic threshold rule because it is easy to audit and keeps the original proof-of-concept intact. The repository now also includes morphology-constrained and connected-component-constrained deterministic showcase profiles to demonstrate that the verification layer can support multiple policy families without turning mask derivation into runtime-selectable freedom.
+The baseline release profiles still use a deterministic threshold rule because it is easy to audit and keeps the original proof-of-concept intact. The repository now also includes morphology-constrained, connected-component-constrained, and slice-consistency-constrained deterministic showcase profiles to demonstrate that the verification layer can support multiple policy families without turning mask derivation into runtime-selectable freedom.
 
 The point of the verification layer is still not clinical segmentation quality by itself. It is proving that the workstation view and volume estimate are mathematically anchored to measured data and that tampering is detectable.
 
