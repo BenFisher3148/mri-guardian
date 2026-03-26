@@ -37,6 +37,8 @@ from .integration import (
 )
 from .profiles import (
     DEFAULT_PROFILE_NAME,
+    DEFAULT_VERIFICATION_PROFILE_NAME,
+    VerificationProfileSpec,
     VerificationProfileDescriptor,
     build_verification_profile_descriptor,
     canonicalise_verification_profile_descriptor,
@@ -53,6 +55,7 @@ __all__ = [
     "MRI_GUARDIAN_POLICY_NAME",
     "MRI_GUARDIAN_POLICY_VERSION",
     "DEFAULT_PROFILE_NAME",
+    "DEFAULT_VERIFICATION_PROFILE_NAME",
     "RELEASE_STATUS_PENDING",
     "RELEASE_STATUS_RELEASED",
     "MriGuardianHarness",
@@ -68,6 +71,7 @@ __all__ = [
     "build_verification_profile_contract",
     "build_verification_tolerance_policy",
     "build_verified_reconstruction_trace",
+    "VerificationProfileSpec",
     "VerificationProfileDescriptor",
     "build_verification_profile_descriptor",
     "canonicalise_verification_profile_descriptor",

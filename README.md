@@ -163,6 +163,7 @@ Inspect the mocked integration artifacts:
 Inspect the explicit claim-to-proof interfaces:
 
 - `demo_artifacts/ai_claim_envelope.json`
+- `demo_artifacts/verification_profile.json`
 - `demo_artifacts/verification_profile_descriptor.json`
 - `demo_artifacts/verified_reconstruction_trace.json`
 - `demo_artifacts/mask_derivation_policy.json`

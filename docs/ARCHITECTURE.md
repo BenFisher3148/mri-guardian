@@ -97,7 +97,7 @@ The Guardian Layer emits several artifact classes:
 
 - state artifacts: `released_state.json`, `workstation_payload.json`
 - proof artifacts: `evidence.json`, `bundle_verification.json`, `.mri-guard-bundle`
-- contract artifacts: `verification_profile_descriptor.json`, `ai_claim_envelope.json`, `verified_reconstruction_trace.json`, `mask_derivation_policy.json`, `verification_tolerance_policy.json`
+- contract artifacts: `verification_profile.json`, `verification_profile_descriptor.json`, `ai_claim_envelope.json`, `verified_reconstruction_trace.json`, `mask_derivation_policy.json`, `verification_tolerance_policy.json`
 - integration artifacts: `dicom_input.json`, `integration_narrative.json`, `pacs_submission.json`, `integration_trace.json`
 - performance artifacts: `performance_profile.json`
 

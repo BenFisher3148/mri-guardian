@@ -101,6 +101,7 @@ The portable bundle written by [`../mri_guardian/bundle.py`](../mri_guardian/bun
 - `released_state.json`
 - `workstation_payload.json`
 - `verification_report.json`
+- `verification_profile.json`
 - `verification_profile_descriptor.json`
 - `transcript.json`
 - `replay.json`

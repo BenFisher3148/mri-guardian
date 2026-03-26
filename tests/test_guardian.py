@@ -45,6 +45,8 @@ from mri_guardian.integration import (
 )
 from mri_guardian.profiles import (
     DEFAULT_PROFILE_NAME,
+    DEFAULT_VERIFICATION_PROFILE_NAME,
+    VerificationProfileSpec,
     build_verification_profile_descriptor,
     canonicalise_verification_profile_descriptor,
     get_verification_profile,
@@ -80,14 +82,120 @@ class MriGuardianHarnessTests(unittest.TestCase):
             ),
         )
         self.assertEqual(DEFAULT_PROFILE_NAME, "brain_t1_baseline")
+        self.assertEqual(DEFAULT_VERIFICATION_PROFILE_NAME, DEFAULT_PROFILE_NAME)
         self.assertEqual(MRI_GUARDIAN_POLICY_NAME, DEFAULT_PROFILE_NAME)
         self.assertEqual(
             MRI_GUARDIAN_POLICY_VERSION,
             get_verification_profile(DEFAULT_PROFILE_NAME).icsd_policy_version,
         )
         descriptor = get_verification_profile("fast_triage_mode")
+        self.assertIsInstance(descriptor, VerificationProfileSpec)
         self.assertFalse(descriptor.release_semantics["final_release_allowed"])
         self.assertFalse(descriptor.release_semantics["portable_bundle_allowed"])
+
+    def test_seeded_profiles_expose_expected_thresholds_authorities_and_budgets(self) -> None:
+        expected = {
+            "brain_t1_baseline": {
+                "threshold": 2.5,
+                "authorities": (
+                    "scanner_manifest",
+                    "voxel_geometry",
+                    "model_manifest",
+                    "sequence_manifest",
+                ),
+                "mask_severity": "warning",
+                "contrast_enabled": True,
+                "slice_enabled": True,
+                "representative_budget": 80.0,
+                "worst_case_budget": 180.0,
+            },
+            "brain_t2_baseline": {
+                "threshold": 1.75,
+                "authorities": (
+                    "scanner_manifest",
+                    "voxel_geometry",
+                    "model_manifest",
+                    "sequence_manifest",
+                ),
+                "mask_severity": "warning",
+                "contrast_enabled": True,
+                "slice_enabled": True,
+                "representative_budget": 80.0,
+                "worst_case_budget": 180.0,
+            },
+            "contrast_enhanced_review": {
+                "threshold": 3.0,
+                "authorities": (
+                    "scanner_manifest",
+                    "voxel_geometry",
+                    "model_manifest",
+                    "sequence_manifest",
+                    "contrast_protocol",
+                ),
+                "mask_severity": "warning",
+                "contrast_enabled": True,
+                "slice_enabled": True,
+                "representative_budget": 90.0,
+                "worst_case_budget": 190.0,
+            },
+            "strict_research_mode": {
+                "threshold": 2.5,
+                "authorities": (
+                    "scanner_manifest",
+                    "voxel_geometry",
+                    "model_manifest",
+                    "sequence_manifest",
+                    "research_protocol",
+                ),
+                "mask_severity": "blocking",
+                "contrast_enabled": True,
+                "slice_enabled": True,
+                "representative_budget": 95.0,
+                "worst_case_budget": 200.0,
+            },
+            "fast_triage_mode": {
+                "threshold": 2.5,
+                "authorities": (
+                    "scanner_manifest",
+                    "voxel_geometry",
+                    "model_manifest",
+                ),
+                "mask_severity": "advisory",
+                "contrast_enabled": False,
+                "slice_enabled": False,
+                "representative_budget": 60.0,
+                "worst_case_budget": 140.0,
+            },
+        }
+
+        for profile_name, spec in expected.items():
+            with self.subTest(profile_name=profile_name):
+                descriptor = get_verification_profile(profile_name)
+                self.assertEqual(descriptor.mask_threshold, spec["threshold"])
+                self.assertEqual(
+                    descriptor.required_authority_source_types,
+                    spec["authorities"],
+                )
+                self.assertEqual(
+                    descriptor.heuristic("mask_fraction_guardrail")["severity"],
+                    spec["mask_severity"],
+                )
+                self.assertEqual(
+                    bool(descriptor.heuristic("inside_outside_contrast")["enabled"]),
+                    spec["contrast_enabled"],
+                )
+                self.assertEqual(
+                    bool(descriptor.heuristic("slice_span")["enabled"]),
+                    spec["slice_enabled"],
+                )
+                self.assertEqual(
+                    descriptor.performance_expectations["representative_total_ms_budget"],
+                    spec["representative_budget"],
+                )
+                self.assertEqual(
+                    descriptor.performance_expectations["worst_case_total_ms_budget"],
+                    spec["worst_case_budget"],
+                )
 
     def test_unknown_profile_lookup_raises_value_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown Guardian runtime profile"):
@@ -782,6 +890,30 @@ class MriGuardianHarnessTests(unittest.TestCase):
         verification = json.loads(verify_run.stdout)
         self.assertTrue(verification["verified"])
 
+    def test_python_module_cli_demo_rejects_unknown_profile(self) -> None:
+        demo_root = self.runtime_root / "cli_demo_invalid"
+        demo_command = [
+            sys.executable,
+            "-m",
+            "mri_guardian",
+            "demo",
+            "--output-dir",
+            str(demo_root),
+            "--profile",
+            "not-a-profile",
+        ]
+
+        demo_run = subprocess.run(
+            demo_command,
+            cwd=Path.cwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertNotEqual(demo_run.returncode, 0)
+        self.assertIn("Unknown Guardian runtime profile", demo_run.stderr)
+
     def test_run_demo_triage_emits_only_non_final_artifacts(self) -> None:
         demo_root = self.runtime_root / "triage_demo"
 
@@ -797,6 +929,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
             {
                 "comparison.html",
                 "performance_profile.json",
+                "verification_profile.json",
                 "verification_profile_descriptor.json",
                 "verification_report.json",
             },

@@ -32,6 +32,10 @@ from .timing import build_guardian_performance_profile
 from .viewer import render_side_by_side_report_html
 
 DEMO_TIMESTAMP = "2026-03-26T00:00:00Z"
+_PROFILE_ARTIFACT_NAMES = (
+    "verification_profile.json",
+    "verification_profile_descriptor.json",
+)
 
 
 def run_demo(
@@ -49,10 +53,7 @@ def run_demo(
         case_state,
         profile_name=descriptor.profile_name,
     )
-    (output_path / "verification_profile_descriptor.json").write_text(
-        f"{canonical_json_dumps(pending_report['profile'])}\n",
-        encoding="utf-8",
-    )
+    _write_profile_artifacts(output_path, pending_report["profile"])
     (output_path / "verification_report.json").write_text(
         f"{canonical_json_dumps(pending_report)}\n",
         encoding="utf-8",
@@ -115,10 +116,7 @@ def run_demo(
         f"{canonical_json_dumps(report['contracts']['ai_claim_envelope'])}\n",
         encoding="utf-8",
     )
-    (output_path / "verification_profile_descriptor.json").write_text(
-        f"{canonical_json_dumps(report['contracts']['verification_profile_descriptor'])}\n",
-        encoding="utf-8",
-    )
+    _write_profile_artifacts(output_path, report["contracts"]["verification_profile_descriptor"])
     (output_path / "verification_report.json").write_text(
         f"{canonical_json_dumps(report)}\n",
         encoding="utf-8",
@@ -231,6 +229,12 @@ def _write_tamper_mode_reports(output_path: Path) -> None:
             f"{canonical_json_dumps(integration_trace)}\n",
             encoding="utf-8",
         )
+
+
+def _write_profile_artifacts(output_path: Path, payload: dict[str, object]) -> None:
+    content = f"{canonical_json_dumps(payload)}\n"
+    for filename in _PROFILE_ARTIFACT_NAMES:
+        (output_path / filename).write_text(content, encoding="utf-8")
 
 
 if __name__ == "__main__":

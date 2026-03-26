@@ -15,6 +15,7 @@ PROFILE_DIGEST_ALGORITHM = "sha256"
 PROFILE_CANONICALIZATION = "icsd.canonical_json/v1"
 PROFILE_DIGEST_SCOPE = "verification_profile_descriptor_without_digest_fields"
 DEFAULT_PROFILE_NAME = "brain_t1_baseline"
+DEFAULT_VERIFICATION_PROFILE_NAME = DEFAULT_PROFILE_NAME
 DEFAULT_PROFILE_REVISION = "1"
 DEFAULT_ICSD_POLICY_VERSION = "2026.03"
 
@@ -104,6 +105,9 @@ class VerificationProfileDescriptor:
             }
         )
         return payload
+
+
+VerificationProfileSpec = VerificationProfileDescriptor
 
 
 def build_verification_profile_descriptor(profile_name: str) -> dict[str, Any]:

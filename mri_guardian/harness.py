@@ -39,17 +39,6 @@ MRI_GUARDIAN_POLICY_NAME = DEFAULT_PROFILE_NAME
 MRI_GUARDIAN_POLICY_VERSION = default_icsd_policy_version()
 RELEASE_STATUS_PENDING = "pending_verification"
 RELEASE_STATUS_RELEASED = "released_to_radiologist"
-_DEFAULT_PROFILE = get_verification_profile(DEFAULT_PROFILE_NAME)
-_RECONSTRUCTION_TOLERANCE = _DEFAULT_PROFILE.tolerance("spatial_per_voxel_abs_error")
-_IMAGINARY_LEAK_TOLERANCE = _DEFAULT_PROFILE.tolerance("imaginary_leakage_abs_error")
-_FREQUENCY_RELATIVE_L2_TOLERANCE = _DEFAULT_PROFILE.tolerance(
-    "frequency_global_relative_l2_error"
-)
-_AI_RELATIVE_L2_TOLERANCE = _DEFAULT_PROFILE.tolerance("spatial_global_relative_l2_error")
-_VOLUME_TOLERANCE = _DEFAULT_PROFILE.tolerance("volume_absolute_error")
-_TOLERANCE_GUARD_BAND_FRACTION = _DEFAULT_PROFILE.guard_band_fraction
-_VERIFIED_MASK_THRESHOLD = _DEFAULT_PROFILE.mask_threshold
-_REQUIRED_AUTHORITY_SOURCE_TYPES = frozenset(_DEFAULT_PROFILE.required_authority_source_types)
 _AUTHORITY_REQUIREMENT_MAP = build_authority_requirement_map()
 
 
