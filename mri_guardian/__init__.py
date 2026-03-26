@@ -11,6 +11,7 @@ from .harness import (
     build_demo_case,
 )
 from .tamper import build_tamper_mode_base_case, build_tamper_scenarios
+from .timing import build_timing_overlay_snapshot
 from .viewer import build_side_by_side_view_model, render_side_by_side_report_html
 
 __all__ = [
@@ -24,6 +25,7 @@ __all__ = [
     "build_demo_case",
     "build_tamper_mode_base_case",
     "build_tamper_scenarios",
+    "build_timing_overlay_snapshot",
     "build_side_by_side_view_model",
     "render_side_by_side_report_html",
 ]

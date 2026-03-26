@@ -68,6 +68,7 @@ The added viewer makes that boundary human-visible. It renders:
 - right: deterministic reconstruction plus the admissible mask
 - highlighted mismatched voxels
 - highlighted rejected mask regions where the AI overlay rests on unsupported pixels
+- a timing overlay that measures reconstruction, verification, and total overhead on a cached in-memory performance probe
 
 The tamper-mode reports make failure detection explicit:
 
@@ -76,3 +77,5 @@ The tamper-mode reports make failure detection explicit:
 - `intensity_manipulation` alters the AI image while raw k-space stays fixed and fails with `intensity_manipulation_detected`
 
 This segmentation rule is intentionally simple for the prototype: the verified mask is derived by a deterministic threshold over the raw-derived reconstruction. The point of the harness is not clinical segmentation quality; it is proving that the workstation view and volume estimate are mathematically anchored to measured data and that tampering is detectable.
+
+The timing overlay uses a cached synthetic probe derived from the deterministic tamper baseline, scaled to a larger in-memory volume. It reports median reconstruction and verification timings across repeated runs and includes the active NumPy/Numba backend so reviewers can see the numerical path is fast enough to be practical.

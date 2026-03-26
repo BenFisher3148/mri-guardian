@@ -16,6 +16,7 @@ from mri_guardian.harness import (
     build_demo_case,
 )
 from mri_guardian.tamper import build_tamper_scenarios
+from mri_guardian.timing import build_timing_overlay_snapshot
 from mri_guardian.viewer import build_side_by_side_view_model, render_side_by_side_report_html
 
 
@@ -97,6 +98,9 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
         self.assertTrue(view_model["release_eligible"])
         self.assertEqual(view_model["verification"]["headline"], "Verification PASSED")
+        self.assertGreater(view_model["timing"]["reconstruction_ms"], 0)
+        self.assertGreaterEqual(view_model["timing"]["verification_ms"], 0)
+        self.assertGreaterEqual(view_model["timing"]["overhead_percent"], 0)
         self.assertEqual(view_model["summary"]["mask_voxel_delta"], 0)
         self.assertEqual(view_model["summary"]["rejected_region_count"], 0)
         self.assertEqual(view_model["summary"]["intensity_mismatch_voxel_count"], 0)
@@ -139,6 +143,9 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertIn("Rejected Region", html)
         self.assertIn("Verification FAILED", html)
         self.assertIn("mask_voxel_mismatch", html)
+        self.assertIn("Reconstruction", html)
+        self.assertIn("Verification", html)
+        self.assertIn("Total Overhead", html)
 
     def test_tamper_mode_scenarios_surface_expected_primary_failures(self) -> None:
         scenarios = {scenario["slug"]: scenario for scenario in build_tamper_scenarios()}
@@ -183,6 +190,18 @@ class MriGuardianHarnessTests(unittest.TestCase):
             "intensity_manipulation_detected",
         )
         self.assertEqual(intensity_report["failure_reasons"][0]["delta"], 147)
+
+    def test_timing_overlay_snapshot_is_positive_and_has_probe_metadata(self) -> None:
+        snapshot = build_timing_overlay_snapshot()
+
+        self.assertGreater(snapshot["reconstruction_ms"], 0)
+        self.assertGreater(snapshot["verification_ms"], 0)
+        self.assertGreater(snapshot["total_pipeline_ms"], 0)
+        self.assertGreaterEqual(snapshot["overhead_percent"], 0)
+        self.assertEqual(snapshot["sample_runs"], 7)
+        self.assertEqual(snapshot["warmup_runs"], 2)
+        self.assertEqual(len(snapshot["probe_shape"]), 3)
+        self.assertIn("NumPy FFT core", snapshot["backend"])
 
     def _build_harness(self) -> MriGuardianHarness:
         return MriGuardianHarness(

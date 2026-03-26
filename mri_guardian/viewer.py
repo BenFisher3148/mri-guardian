@@ -17,6 +17,7 @@ from .harness import (
     build_case_verification_report,
     _round_float,
 )
+from .timing import build_timing_overlay_snapshot
 
 _MAX_DIFFERENCE_ROWS = 64
 
@@ -82,6 +83,7 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
         missing_mask=missing_mask,
     )
     verification = _build_verification_summary(reasons=reasons)
+    timing = build_timing_overlay_snapshot()
     findings = _build_findings(
         reasons=reasons,
         mask_delta=mask_delta,
@@ -104,6 +106,7 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
         "verified_label": "Deterministic Reconstruction + Verified Mask",
         "release_eligible": bool(report["release_eligible"]),
         "verification": verification,
+        "timing": timing,
         "findings": findings,
         "summary": {
             "mask_voxel_delta": mask_delta,
@@ -138,6 +141,7 @@ def render_side_by_side_report_html(
     title = report_title if report_title is not None else view_model["title"]
     summary = view_model["summary"]
     verification = view_model["verification"]
+    timing = view_model["timing"]
     findings_markup = "\n".join(
         f"<li>{escape(finding)}</li>" for finding in view_model["findings"]
     )
@@ -300,6 +304,42 @@ def render_side_by_side_report_html(
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
       gap: 14px;
+    }}
+
+    .timing-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+      margin: 18px 0 14px;
+    }}
+
+    .timing-card {{
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(7, 15, 24, 0.34);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }}
+
+    .timing-label {{
+      display: block;
+      color: rgba(255, 255, 255, 0.7);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      margin-bottom: 8px;
+    }}
+
+    .timing-value {{
+      font-size: clamp(1.2rem, 2.8vw, 1.9rem);
+      font-weight: 800;
+      line-height: 1;
+    }}
+
+    .timing-meta {{
+      margin: 10px 0 0;
+      color: rgba(245, 247, 251, 0.72);
+      font-size: 0.84rem;
+      line-height: 1.45;
     }}
 
     .metric-card {{
@@ -566,6 +606,24 @@ def render_side_by_side_report_html(
         </span>
         <span class="status-pill">Policy {escape(view_model["policy_name"])} v{escape(view_model["policy_version"])}</span>
       </div>
+      <div class="timing-grid">
+        <article class="timing-card">
+          <span class="timing-label">Reconstruction</span>
+          <div class="timing-value">{_display_ms(timing["reconstruction_ms"])}</div>
+        </article>
+        <article class="timing-card">
+          <span class="timing-label">Verification</span>
+          <div class="timing-value">{_display_ms(timing["verification_ms"])}</div>
+        </article>
+        <article class="timing-card">
+          <span class="timing-label">Total Overhead</span>
+          <div class="timing-value">+{_display_percent(timing["overhead_percent"])}</div>
+        </article>
+      </div>
+      <p class="timing-meta">
+        Probe: {escape(_display_probe_shape(timing["probe_shape"]))}. Median of {timing["sample_runs"]} runs after {timing["warmup_runs"]} warm-up runs.
+        Backend: {escape(timing["backend"])}. Total pipeline: {_display_ms(timing["total_pipeline_ms"])}.
+      </p>
       <div class="failure-banner">
         <h2>{escape(verification["headline"])}</h2>
         <p class="failure-reason">Reason: {escape(verification["primary_reason_summary"])}</p>
@@ -950,3 +1008,17 @@ def _difference_table_markup(differences: dict[str, Any]) -> str:
         "</table>"
         f"{omitted_note}"
     )
+
+
+def _display_ms(value: float) -> str:
+    rounded = int(round(float(value)))
+    return f"{rounded}ms"
+
+
+def _display_percent(value: float) -> str:
+    rounded = int(round(float(value)))
+    return f"{rounded}%"
+
+
+def _display_probe_shape(shape: list[int]) -> str:
+    return "x".join(str(int(item)) for item in shape)
