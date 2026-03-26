@@ -1,0 +1,764 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rfc
+  xmlns:xi="http://www.w3.org/2001/XInclude"
+  ipr="trust200902"
+  category="info"
+  submissionType="independent"
+  docName="draft-dpa-icsd-01"
+  sortRefs="true"
+  symRefs="true"
+  tocInclude="true"
+  version="3">
+
+  <front>
+    <title abbrev="ICSD">Invariant-Closed System Design (ICSD)</title>
+
+    <author fullname="Benjamin Anthony Fisher" initials="B.A." surname="Fisher">
+      <organization abbrev="DPA R&amp;D">DPA R&amp;D Ltd (https://www.dpa-cloud.co.uk)</organization>
+      <address>
+        <email>b.fisher@dpa-cloud.co.uk</email>
+        <uri>https://orcid.org/0009-0004-4412-2269</uri>
+      </address>
+    </author>
+
+    <date year="2026" month="March" day="16"/>
+
+    <keyword>ICSD</keyword>
+    <keyword>invariants</keyword>
+    <keyword>correctness by construction</keyword>
+    <keyword>compliance-critical systems</keyword>
+    <keyword>auditability</keyword>
+    <keyword>authority-anchored truth</keyword>
+    <keyword>identity-bound security</keyword>
+
+    <abstract>
+      <t>
+        Invariant-Closed System Design (ICSD) defines an architectural principle for building systems in which all
+        representable states are valid and compliant by construction.
+        Rather than relying on runtime detection, validation, or remediation of invalid or abusive behaviour, ICSD
+        ensures that invalid states are structurally unrepresentable through constrained state models,
+        invariant-bound transitions, and authority-anchored truth sources.
+      </t>
+
+      <t>
+        This document introduces the ICSD concept, its core properties, design trade-offs, and applicability to
+        compliance-critical domains such as payroll, taxation, financial reporting, and regulated infrastructure.
+        It defines the current architectural and semantic baseline for the ICSD portion of the suite.
+      </t>
+
+      <t>
+        This document is part of an experimental, research-oriented Independent Stream suite. It defines the current
+        normative baseline for trust objects, validation rules, and security semantics within its scope. Hard
+        interoperability is expected for shared object semantics and validation rules. Full wire-level, clustering,
+        and proof-family interoperability is not claimed everywhere yet; the remaining details are intentionally
+        profile-defined or deferred where companion work has not yet closed them.
+      </t>
+    </abstract>
+  </front>
+
+  <middle>
+
+    <section anchor="scope-and-status" toc="include">
+      <name>Scope and Status</name>
+      <t>
+        This Internet-Draft is part of an experimental, research-oriented suite prepared for the Independent Stream.
+        It is published to enable structured technical review, experimentation, and architectural discussion around
+        Invariant-Closed System Design (ICSD).
+      </t>
+      <t>
+        Within that suite, this document defines the current normative baseline for trust objects, validation rules,
+        and security semantics relevant to invariant-bound state transitions, evidence handling, and
+        authority-anchored truth evaluation. Hard interoperability is expected for shared object semantics and
+        validation rules.
+      </t>
+      <t>
+        The material is a research artefact.
+        It does not claim technical completeness, production readiness, or endorsement by the IETF or any other
+        standards body, and it is not presented as a standards-track specification.
+      </t>
+      <t>
+        Full wire-level, clustering, and proof-family interoperability is not claimed everywhere yet; relevant
+        suite-level details remain intentionally profile-defined or deferred. ICSD is therefore presented primarily
+        as an architectural and semantic baseline rather than a complete protocol, and it does not mandate a
+        particular programming language, database technology, exchange format, or deployment model.
+      </t>
+      <t>
+        A reference Python implementation and tooling baseline for ICSD is available as <tt>dpa-icsd</tt> on PyPI.
+        As of March 6, 2026, the latest listed release is 1.0.10 and includes the <tt>icsd-dpa</tt> CLI for
+        evidence verification and linting.
+        This implementation is informative only and does not define the normative specification.
+      </t>
+    </section>
+
+    <section anchor="executive-summary" toc="include">
+      <name>Executive Summary</name>
+      <t>
+        Many systems attempt to achieve correctness and compliance by accepting broad inputs, then using validation,
+        monitoring, moderation, and repair mechanisms to detect and handle invalid behaviour after it occurs.
+        This reactive approach increases operational complexity, creates ambiguous intermediate states, and expands
+        the attack and abuse surface.
+      </t>
+      <t>
+        Invariant-Closed System Design (ICSD) proposes a different approach: design the system such that only valid
+        states can exist.
+        In an ICSD system, invalid and non-compliant states are not "handled" at runtime because they are not
+        representable in the system's state space.
+      </t>
+      <t>
+        ICSD shifts complexity from runtime policing towards upfront modelling.
+        It improves auditability by ensuring every persisted state is valid, and it reduces abuse opportunities that
+        rely on malformed, partial, or inconsistent internal state.
+      </t>
+    </section>
+
+    <section anchor="terminology">
+      <name>Terminology</name>
+
+      <t>
+        <strong>Requirements Language:</strong>
+        The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT",
+        "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted
+        as described in <xref target="RFC2119"/> and <xref target="RFC8174"/> when, and only when,
+        they appear in all capitals.
+      </t>
+
+      <t>
+        <strong>System State:</strong>
+        The complete set of values that determines system behaviour at a given instant, including persisted data and
+        any in-scope in-memory state.
+      </t>
+
+      <t>
+        <strong>Representable State:</strong>
+        A state that the system can encode in its data model and reach through its defined transitions.
+      </t>
+
+      <t>
+        <strong>Invariant:</strong>
+        A condition that MUST hold for all representable states of the system (e.g., legal constraints, accounting
+        identities, authorisation constraints, or schema requirements).
+      </t>
+
+      <t>
+        <strong>Invariant-Closed:</strong>
+        A property of a system where the set of representable states is closed under the invariants; i.e., every
+        representable state satisfies every invariant.
+      </t>
+
+      <t>
+        <strong>Authority-Anchored Truth Source:</strong>
+        An external or internal source of truth that is treated as authoritative for specific facts (e.g., statutory
+        registries, regulated rulesets, signed identity assertions, or versioned policy artefacts).
+      </t>
+
+      <t>
+        <strong>Bootstrap Trust Boundary:</strong>
+        The admission boundary between a principal that is not yet inside the closed trust domain and one that has
+        completed explicit bootstrap validation under accepted seed material, policy, and authority constraints.
+      </t>
+
+      <t>
+        <strong>No Singular Trust Anchor:</strong>
+        A design property in which no single issuer, registry, revocation service, controller, or bootstrap source
+        can unilaterally determine continued legitimacy for the whole system.
+      </t>
+
+      <t>
+        <strong>Recovery / Re-Enrolment:</strong>
+        A privileged trust transition by which a previously known principal returns to an admissible state under
+        tighter artefact, supersession, and policy checks than ordinary steady-state operation.
+      </t>
+
+      <t>
+        <strong>Fork Survivability:</strong>
+        A property of an invariant-closed system in which independent continuation remains locally verifiable even if
+        previously aligned authorities, registries, or operators diverge.
+      </t>
+
+      <t>
+        <strong>Reactive Enforcement:</strong>
+        Any mechanism that detects, mitigates, or remediates invalid behaviour after it has been encoded as a system
+        state (e.g., validation errors on persistence, moderation queues, anomaly scoring, or repair jobs).
+      </t>
+    </section>
+
+    <section anchor="introduction" numbered="true" toc="default">
+      <name>Introduction</name>
+      <t>
+        Contemporary systems often permit a broad range of inputs and states, depending on reactive mechanisms -
+        validation checks, monitoring, moderation, or repair - to handle invalid, non-compliant, or abusive behaviour
+        after it occurs.
+        This reactive approach increases operational complexity, maintenance burden, and exposure to errors or
+        attacks that exploit inconsistent or intermediate states.
+      </t>
+
+      <t>
+        Invariant-Closed System Design (ICSD) offers an alternative paradigm: systems are structured so that only
+        valid states can exist.
+        Invalid or non-compliant states are not detected and corrected - they are prevented by design, as they have no
+        representation in the system's state space.
+      </t>
+
+      <t>
+        The core axiom of ICSD is: If a system state can exist, it is already valid.
+        Correctness, regulatory compliance, and legitimacy are embedded directly into the type system, input
+        constraints, transition rules, and data sources.
+      </t>
+
+      <t>
+        This document outlines the ICSD principle, contrasts it with traditional reactive designs, and explores its
+        benefits in domains where trust assumptions are minimal and authoritative sources define ground truth.
+        Examples draw from production experience in payroll and taxation systems, where invariants are
+        non-negotiable.
+      </t>
+
+      <t>
+        ICSD is particularly relevant to high-assurance environments, including financial systems, identity
+        management, regulatory reporting, and secure infrastructure protocols.
+      </t>
+      <t>
+        This draft should therefore be read as part of an experimental, research-oriented Independent Stream suite
+        and as the current normative baseline for trust objects, validation rules, and security semantics within its
+        scope. Hard interoperability is expected for shared object semantics and validation rules. Full wire-level,
+        clustering, and proof-family interoperability is not claimed everywhere yet; relevant details remain
+        intentionally profile-defined or deferred in companion work. Multiple authorities or truth sources do not by
+        themselves solve decentralisation, and broader availability properties still depend on explicit profile and
+        deployment choices.
+      </t>
+    </section>
+
+    <section anchor="core-principle">
+      <name>Core Principle</name>
+
+      <t>
+        The foundational axiom of ICSD is:
+        <strong>If a system state can exist, it is already valid.</strong>
+      </t>
+
+      <figure anchor="fig-reactive-vs-icsd">
+        <name>Reactive enforcement versus invariant-closed design</name>
+        <artwork><![CDATA[
+Reactive design (detect+repair) | ICSD design (invalid unrep.)
+
+   input                        | input (constrained)
+     |                          |     |
+     v                          |     v
+ [broad parsing]                | [invariant-safe encoding]
+     |                          |     |
+     v                          |     v
+ [state may be invalid]         | [state always valid]
+     |                          |     |
+     v                          |     v
+ [detect/moderate/repair]       | [audit transition history]
+]]></artwork>
+      </figure>
+
+      <t>
+        In a reactive design, the system must cope with invalid-but-encoded states and expend effort detecting,
+        triaging, and correcting them.
+        In an invariant-closed design, invalid states are unreachable: the system's representational model does not
+        permit them, and transitions preserve invariants by construction.
+      </t>
+
+      <t>
+        ICSD does not imply that a system is small or trivial.
+        Rather, it implies that as complexity increases, the modelling discipline increases as well: each additional
+        state and transition is admitted only if it can be expressed in a way that preserves invariants.
+      </t>
+    </section>
+
+    <section anchor="invariant-bound-state-space">
+      <name>Invariant-Bound State Space</name>
+
+      <t>
+        An ICSD system defines a closed set of invariants: conditions that must always hold true.
+        These invariants define the system's state space.
+        The system MUST ensure that:
+      </t>
+
+      <ul>
+        <li><t>all representable states satisfy all invariants;</t></li>
+        <li><t>all state transitions preserve invariant validity; and</t></li>
+        <li><t>no mechanism exists to bypass or temporarily suspend invariants.</t></li>
+      </ul>
+
+      <t>
+        In practice, this typically requires modelling state as a finite set of well-defined types (or records) whose
+        construction is only possible through invariant-preserving transitions.
+      </t>
+
+      <t>
+        Examples of non-negotiable invariants in compliance-critical domains include:
+      </t>
+
+      <ul>
+        <li><t>a payroll run cannot exist without a verified legal entity and an applicable tax context;</t></li>
+        <li><t>a regulatory submission artefact cannot exist unless schema and policy validation have passed; and</t></li>
+        <li><t>an authorisation grant cannot exist without a verified identity and an explicit scope of authority.</t></li>
+      </ul>
+
+      <t>
+        In ICSD, invariants are not optional checks; they define what the system can represent.
+      </t>
+    </section>
+
+    <section anchor="survivability-and-sovereignty-invariants">
+      <name>Survivability and Sovereignty Invariants</name>
+
+      <t>
+        This section defines constitutional invariants for ICSD systems that operate in adversarial, decentralised, or
+        jurisdictionally fragmented environments.
+      </t>
+
+      <section anchor="survivability-invariant">
+        <name>Survivability Invariant</name>
+        <t>
+          An invariant-closed system MUST remain operational if any single administrative, organisational, or
+          jurisdictional entity ceases operation or becomes adversarial.
+        </t>
+        <t>
+          Consequently, an invariant-closed system MUST NOT require any single dependency class as an operational
+          precondition, including any single identity issuer, certificate authority, revocation service, relay
+          operator, directory service, or bootstrap source.
+        </t>
+      </section>
+
+      <section anchor="no-singular-trust-anchor-invariant">
+        <name>No Singular Trust Anchor Invariant</name>
+        <t>
+          No invariant-closed system SHALL depend on a singular trust anchor whose compromise invalidates the system's
+          operational guarantees.
+        </t>
+        <t>
+          This prohibition includes, but is not limited to, central CAs, global revocation lists, authorising bodies,
+          mandatory bootstrap registries, mandatory relay controllers, or singular revocation services when used as
+          unique trust anchors.
+        </t>
+      </section>
+
+      <section anchor="bootstrap-trust-edge">
+        <name>Bootstrap Trust Boundary</name>
+        <t>
+          An invariant-closed system is not self-originating.
+          A brand-new device, node, or principal is not yet within the closed trust domain and must first be admitted
+          through an explicit bootstrap process.
+          Bootstrap trust is therefore a first-class architectural concern rather than an implicit property of the
+          steady-state protocol.
+        </t>
+        <t>
+          Deployments must define which bootstrap sources they accept.
+          Acceptable bootstrap inputs may include manufacturer attestation, owner-installed or operator-installed seed
+          trust, pre-provisioned deployment credentials, local attestation ceremony, physically mediated enrolment,
+          custodial onboarding authority, verified HIL-assisted enrolment, or administrative or MDM-style approval
+          under signed policy.
+          The bootstrap authority MUST be explicit, narrow, auditable, and non-magical.
+        </t>
+      <t>
+        Bootstrap trust does not, by itself, confer unlimited steady-state authority.
+        Once bootstrap is complete, ordinary invariants, scope limits, revocation rules, and policy validation MUST
+        apply, and the bootstrap path MUST NOT silently bypass them.
+      </t>
+      <t>
+        Bootstrap, recovery, and re-enrolment are privileged trust transitions and are especially suitable for
+        invariant-closed modelling because admissible artefacts, bounded authority, supersession rules, and
+        fail-closed outcomes can be made explicit.
+        An ICSD-aligned system should make unauthorised or ambiguous Day Zero and recovery states structurally
+        unrepresentable rather than merely detectable after admission.
+      </t>
+    </section>
+
+      <section anchor="fork-survivability">
+        <name>Fork Survivability</name>
+        <t>
+          An invariant-closed system MUST permit independent continuation (fork) without invalidating identity or
+          operational semantics for participating nodes.
+        </t>
+        <t>
+          Post-fork operation MUST remain locally verifiable and MUST NOT depend on continued alignment to a canonical
+          registry for legitimacy.
+        </t>
+        <t>
+          For identity-bound systems, this implies that identities remain usable post-fork, mediator operation remains
+          registry-independent, trust relationships remain independently maintainable, and accountability or
+          transparency artefacts remain locally interpretable even when no single post-fork authority is universally
+          recognised.
+        </t>
+      </section>
+
+      <section anchor="closure-not-centralisation">
+        <name>Closure Is Not Centralisation</name>
+        <t>
+          Closed does not mean centrally controlled.
+        </t>
+        <t>
+          Closure refers to integrity-bound operational constraints and cryptographically sealed state-transition
+          semantics, not administrative centralisation.
+        </t>
+      </section>
+
+      <section anchor="transparent-accountability-invariant">
+        <name>Transparent Accountability Invariant</name>
+        <t>
+          Invariant-closed systems SHOULD provide cryptographic transparency or accountability mechanisms sufficient to
+          permit independent verification of system behaviour and state transitions.
+        </t>
+        <t>
+          Examples include signed append-only transparency logs, cryptographic reachability evidence, and verifiable
+          misbehaviour proofs.
+        </t>
+      </section>
+
+      <section anchor="anti-kill-switch-principle">
+        <name>Anti-Kill-Switch Principle</name>
+        <t>
+          No invariant-closed system SHALL include unilateral global revocation or termination capabilities absent
+          multi-party cryptographic consensus.
+        </t>
+      </section>
+    </section>
+
+    <section anchor="authority-anchored-truth">
+      <name>Authority-Anchored Truth</name>
+
+      <t>
+        Where possible, ICSD systems anchor truth to authoritative sources rather than user assertion.
+        This reduces trust assumptions and limits the risk of fabricated, inconsistent, or self-contradictory state.
+      </t>
+      <t>
+        Authority anchoring does not require a singular administrative authority.
+        Multiple independent authoritative sources MAY coexist if they preserve the invariants defined by the system.
+      </t>
+
+      <t>
+        Authority anchoring commonly appears as:
+      </t>
+
+      <ul>
+        <li><t>company identity derived from statutory registries;</t></li>
+        <li><t>tax calculations constrained by authoritative rulesets and versioned guidance;</t></li>
+        <li><t>roles and authority derived from official records or cryptographically signed policy artefacts; and</t></li>
+        <li><t>identity claims derived from verified credentials rather than mutable profile fields.</t></li>
+      </ul>
+
+      <t>
+        User input is treated primarily as selection, initiation, or proposal - not as the authoritative ground truth.
+        Where user input is necessary (e.g., choosing a tax code), the representational model SHOULD restrict it to a
+        set of invariant-safe options.
+      </t>
+    </section>
+
+    <section anchor="non-representable-invalid-states">
+      <name>Non-Representable Invalid States</name>
+
+      <t>
+        A defining property of ICSD is the elimination of representable invalid states.
+        In an ICSD system, there are no:
+      </t>
+
+      <ul>
+        <li><t>invalid-but-saved records;</t></li>
+        <li><t>broken intermediate states;</t></li>
+        <li><t>speculative or partially complete entities; or</t></li>
+        <li><t>privileged objects created before authority has been verified.</t></li>
+      </ul>
+
+      <t>
+        If a configuration or object cannot be valid, it has no representation in storage or memory.
+        This removes entire classes of bugs and abuse vectors associated with partial, inconsistent, or
+        order-dependent state.
+      </t>
+    </section>
+
+    <section anchor="elimination-of-reactive-enforcement">
+      <name>Elimination of Reactive Enforcement</name>
+
+      <t>
+        Because invalid behaviour cannot be encoded, ICSD systems minimise or eliminate the need for reactive
+        enforcement mechanisms such as:
+      </t>
+
+      <ul>
+        <li><t>heuristic abuse detection and anomaly scoring;</t></li>
+        <li><t>moderation queues and manual review pipelines;</t></li>
+        <li><t>background repair jobs for data quality;</t></li>
+        <li><t>error-driven state reconciliation; and</t></li>
+        <li><t>ad hoc "fix-forward" scripts to correct invalid persistence.</t></li>
+      </ul>
+
+      <t>
+        Reactive enforcement is replaced by structural impossibility.
+        The system does not monitor for invalid behaviour; it cannot represent it.
+      </t>
+
+      <t>
+        This does not remove all monitoring needs.
+        Systems may still monitor for availability, performance, and suspicious but valid activities.
+        ICSD specifically targets the class of failures where invalidity arises from representable internal state.
+      </t>
+    </section>
+
+    <section anchor="auditability-and-compliance">
+      <name>Auditability and Compliance</name>
+
+      <t>
+        In ICSD systems, auditability emerges as a side effect of correct design:
+      </t>
+
+      <ul>
+        <li><t>every persisted state is valid;</t></li>
+        <li><t>audit logs describe state transitions, not error recovery;</t></li>
+        <li><t>compliance evidence is implicit in system history; and</t></li>
+        <li><t>reconciliation becomes verification rather than investigation.</t></li>
+      </ul>
+
+      <t>
+        A practical consequence is that auditors and operators can reason over the system using a smaller set of
+        cases: "what valid state did we enter, when, and under what authority?" rather than "what went wrong and how
+        did we patch it?"
+      </t>
+
+      <t>
+        ICSD is especially valuable where invariants are externally imposed (e.g., law and regulation) and where
+        failure modes have significant cost (e.g., financial penalties, reputational harm, or operational shutdown).
+      </t>
+      <t>
+        High-value control-plane elements are especially strong candidates for invariant-closed modelling.
+        Examples include RN controllers, patch or release manifests, grant ledgers, route-policy objects, and similar
+        authority-bearing artefacts in identity-centric systems.
+        For such objects, the design goal is that unsigned overrides, invalid signer sets, rollback states,
+        policy-ineligible transitions, and partial-write artefacts are not merely detected after the fact but are
+        structurally unrepresentable.
+      </t>
+      <t>
+        As a small informative example, a UZPIF-compatible deployment could model RN controller state acceptance as
+        an invariant-closed transition: a controller update would become admissible only when the signed controller
+        object, the authority set accepted at the bootstrap trust boundary or by later recovery / re-enrolment,
+        epoch or sequence precedence, and applicable policy scope all validate together.
+        This illustrates a compatible design discipline, not a requirement that UZPIF implementations adopt ICSD as
+        a mandatory framework, prerequisite layer, or protocol dependency.
+      </t>
+    </section>
+
+    <section anchor="design-trade-offs">
+      <name>Design Trade-offs</name>
+
+      <t>
+        ICSD deliberately shifts complexity away from runtime policing and remediation towards upfront modelling and
+        invariant definition.
+        This increases initial design discipline but can reduce long-term maintenance cost, operational overhead,
+        abuse surface area, and regulatory exposure.
+      </t>
+
+      <t>
+        Common trade-offs include:
+      </t>
+
+      <ul>
+        <li><t><strong>Reduced flexibility:</strong> inputs and workflows may be more constrained than in permissive systems.</t></li>
+        <li><t><strong>Upfront modelling cost:</strong> invariants must be identified, formalised, and tested early.</t></li>
+        <li><t><strong>Migration complexity:</strong> legacy datasets containing invalid state may require transformation.</t></li>
+        <li><t><strong>Profile management:</strong> different jurisdictions or policy regimes may require explicit profiles.</t></li>
+      </ul>
+
+      <t>
+        ICSD is not a statement that "validation is bad".
+        It is a statement about where validation belongs: as part of constructing representable state, rather than as
+        a recurring operational burden after invalidity has already been encoded.
+      </t>
+    </section>
+
+    <section anchor="comparison-with-traditional-designs">
+      <name>Comparison with Traditional Designs</name>
+
+      <table anchor="tbl-traditional-vs-icsd">
+        <name>Traditional design compared with ICSD</name>
+        <thead>
+          <tr>
+            <th>Traditional design</th>
+            <th>ICSD design</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Accepts broad input</td>
+            <td>Accepts only invariant-safe input</td>
+          </tr>
+          <tr>
+            <td>Detects invalid behaviour</td>
+            <td>Cannot represent invalid behaviour</td>
+          </tr>
+          <tr>
+            <td>Repairs bad states</td>
+            <td>Prevents bad states</td>
+          </tr>
+          <tr>
+            <td>Relies on monitoring</td>
+            <td>Relies on structure and modelling</td>
+          </tr>
+          <tr>
+            <td>Compliance as process</td>
+            <td>Compliance as property</td>
+          </tr>
+          <tr>
+            <td>Security controls often layered on top</td>
+            <td>Many controls become inherent to the state model</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <t>
+        ICSD does not remove the need for good engineering practices such as testing, change control, or operational
+        security.
+        It changes the baseline: correctness and compliance become properties of what the system can represent.
+      </t>
+    </section>
+
+    <section anchor="applicability">
+      <name>Applicability</name>
+
+      <t>
+        ICSD is particularly well suited to domains where:
+      </t>
+
+      <ul>
+        <li><t>correctness is mandatory and errors have high cost;</t></li>
+        <li><t>authoritative sources define ground truth;</t></li>
+        <li><t>trust cannot be assumed; and</t></li>
+        <li><t>regulatory exposure is high.</t></li>
+      </ul>
+
+      <t>
+        Example domains include payroll and taxation, financial systems, identity and access control, regulatory
+        reporting, and secure infrastructure and protocol design.
+      </t>
+
+      <section anchor="applicability-identity-bound">
+        <name>Applicability to Identity-Bound Security Systems</name>
+
+        <t>
+          In identity-first architectures, a common failure mode is the existence of "privileged but invalid" objects,
+          such as a grant that exists before identity is verified, or a session that exists before policy checks are
+          applied.
+          ICSD mitigates this by making such objects unrepresentable: the only representable grants and sessions are
+          those that are already bound to verified identity and explicit authority.
+        </t>
+
+        <t>
+          This principle complements identity-bound frameworks and transports such as
+          <xref target="UZPIF"/>, <xref target="UZP"/>, and <xref target="TLS-DPA"/>, where correctness and authorisation
+          are expected to be intrinsic properties of the connection and its negotiated state.
+          ICSD is therefore best read as a design discipline and implementation approach that fits such systems well,
+          not as a suite-mandatory governance layer, required subsystem, or deployment prerequisite.
+        </t>
+      </section>
+    </section>
+
+    <section anchor="security-considerations">
+      <name>Security Considerations</name>
+
+      <t>
+        ICSD can reduce attack surface by eliminating representable invalid states.
+        Many classes of injection, abuse, and privilege escalation rely on malformed, partial, or inconsistent internal
+        state; ICSD systems make such states unreachable by design.
+      </t>
+
+      <t>
+        However, ICSD is not a complete security model.
+        A representable state being "valid" with respect to invariants does not guarantee that it is desirable.
+        Attackers can still:
+      </t>
+
+      <ul>
+        <li><t>perform harmful actions that are valid within policy (e.g., authorised but abusive use);</t></li>
+        <li><t>target the integrity of truth sources (e.g., poisoning authority data);</t></li>
+        <li><t>exploit incorrect invariant definitions (i.e., specification bugs); and</t></li>
+        <li><t>attack availability (e.g., denial-of-service) regardless of state validity.</t></li>
+      </ul>
+
+      <t>
+        Designers should treat invariants and authority sources as security-critical artefacts:
+        they SHOULD be versioned, reviewed, tested, and auditable.
+        Where possible, authority inputs SHOULD be authenticated (e.g., signatures, provenance records) and changes
+        SHOULD be subject to explicit change control.
+      </t>
+    </section>
+
+    <section anchor="conclusion">
+      <name>Conclusion</name>
+
+      <t>
+        Invariant-Closed System Design reframes correctness from a runtime concern into a structural property.
+        By designing systems where invalid behaviour is not prevented but structurally impossible, ICSD can reduce
+        operational complexity, improve auditability, and strengthen trustworthiness in compliance-critical
+        environments.
+      </t>
+
+      <t>
+        ICSD is best viewed as a discipline: it rewards rigorous modelling and clear definitions of invariants and
+        authority.
+        Where those conditions hold, it can remove entire classes of failures that otherwise demand continuous
+        monitoring and remediation.
+        It can inform architectures such as UZPIF, UZP, and TLS-DPA without being a prerequisite for deploying or
+        understanding them.
+      </t>
+    </section>
+
+    <section anchor="one-sentence-summary">
+      <name>One-Sentence Summary</name>
+      <t>
+        Invariant-Closed System Design is the practice of building systems where invalid behaviour is not prevented -
+        it is structurally impossible.
+      </t>
+    </section>
+
+    <section anchor="iana-considerations">
+      <name>IANA Considerations</name>
+      <t>
+        This document has no IANA actions.
+      </t>
+    </section>
+
+  </middle>
+
+  <back>
+
+    <references>
+      <name>Normative References</name>
+      <xi:include href="https://www.rfc-editor.org/refs/bibxml/reference.RFC.2119.xml"/>
+      <xi:include href="https://www.rfc-editor.org/refs/bibxml/reference.RFC.8174.xml"/>
+    </references>
+
+    <references>
+      <name>Informative References</name>
+
+      <reference anchor="UZPIF">
+        <front>
+          <title>The Universal Zero-Port Interconnect Framework (UZPIF): An Identity-Centric Architecture for Post-Port Networking</title>
+          <author fullname="Benjamin Anthony Fisher"/>
+          <date/>
+        </front>
+        <seriesInfo name="Internet-Draft" value="draft-dpa-uzpif-framework"/>
+      </reference>
+
+      <reference anchor="UZP">
+        <front>
+          <title>UZP: Universal Zero-Port Transport Protocol</title>
+          <author fullname="Benjamin Anthony Fisher"/>
+          <date/>
+        </front>
+        <seriesInfo name="Internet-Draft" value="draft-dpa-uzp-transport"/>
+      </reference>
+
+      <reference anchor="TLS-DPA">
+        <front>
+          <title>TLS-DPA: An Identity-Bound Security Protocol for Traditional, Overlay, and Zero-Port Transports</title>
+          <author fullname="Benjamin Anthony Fisher"/>
+          <date/>
+        </front>
+        <seriesInfo name="Internet-Draft" value="draft-dpa-tls-dpa"/>
+      </reference>
+    </references>
+
+  </back>
+
+</rfc>
