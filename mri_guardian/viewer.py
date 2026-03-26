@@ -103,6 +103,10 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
         )
         <= _VOLUME_TOLERANCE,
     )
+    integration = _build_integration_summary(
+        release_eligible=bool(report["release_eligible"]),
+        primary_reason=verification["primary_reason_summary"],
+    )
     return {
         "title": "MRI Guardian Layer",
         "subtitle": "Verification proxy between the reconstruction AI and the PACS/workstation boundary.",
@@ -114,6 +118,7 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
         "verification": verification,
         "timing": timing,
         "findings": findings,
+        "integration": integration,
         "summary": {
             "mask_voxel_delta": mask_delta,
             "rejected_region_count": rejected_count,
@@ -305,6 +310,52 @@ def render_side_by_side_report_html(
       padding-left: 18px;
       color: rgba(245, 247, 251, 0.86);
       line-height: 1.45;
+    }}
+
+    .integration-map {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+      gap: 12px;
+      align-items: stretch;
+      margin: 18px 0 20px;
+    }}
+
+    .integration-node {{
+      padding: 18px;
+      border-radius: 22px;
+      background: rgba(255, 248, 239, 0.94);
+      border: 1px solid rgba(16, 24, 32, 0.08);
+      box-shadow: 0 14px 30px rgba(15, 23, 33, 0.1);
+    }}
+
+    .integration-kicker {{
+      display: inline-flex;
+      font-size: 0.74rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: #556573;
+      margin-bottom: 10px;
+    }}
+
+    .integration-node h2 {{
+      margin: 0 0 8px;
+      font-size: 1.1rem;
+      color: #101820;
+    }}
+
+    .integration-node p {{
+      margin: 0;
+      color: #334150;
+      line-height: 1.55;
+    }}
+
+    .integration-arrow {{
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 42px;
+      font-size: 1.3rem;
+      color: #526170;
     }}
 
     .metric-grid {{
@@ -675,6 +726,14 @@ def render_side_by_side_report_html(
     }}
 
     @media (max-width: 860px) {{
+      .integration-map {{
+        grid-template-columns: minmax(0, 1fr);
+      }}
+
+      .integration-arrow {{
+        min-height: 24px;
+      }}
+
       .panel-grid {{
         grid-template-columns: 1fr;
       }}
@@ -728,6 +787,25 @@ def render_side_by_side_report_html(
         <ul class="failure-list">
           {reason_markup}
         </ul>
+      </div>
+      <div class="integration-map">
+        <article class="integration-node">
+          <span class="integration-kicker">Ingress</span>
+          <h2>{escape(view_model["integration"]["ingress_label"])}</h2>
+          <p>{escape(view_model["integration"]["ingress_detail"])}</p>
+        </article>
+        <div class="integration-arrow">-&gt;</div>
+        <article class="integration-node">
+          <span class="integration-kicker">Proxy</span>
+          <h2>{escape(view_model["integration"]["proxy_label"])}</h2>
+          <p>{escape(view_model["integration"]["proxy_detail"])}</p>
+        </article>
+        <div class="integration-arrow">-&gt;</div>
+        <article class="integration-node">
+          <span class="integration-kicker">Egress</span>
+          <h2>{escape(view_model["integration"]["egress_label"])}</h2>
+          <p>{escape(view_model["integration"]["egress_detail"])}</p>
+        </article>
       </div>
       <div class="metric-grid">
         <article class="metric-card">
@@ -1126,6 +1204,31 @@ def _build_findings(
             "Clinical plausibility heuristics also raised advisory review flags on the verified anatomy."
         )
     return findings
+
+
+def _build_integration_summary(
+    *,
+    release_eligible: bool,
+    primary_reason: str,
+) -> dict[str, str]:
+    egress_label = "Mock PACS Output" if release_eligible else "PACS Output Blocked"
+    egress_detail = (
+        "Verified reconstruction, verified segmentation, and evidence records are ready for downstream PACS/workstation handoff."
+        if release_eligible
+        else f"No downstream series are released. Block reason: {primary_reason}."
+    )
+    return {
+        "ingress_label": "Mock DICOM Input",
+        "ingress_detail": (
+            "Raw k-space, AI reconstruction, segmentation, and tumour-volume claim arrive over a mocked DICOM boundary."
+        ),
+        "proxy_label": "MRI Guardian Layer",
+        "proxy_detail": (
+            "The verification proxy recomputes the image from raw data, applies Level 1/2/3 checks, and decides whether the PACS handoff is allowed."
+        ),
+        "egress_label": egress_label,
+        "egress_detail": egress_detail,
+    }
 
 
 def _ordered_tiers(tiers: dict[str, Any]) -> list[dict[str, Any]]:

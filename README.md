@@ -23,6 +23,7 @@ The ICSD verification layer makes the release state invariant-closed. A case is 
 
 - [mri_guardian/bundle.py](mri_guardian/bundle.py) builds and verifies portable `.mri-guard-bundle` proof artifacts.
 - [mri_guardian/harness.py](mri_guardian/harness.py) defines the policy profile, invariants, deterministic reconstruction checks, and release transition.
+- [mri_guardian/integration.py](mri_guardian/integration.py) mocks the DICOM ingress and PACS egress contracts around the verification proxy.
 - [mri_guardian/tamper.py](mri_guardian/tamper.py) builds deterministic fake-tumour, shifted-mask, and intensity-manipulation scenarios.
 - [mri_guardian/transparency.py](mri_guardian/transparency.py) implements a file-backed append-only hash chain for ICSD transparency receipts.
 - [mri_guardian/demo.py](mri_guardian/demo.py) writes a deterministic demo evidence bundle and downstream workstation payload.
@@ -47,6 +48,15 @@ Inspect the portable proof artifact:
 
 - `demo_artifacts/mri-case-0001.mri-guard-bundle`
 - `demo_artifacts/bundle_verification.json`
+
+Inspect the mocked integration artifacts:
+
+- `demo_artifacts/dicom_input.json`
+- `demo_artifacts/pacs_submission.json`
+- `demo_artifacts/integration_trace.json`
+- `demo_artifacts/tamper_fake_tumour_pacs_block.json`
+- `demo_artifacts/tamper_shifted_mask_pacs_block.json`
+- `demo_artifacts/tamper_intensity_manipulation_pacs_block.json`
 
 Verify the archive or an extracted `bundle.json` replay package in Python:
 
@@ -100,6 +110,7 @@ The replay layer makes the bundle regulator-friendly: `verify_bundle(...)` does 
 
 The added viewer makes that boundary human-visible. It renders the verification proxy exactly as a reviewer would experience it:
 
+- a mocked `DICOM Input -> MRI Guardian Layer -> PACS Output` boundary strip so the plug-in point is explicit
 - left: AI reconstruction plus the AI tumour mask proposed for downstream handoff
 - right: Guardian Layer reconstruction plus the admissible verified mask
 - Level 1 / Level 2 / Level 3 verification cards so reviewers can see which trust layer passed, failed, or only warned
@@ -112,6 +123,12 @@ The tamper-mode reports make failure detection explicit:
 - `fake_tumour` injects 342 unsupported tumour voxels and fails with `mask_voxel_mismatch`
 - `shifted_mask` moves the overlay off the verified anatomy and fails with `mask_voxel_mismatch`
 - `intensity_manipulation` alters the AI image while raw k-space stays fixed and fails with `intensity_manipulation_detected`
+
+The fake integration layer answers the operational question directly. The demo now shows:
+
+- mocked DICOM ingress carrying raw k-space plus the AI claim
+- the Guardian Layer acting as a verification proxy rather than a replacement system
+- mocked PACS egress that either emits verified series or records a blocked handoff with the exact failure reason
 
 This segmentation rule is intentionally simple for the prototype: the verified mask is derived by a deterministic threshold over the raw-derived reconstruction. The point of the verification layer is not clinical segmentation quality; it is proving that the workstation view and volume estimate are mathematically anchored to measured data and that tampering is detectable.
 

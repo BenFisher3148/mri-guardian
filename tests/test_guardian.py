@@ -25,6 +25,13 @@ from mri_guardian.harness import (
     build_demo_authority_sources,
     build_demo_case,
 )
+from mri_guardian.integration import (
+    build_mock_dicom_input,
+    build_mock_integration_trace,
+    build_mock_pacs_block_notice,
+    build_mock_pacs_submission,
+    restore_case_state_from_dicom_input,
+)
 from mri_guardian.tamper import build_tamper_scenarios
 from mri_guardian.timing import build_timing_overlay_snapshot
 from mri_guardian.viewer import build_side_by_side_view_model, render_side_by_side_report_html
@@ -214,6 +221,68 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 timestamp="2026-03-26T00:00:00Z",
             )
 
+    def test_mock_dicom_input_round_trips_guardian_case_state(self) -> None:
+        state = build_demo_case()
+
+        dicom_input = build_mock_dicom_input(state)
+        restored_state = restore_case_state_from_dicom_input(dicom_input)
+
+        self.assertEqual(restored_state, state)
+        self.assertEqual(dicom_input["endpoint"]["destination_ae_title"], "MRI-GUARDIAN-LAYER")
+        self.assertEqual(dicom_input["objects"][0]["role"], "raw_kspace")
+
+    def test_mock_pacs_submission_exposes_verified_handoff_contract(self) -> None:
+        state = build_demo_case()
+        harness = self._build_harness()
+        result = harness.release_case(
+            state=state,
+            actor="guardian:test",
+            authority_sources=build_demo_authority_sources(case_id=state["case_id"]),
+            timestamp="2026-03-26T00:00:00Z",
+        )
+
+        dicom_input = build_mock_dicom_input(state)
+        pacs_submission = build_mock_pacs_submission(
+            result,
+            bundle_reference="mri-case-0001.mri-guard-bundle",
+        )
+        integration_trace = build_mock_integration_trace(
+            dicom_input=dicom_input,
+            pacs_output=pacs_submission,
+        )
+
+        self.assertEqual(pacs_submission["submission_status"], "released")
+        self.assertEqual(
+            pacs_submission["verification_summary"]["guardian_mode"],
+            "verification_proxy",
+        )
+        self.assertEqual(
+            pacs_submission["verification_summary"]["bundle_reference"],
+            "mri-case-0001.mri-guard-bundle",
+        )
+        self.assertEqual(pacs_submission["series"][0]["role"], "verified_reconstruction")
+        self.assertEqual(integration_trace["pipeline"][0]["label"], "DICOM Input")
+        self.assertEqual(integration_trace["pipeline"][2]["label"], "PACS Output")
+
+    def test_mock_pacs_block_notice_withholds_tampered_case(self) -> None:
+        state = build_tamper_scenarios()[0]["state"]
+
+        dicom_input = build_mock_dicom_input(state)
+        pacs_block = build_mock_pacs_block_notice(state)
+        integration_trace = build_mock_integration_trace(
+            dicom_input=dicom_input,
+            pacs_output=pacs_block,
+        )
+
+        self.assertEqual(pacs_block["submission_status"], "blocked")
+        self.assertEqual(
+            pacs_block["blocked_reason"],
+            "mask_voxel_mismatch (delta = 342 voxels)",
+        )
+        self.assertEqual(pacs_block["withheld_series"][0]["role"], "verified_reconstruction")
+        self.assertEqual(integration_trace["pipeline"][1]["decision"], "blocked")
+        self.assertEqual(integration_trace["pipeline"][2]["label"], "PACS Output Blocked")
+
     def test_view_model_reports_no_visual_findings_for_clean_case(self) -> None:
         state = build_demo_case()
 
@@ -231,6 +300,8 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(view_model["summary"]["mask_voxel_delta"], 0)
         self.assertEqual(view_model["summary"]["rejected_region_count"], 0)
         self.assertEqual(view_model["summary"]["intensity_mismatch_voxel_count"], 0)
+        self.assertEqual(view_model["integration"]["ingress_label"], "Mock DICOM Input")
+        self.assertEqual(view_model["integration"]["egress_label"], "Mock PACS Output")
         self.assertEqual(view_model["differences"]["rows"], [])
 
     def test_view_model_flags_rejected_mask_region_for_fake_tumour_voxel(self) -> None:
@@ -253,6 +324,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(view_model["differences"]["rows"][0]["column_index"], 0)
         self.assertEqual(view_model["differences"]["rows"][0]["code"], "mask_false_positive")
         self.assertEqual(view_model["differences"]["rows"][0]["status_label"], "Rejected Region")
+        self.assertEqual(view_model["integration"]["egress_label"], "PACS Output Blocked")
         self.assertEqual(view_model["slices"][0]["verified_mask"][0][0], 0)
 
     def test_html_report_contains_side_by_side_labels_and_difference_register(self) -> None:
@@ -265,8 +337,10 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
 
         self.assertIn("MRI Guardian Layer", html)
+        self.assertIn("Mock DICOM Input", html)
         self.assertIn("AI Reconstruction + Proposed Tumour Mask", html)
         self.assertIn("Guardian Layer Reconstruction + Verified Mask", html)
+        self.assertIn("PACS Output Blocked", html)
         self.assertIn("Difference Register", html)
         self.assertIn("Rejected Region", html)
         self.assertIn("Verification FAILED", html)

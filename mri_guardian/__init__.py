@@ -16,6 +16,13 @@ from .harness import (
     build_demo_authority_sources,
     build_demo_case,
 )
+from .integration import (
+    build_mock_dicom_input,
+    build_mock_integration_trace,
+    build_mock_pacs_block_notice,
+    build_mock_pacs_submission,
+    restore_case_state_from_dicom_input,
+)
 from .tamper import build_tamper_mode_base_case, build_tamper_scenarios
 from .timing import build_timing_overlay_snapshot
 from .viewer import build_side_by_side_view_model, render_side_by_side_report_html
@@ -33,6 +40,11 @@ __all__ = [
     "build_case_verification_report",
     "build_demo_authority_sources",
     "build_demo_case",
+    "build_mock_dicom_input",
+    "build_mock_integration_trace",
+    "build_mock_pacs_block_notice",
+    "build_mock_pacs_submission",
+    "restore_case_state_from_dicom_input",
     "build_tamper_mode_base_case",
     "build_tamper_scenarios",
     "build_timing_overlay_snapshot",

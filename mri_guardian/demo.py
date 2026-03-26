@@ -18,6 +18,12 @@ from .harness import (
     build_demo_case,
     render_release_bundle_json,
 )
+from .integration import (
+    build_mock_dicom_input,
+    build_mock_integration_trace,
+    build_mock_pacs_block_notice,
+    build_mock_pacs_submission,
+)
 from .tamper import build_tamper_mode_base_case, build_tamper_scenarios
 from .viewer import render_side_by_side_report_html
 
@@ -29,6 +35,11 @@ def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
     output_path.mkdir(parents=True, exist_ok=True)
     (output_path / "comparison_rejected_candidate.html").unlink(missing_ok=True)
     case_state = build_demo_case()
+    dicom_input = build_mock_dicom_input(case_state)
+    (output_path / "dicom_input.json").write_text(
+        f"{canonical_json_dumps(dicom_input)}\n",
+        encoding="utf-8",
+    )
     harness = MriGuardianHarness(
         transparency_log_path=output_path / "transparency-log.jsonl",
     )
@@ -61,6 +72,22 @@ def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
     if not bundle_verification["verified"]:
         msg = f"Portable bundle verification failed: {bundle_verification['failures']!r}"
         raise ValueError(msg)
+    pacs_submission = build_mock_pacs_submission(
+        result,
+        bundle_reference=bundle_path.name,
+    )
+    integration_trace = build_mock_integration_trace(
+        dicom_input=dicom_input,
+        pacs_output=pacs_submission,
+    )
+    (output_path / "pacs_submission.json").write_text(
+        f"{canonical_json_dumps(pacs_submission)}\n",
+        encoding="utf-8",
+    )
+    (output_path / "integration_trace.json").write_text(
+        f"{canonical_json_dumps(integration_trace)}\n",
+        encoding="utf-8",
+    )
     (output_path / "bundle_verification.json").write_text(
         f"{canonical_json_dumps(bundle_verification)}\n",
         encoding="utf-8",
@@ -104,11 +131,29 @@ def _write_tamper_mode_reports(output_path: Path) -> None:
     )
     for scenario in build_tamper_scenarios():
         report_path = output_path / f"tamper_{scenario['slug']}.html"
+        dicom_input = build_mock_dicom_input(scenario["state"])
+        pacs_block = build_mock_pacs_block_notice(scenario["state"])
+        integration_trace = build_mock_integration_trace(
+            dicom_input=dicom_input,
+            pacs_output=pacs_block,
+        )
         report_path.write_text(
             render_side_by_side_report_html(
                 scenario["state"],
                 report_title=scenario["title"],
             ),
+            encoding="utf-8",
+        )
+        (output_path / f"tamper_{scenario['slug']}_dicom_input.json").write_text(
+            f"{canonical_json_dumps(dicom_input)}\n",
+            encoding="utf-8",
+        )
+        (output_path / f"tamper_{scenario['slug']}_pacs_block.json").write_text(
+            f"{canonical_json_dumps(pacs_block)}\n",
+            encoding="utf-8",
+        )
+        (output_path / f"tamper_{scenario['slug']}_integration_trace.json").write_text(
+            f"{canonical_json_dumps(integration_trace)}\n",
             encoding="utf-8",
         )
 
