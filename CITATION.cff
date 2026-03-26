@@ -11,6 +11,18 @@ abstract: >-
 authors:
   - family-names: Fisher
     given-names: Benjamin Anthony
+    affiliation: DPA R&D Ltd
+    email: b.fisher@dpa-cloud.co.uk
+    orcid: https://orcid.org/0009-0004-4412-2269
+contact:
+  - family-names: Fisher
+    given-names: Benjamin Anthony
+    affiliation: DPA R&D Ltd
+    email: b.fisher@dpa-cloud.co.uk
+    orcid: https://orcid.org/0009-0004-4412-2269
+  - name: DPA R&D Ltd
+    email: b.fisher@dpa-cloud.co.uk
+    website: https://www.dpa-cloud.co.uk
 keywords:
   - MRI
   - verification
