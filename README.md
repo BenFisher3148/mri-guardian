@@ -33,6 +33,17 @@ The ICSD verification layer makes the release state invariant-closed. A case is 
 - [mri_guardian/viewer.py](mri_guardian/viewer.py) renders the side-by-side Guardian Layer review page with mismatch and rejected-region highlights.
 - [tests/test_guardian.py](tests/test_guardian.py) covers the happy path and two rejection paths.
 
+## Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/SECURITY.md](docs/SECURITY.md)
+- [docs/PERFORMANCE.md](docs/PERFORMANCE.md)
+- [docs/INTEROPERABILITY.md](docs/INTEROPERABILITY.md)
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
+- [docs/DATA_DICT.md](docs/DATA_DICT.md)
+- [docs/adr/README.md](docs/adr/README.md)
+- [CITATION.cff](CITATION.cff)
+
 ## Run
 
 Run the deterministic demo:
