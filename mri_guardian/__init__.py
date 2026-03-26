@@ -34,7 +34,7 @@ from .integration import (
     restore_case_state_from_dicom_input,
 )
 from .tamper import build_tamper_mode_base_case, build_tamper_scenarios
-from .timing import build_timing_overlay_snapshot
+from .timing import build_guardian_performance_profile, build_timing_overlay_snapshot
 from .viewer import build_side_by_side_view_model, render_side_by_side_report_html
 
 __all__ = [
@@ -65,6 +65,7 @@ __all__ = [
     "restore_case_state_from_dicom_input",
     "build_tamper_mode_base_case",
     "build_tamper_scenarios",
+    "build_guardian_performance_profile",
     "build_timing_overlay_snapshot",
     "build_side_by_side_view_model",
     "render_side_by_side_report_html",

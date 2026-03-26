@@ -27,6 +27,7 @@ The ICSD verification layer makes the release state invariant-closed. A case is 
 - [mri_guardian/harness.py](mri_guardian/harness.py) defines the policy profile, invariants, deterministic reconstruction checks, and release transition.
 - [mri_guardian/integration.py](mri_guardian/integration.py) mocks the DICOM ingress and PACS egress contracts around the verification proxy.
 - [mri_guardian/tamper.py](mri_guardian/tamper.py) builds deterministic fake-tumour, shifted-mask, and intensity-manipulation scenarios.
+- [mri_guardian/timing.py](mri_guardian/timing.py) profiles benchmark ladders, worst-case bounds, and the streaming-validation strategy for the verification path.
 - [mri_guardian/transparency.py](mri_guardian/transparency.py) implements a file-backed append-only hash chain for ICSD transparency receipts.
 - [mri_guardian/demo.py](mri_guardian/demo.py) writes a deterministic demo evidence bundle and downstream workstation payload.
 - [mri_guardian/viewer.py](mri_guardian/viewer.py) renders the side-by-side Guardian Layer review page with mismatch and rejected-region highlights.
@@ -66,6 +67,10 @@ Inspect the explicit claim-to-proof interfaces:
 - `demo_artifacts/verified_reconstruction_trace.json`
 - `demo_artifacts/mask_derivation_policy.json`
 - `demo_artifacts/verification_tolerance_policy.json`
+
+Inspect the performance evidence:
+
+- `demo_artifacts/performance_profile.json`
 
 Verify the archive or an extracted `bundle.json` replay package in Python:
 
@@ -140,7 +145,7 @@ The added viewer makes that boundary human-visible. It renders the verification 
 - Level 1 / Level 2 / Level 3 verification cards so reviewers can see which trust layer passed, failed, or only warned
 - highlighted mismatched voxels
 - highlighted rejected mask regions where the AI overlay rests on unsupported pixels
-- a timing overlay that measures reconstruction, verification, and total overhead on a cached in-memory performance probe
+- a timing overlay that measures representative reconstruction latency, verification latency, total overhead, and a profiled worst-case bound
 
 The tamper-mode reports make failure detection explicit:
 
@@ -158,4 +163,19 @@ This segmentation rule is intentionally simple for the prototype: the verified m
 
 Level 3 should be read in that light: it does not claim diagnosis quality. It is an optional, deterministic heuristics layer that helps frame whether the verified anatomy still looks clinically reasonable enough for human follow-up.
 
-The timing overlay uses a cached synthetic probe derived from the deterministic tamper baseline, scaled to a larger in-memory volume. It reports median reconstruction and verification timings across repeated runs and includes the active NumPy/Numba backend so reviewers can see the numerical path is fast enough to be practical.
+The performance story is now explicit rather than anecdotal. The timing layer uses cached synthetic probes derived from the deterministic tamper baseline and profiles three shapes:
+
+- a streaming slab for early partial validation
+- a representative review volume for the headline timing cards
+- a larger high-load probe used to derive a guarded worst-case latency bound
+
+The emitted `performance_profile.json` records the benchmark ladder, the profiled worst-case bound, and the active NumPy/Numba backend.
+
+The worst-case bound is intentionally shape-scoped rather than hand-wavy. It is computed from the largest profiled volume, using the observed max across warmed runs plus a deterministic safety margin, so reviewers can see exactly what latency claim is being made and for which volume size.
+
+The streaming / partial validation strategy is also explicit:
+
+- per-object structural checks run before FFT work starts
+- raw k-space slabs are canonicalised and hashed as they arrive
+- completed slabs can be reconstructed and parity-checked before the full series closes
+- final PACS/workstation release still waits for the full-volume proof, so streaming reduces latency without weakening the release gate

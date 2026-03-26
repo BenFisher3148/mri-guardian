@@ -33,7 +33,10 @@ from mri_guardian.integration import (
     restore_case_state_from_dicom_input,
 )
 from mri_guardian.tamper import build_tamper_scenarios
-from mri_guardian.timing import build_timing_overlay_snapshot
+from mri_guardian.timing import (
+    build_guardian_performance_profile,
+    build_timing_overlay_snapshot,
+)
 from mri_guardian.viewer import build_side_by_side_view_model, render_side_by_side_report_html
 
 
@@ -394,6 +397,12 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertGreater(view_model["timing"]["reconstruction_ms"], 0)
         self.assertGreaterEqual(view_model["timing"]["verification_ms"], 0)
         self.assertGreaterEqual(view_model["timing"]["overhead_percent"], 0)
+        self.assertEqual(len(view_model["timing"]["benchmarks"]), 3)
+        self.assertIn("worst_case_bound", view_model["timing"])
+        self.assertEqual(
+            view_model["timing"]["streaming_strategy"]["mode"],
+            "streaming_partial_validation",
+        )
         self.assertEqual(view_model["summary"]["mask_voxel_delta"], 0)
         self.assertEqual(view_model["summary"]["rejected_region_count"], 0)
         self.assertEqual(view_model["summary"]["intensity_mismatch_voxel_count"], 0)
@@ -464,6 +473,9 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertIn("Reconstruction", html)
         self.assertIn("Verification", html)
         self.assertIn("Total Overhead", html)
+        self.assertIn("Worst-Case Bound", html)
+        self.assertIn("Profiled Bounds", html)
+        self.assertIn("Streaming / Partial Validation", html)
 
     def test_tamper_mode_scenarios_surface_expected_primary_failures(self) -> None:
         scenarios = {scenario["slug"]: scenario for scenario in build_tamper_scenarios()}
@@ -546,15 +558,27 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(view_model["verification"]["tiers"][2]["status_label"], "ADVISORY WARN")
 
     def test_timing_overlay_snapshot_is_positive_and_has_probe_metadata(self) -> None:
+        profile = build_guardian_performance_profile()
         snapshot = build_timing_overlay_snapshot()
 
+        self.assertEqual(snapshot, profile)
         self.assertGreater(snapshot["reconstruction_ms"], 0)
         self.assertGreater(snapshot["verification_ms"], 0)
         self.assertGreater(snapshot["total_pipeline_ms"], 0)
         self.assertGreaterEqual(snapshot["overhead_percent"], 0)
-        self.assertEqual(snapshot["sample_runs"], 7)
+        self.assertEqual(snapshot["sample_runs"], 5)
         self.assertEqual(snapshot["warmup_runs"], 2)
         self.assertEqual(len(snapshot["probe_shape"]), 3)
+        self.assertEqual(len(snapshot["benchmarks"]), 3)
+        self.assertGreaterEqual(
+            snapshot["worst_case_bound"]["total_pipeline_ms"],
+            snapshot["total_pipeline_ms"],
+        )
+        self.assertEqual(
+            snapshot["streaming_strategy"]["recommended_slab_depth_slices"],
+            4,
+        )
+        self.assertEqual(len(snapshot["streaming_strategy"]["stages"]), 4)
         self.assertIn("NumPy FFT core", snapshot["backend"])
 
     def _build_harness(self) -> MriGuardianHarness:

@@ -162,6 +162,8 @@ def render_side_by_side_report_html(
     summary = view_model["summary"]
     verification = view_model["verification"]
     timing = view_model["timing"]
+    benchmark_markup = _benchmark_list_markup(timing)
+    streaming_markup = _streaming_strategy_markup(timing["streaming_strategy"])
     tier_cards_markup = _tier_cards_markup(verification["tiers"])
     findings_markup = "\n".join(
         f"<li>{escape(finding)}</li>" for finding in view_model["findings"]
@@ -451,6 +453,46 @@ def render_side_by_side_report_html(
       color: rgba(245, 247, 251, 0.72);
       font-size: 0.84rem;
       line-height: 1.45;
+    }}
+
+    .performance-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+      margin: 18px 0 18px;
+    }}
+
+    .performance-card {{
+      padding: 16px;
+      border-radius: 20px;
+      background: rgba(7, 15, 24, 0.34);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }}
+
+    .performance-card h2 {{
+      margin: 0 0 10px;
+      font-size: 1rem;
+      color: #f5f7fb;
+    }}
+
+    .performance-copy,
+    .performance-note {{
+      margin: 0 0 10px;
+      color: rgba(245, 247, 251, 0.8);
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }}
+
+    .performance-list {{
+      margin: 0;
+      padding-left: 18px;
+      color: rgba(245, 247, 251, 0.84);
+      font-size: 0.88rem;
+      line-height: 1.45;
+    }}
+
+    .performance-list li + li {{
+      margin-top: 8px;
     }}
 
     .tier-grid {{
@@ -850,11 +892,42 @@ def render_side_by_side_report_html(
           <span class="timing-label">Total Overhead</span>
           <div class="timing-value">+{_display_percent(timing["overhead_percent"])}</div>
         </article>
+        <article class="timing-card">
+          <span class="timing-label">Worst-Case Bound</span>
+          <div class="timing-value">&le; {_display_ms(timing["worst_case_bound"]["total_pipeline_ms"])}</div>
+        </article>
       </div>
       <p class="timing-meta">
-        Probe: {escape(_display_probe_shape(timing["probe_shape"]))}. Median of {timing["sample_runs"]} runs after {timing["warmup_runs"]} warm-up runs.
-        Backend: {escape(timing["backend"])}. Total pipeline: {_display_ms(timing["total_pipeline_ms"])}.
+        Representative probe: {escape(_display_probe_shape(timing["probe_shape"]))} ({_display_voxel_count(timing["probe_voxel_count"])} voxels).
+        Median of {timing["sample_runs"]} runs after {timing["warmup_runs"]} warm-up runs.
+        Backend: {escape(timing["backend"])}. Representative total pipeline: {_display_ms(timing["total_pipeline_ms"])}.
       </p>
+      <div class="performance-grid">
+        <article class="performance-card">
+          <h2>Profiled Bounds</h2>
+          <p class="performance-copy">
+            High-load profiled bound: &le; {_display_ms(timing["worst_case_bound"]["total_pipeline_ms"])}
+            total at {escape(_display_probe_shape(timing["worst_case_bound"]["probe_shape"]))}
+            ({_display_voxel_count(timing["worst_case_bound"]["probe_voxel_count"])} voxels),
+            with reconstruction bounded at &le; {_display_ms(timing["worst_case_bound"]["reconstruction_ms"])}
+            and verification bounded at &le; {_display_ms(timing["worst_case_bound"]["verification_ms"])}.
+          </p>
+          <p class="performance-note">{escape(timing["worst_case_bound"]["basis"])}</p>
+          <ul class="performance-list">
+            {benchmark_markup}
+          </ul>
+        </article>
+        <article class="performance-card">
+          <h2>Streaming / Partial Validation</h2>
+          <p class="performance-copy">{escape(timing["streaming_strategy"]["release_policy"])}</p>
+          <ul class="performance-list">
+            {streaming_markup}
+          </ul>
+          <p class="performance-note">
+            Early block conditions: {escape(", ".join(timing["streaming_strategy"]["early_block_conditions"]))}.
+          </p>
+        </article>
+      </div>
       <div class="tier-grid">
         {tier_cards_markup}
       </div>
@@ -1468,6 +1541,36 @@ def _difference_table_markup(differences: dict[str, Any]) -> str:
     )
 
 
+def _benchmark_list_markup(timing: dict[str, Any]) -> str:
+    items = []
+    for benchmark in timing["benchmarks"]:
+        items.append(
+            "<li>"
+            f"<strong>{escape(benchmark['label'])}</strong>: "
+            f"{escape(_display_probe_shape(benchmark['probe_shape']))} "
+            f"({_display_voxel_count(benchmark['probe_voxel_count'])} voxels), "
+            f"reconstruction {_display_ms(benchmark['reconstruction_ms'])}, "
+            f"verification {_display_ms(benchmark['verification_ms'])}, "
+            f"total {_display_ms(benchmark['total_pipeline_ms'])}, "
+            f"overhead +{_display_percent(benchmark['overhead_percent'])}. "
+            f"{escape(benchmark['purpose'])}"
+            "</li>"
+        )
+    return "\n".join(items)
+
+
+def _streaming_strategy_markup(streaming_strategy: dict[str, Any]) -> str:
+    items = []
+    for stage in streaming_strategy["stages"]:
+        items.append(
+            "<li>"
+            f"<strong>{escape(stage['title'])}</strong> ({escape(stage['window'])}): "
+            f"{escape(stage['action'])} Benefit: {escape(stage['benefit'])}"
+            "</li>"
+        )
+    return "\n".join(items)
+
+
 def _display_ms(value: float) -> str:
     rounded = int(round(float(value)))
     return f"{rounded}ms"
@@ -1480,3 +1583,7 @@ def _display_percent(value: float) -> str:
 
 def _display_probe_shape(shape: list[int]) -> str:
     return "x".join(str(int(item)) for item in shape)
+
+
+def _display_voxel_count(value: int) -> str:
+    return f"{int(value):,}"

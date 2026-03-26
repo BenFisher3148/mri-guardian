@@ -26,6 +26,7 @@ from .integration import (
     build_mock_pacs_submission,
 )
 from .tamper import build_tamper_mode_base_case, build_tamper_scenarios
+from .timing import build_guardian_performance_profile
 from .viewer import render_side_by_side_report_html
 
 DEMO_TIMESTAMP = "2026-03-26T00:00:00Z"
@@ -78,6 +79,10 @@ def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
     )
     (output_path / "verification_tolerance_policy.json").write_text(
         f"{canonical_json_dumps(report['contracts']['verification_tolerance_policy'])}\n",
+        encoding="utf-8",
+    )
+    (output_path / "performance_profile.json").write_text(
+        f"{canonical_json_dumps(build_guardian_performance_profile())}\n",
         encoding="utf-8",
     )
     bundle_path = output_path / f"{case_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
