@@ -29,6 +29,7 @@ The Guardian Layer is intentionally non-invasive. It does not replace the MRI sc
 - The PACS/workstation path never receives AI-authored pixels directly from the Guardian path.
 - The released reconstruction is always recomputed from raw k-space inside the verification layer.
 - The verified mask is always derived from the raw-derived reconstruction by a deterministic runtime-profile mask rule.
+- Mask derivation uses a fixed approved in-repo algorithm catalogue rather than environment-discovered plugins or runtime-swappable release engines.
 - Release is fail-closed for the Guardian handoff. If blocking proof fails, nothing verified is forwarded downstream.
 - Identical inputs must produce identical released state, evidence, bundle members, and replay hashes.
 - The replay path must bind to the embedded runtime profile descriptor by `profile_name`, `profile_revision`, and `profile_digest`, not the process default.
@@ -43,11 +44,22 @@ The architecture separates three identities:
 
 The canonical `VerificationProfileDescriptor` is a first-class artifact. It is serialized with stable field ordering, hashed with SHA-256 over an explicit digest scope, and embedded in reports, released manifests, replay descriptors, and portable bundles.
 
+## Approved Mask Algorithm Catalogue
+
+The verified-mask layer uses a fixed approved algorithm catalogue and canonical dispatcher.
+
+- No user-installed plugins, module scanning, or environment discovery is supported.
+- The selected runtime profile freezes the algorithm family for a released case.
+- Algorithm identifiers are proof-significant names and must remain stable once published.
+- Canonical parameter resolution happens before execution, rejects unknown or algorithm-inapplicable parameters, and serializes one resolved parameter object into all proof surfaces.
+- Runtime metadata such as timing, operation counts, and debug notes is explicitly non-canonical and excluded from manifests, bundle hashes, and replay material.
+
 ## Major Components
 
 | Module | Responsibility |
 | --- | --- |
 | [`mri_guardian/harness.py`](../mri_guardian/harness.py) | Core verification transition, deterministic reconstruction, release gate, and manifest generation. |
+| [`mri_guardian/mask_engine.py`](../mri_guardian/mask_engine.py) | Fixed approved mask-algorithm catalogue, canonical parameter normalization, and deterministic dispatcher. |
 | [`mri_guardian/profiles.py`](../mri_guardian/profiles.py) | Runtime profile registry, canonical descriptor hashing, and mapping to ICSD invariant policy identities. |
 | [`mri_guardian/contracts.py`](../mri_guardian/contracts.py) | Explicit claim-to-proof interfaces: `AIClaimEnvelope`, `MaskDerivationPolicy`, `VerificationTolerancePolicy`, and `VerifiedReconstructionTrace`. |
 | [`mri_guardian/integration.py`](../mri_guardian/integration.py) | Mocked DICOM ingress, PACS egress, and hospital integration narrative. |
@@ -64,7 +76,7 @@ The canonical `VerificationProfileDescriptor` is a first-class artifact. It is s
 3. Reconstruct the image from raw k-space with an inverse FFT.
 4. Reproject that reconstruction into frequency space and compare it with the supplied measurements.
 5. Compare the AI reconstruction with the raw-derived reconstruction using explicit per-voxel and global-norm tolerances.
-6. Derive the verified mask using the selected runtime profile and compare it with the AI mask.
+6. Resolve the runtime profile's mask policy canonically, derive the verified mask with the approved dispatcher, and compare it with the AI mask.
 7. Recompute tumour volume from verified voxels and voxel spacing.
 8. If deterministic proof passes and the selected profile permits final release, emit:
    - `verified_manifest`

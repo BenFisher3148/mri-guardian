@@ -35,6 +35,13 @@ from .integration import (
     build_mock_pacs_submission,
     restore_case_state_from_dicom_input,
 )
+from .mask_engine import (
+    MORPHOLOGY_ALGORITHM,
+    THRESHOLD_ALGORITHM,
+    derive_verified_mask,
+    list_approved_mask_algorithms,
+    resolve_mask_policy,
+)
 from .profiles import (
     DEFAULT_PROFILE_NAME,
     DEFAULT_VERIFICATION_PROFILE_NAME,
@@ -87,6 +94,11 @@ __all__ = [
     "build_mock_pacs_block_notice",
     "build_mock_pacs_submission",
     "restore_case_state_from_dicom_input",
+    "THRESHOLD_ALGORITHM",
+    "MORPHOLOGY_ALGORITHM",
+    "resolve_mask_policy",
+    "derive_verified_mask",
+    "list_approved_mask_algorithms",
     "build_tamper_mode_base_case",
     "build_tamper_scenarios",
     "build_guardian_performance_profile",

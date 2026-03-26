@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from .harness import _round_float
+from .harness import _derive_verified_mask, _round_float
 from .profiles import DEFAULT_PROFILE_NAME, get_verification_profile
 from .tamper import build_tamper_mode_base_case
 
@@ -155,7 +155,7 @@ def _run_verification_stage(
         np.abs(ai_reconstruction - derived_reconstruction)
         > descriptor.tolerance("spatial_per_voxel_abs_error")
     )
-    verified_mask = (derived_reconstruction >= descriptor.mask_threshold).astype(np.int64)
+    verified_mask = _derive_verified_mask(derived_reconstruction, descriptor)
     rejected_mask = (ai_mask == 1) & (verified_mask == 0)
     missing_mask = (ai_mask == 0) & (verified_mask == 1)
     voxel_volume_mm3 = float(np.prod(probe["voxel_spacing_mm"]))

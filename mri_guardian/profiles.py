@@ -9,6 +9,12 @@ from typing import Any
 from icsd.core.invariants import Invariant, InvariantProfile, InvariantProfileRegistry, InvariantSet
 from icsd.core.serialise import canonical_json_dumps, hash_canonical_json
 
+from .mask_engine import (
+    MORPHOLOGY_ALGORITHM,
+    THRESHOLD_ALGORITHM,
+    resolve_mask_policy,
+)
+
 PROFILE_SCHEMA_VERSION = "guardian-profile/v1"
 PROFILE_REVISION_SCOPE = "profile_name"
 PROFILE_DIGEST_ALGORITHM = "sha256"
@@ -53,8 +59,26 @@ class VerificationProfileDescriptor:
         return f"{self.icsd_policy_id}@{self.icsd_policy_version}"
 
     @property
+    def canonical_mask_policy(self) -> dict[str, Any]:
+        return resolve_mask_policy(self.mask_rules).to_dict()
+
+    @property
+    def mask_algorithm(self) -> str:
+        return str(self.canonical_mask_policy["algorithm"])
+
+    @property
+    def canonical_mask_parameters(self) -> dict[str, Any]:
+        return deepcopy(dict(self.canonical_mask_policy["parameters"]))
+
+    @property
     def mask_threshold(self) -> float:
-        return float(self.mask_rules["threshold"])
+        parameters = self.canonical_mask_parameters
+        if "threshold" not in parameters:
+            raise ValueError(
+                "mask_threshold is a threshold-family compatibility alias and is not "
+                f"available for {self.mask_algorithm!r}."
+            )
+        return float(parameters["threshold"])
 
     @property
     def guard_band_fraction(self) -> float:
@@ -201,6 +225,10 @@ def verification_profile_descriptor_from_dict(
         heuristic_rules=deepcopy(dict(payload["heuristic_rules"])),
         performance_expectations=deepcopy(dict(payload["performance_expectations"])),
     )
+    try:
+        resolve_mask_policy(descriptor.mask_rules)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid mask_rules for profile {descriptor.profile_name!r}: {exc}") from exc
     expected_digest = descriptor.profile_digest()
     observed_digest = str(payload["profile_digest"])
     if expected_digest != observed_digest:
@@ -286,7 +314,7 @@ def _profile(
     risk_posture: str,
     operator_interpretation: str,
     icsd_policy_id: str,
-    threshold: float,
+    mask_rules: dict[str, Any],
     guard_band_fraction: float,
     spatial_per_voxel_abs_error: float,
     spatial_global_relative_l2_error: float,
@@ -323,14 +351,7 @@ def _profile(
             "warnings_allow_final_release": final_release_allowed,
             "success_decision_class": success_decision_class,
         },
-        mask_rules={
-            "algorithm": "threshold_on_raw_derived_reconstruction",
-            "deterministic": True,
-            "input_semantics": "raw_derived_reconstruction",
-            "output_semantics": "verified_mask",
-            "comparison": "greater_than_or_equal",
-            "threshold": float(threshold),
-        },
+        mask_rules=deepcopy(resolve_mask_policy(mask_rules).to_dict()),
         tolerance_rules={
             "guard_band_fraction": float(guard_band_fraction),
             "spatial_per_voxel_abs_error": float(spatial_per_voxel_abs_error),
@@ -378,6 +399,38 @@ _COMMON_TOLERANCES = {
     "volume_absolute_error": 1e-9,
 }
 
+
+def _threshold_mask_rules(
+    *,
+    threshold: float,
+    comparison: str = "greater_than_or_equal",
+) -> dict[str, Any]:
+    return {
+        "algorithm": THRESHOLD_ALGORITHM,
+        "parameters": {
+            "comparison": comparison,
+            "threshold": float(threshold),
+        },
+    }
+
+
+def _morphology_mask_rules(
+    *,
+    threshold: float,
+    comparison: str = "greater_than_or_equal",
+    opening_radius_voxels: int = 1,
+    closing_radius_voxels: int = 1,
+) -> dict[str, Any]:
+    return {
+        "algorithm": MORPHOLOGY_ALGORITHM,
+        "parameters": {
+            "comparison": comparison,
+            "threshold": float(threshold),
+            "opening_radius_voxels": int(opening_radius_voxels),
+            "closing_radius_voxels": int(closing_radius_voxels),
+        },
+    }
+
 _COMMON_FINAL_AUTHORITIES = (
     "scanner_manifest",
     "voxel_geometry",
@@ -394,7 +447,7 @@ _PROFILES = {
         risk_posture="baseline",
         operator_interpretation="Standard final-release verification posture for non-contrast T1 studies.",
         icsd_policy_id="policy/mri-guardian/brain-t1-baseline",
-        threshold=2.5,
+        mask_rules=_threshold_mask_rules(threshold=2.5),
         guard_band_fraction=0.8,
         required_authority_source_types=_COMMON_FINAL_AUTHORITIES,
         heuristic_rules={
@@ -426,6 +479,49 @@ _PROFILES = {
         success_decision_class=DECISION_CLASS_FINAL_RELEASE,
         **_COMMON_TOLERANCES,
     ),
+    "brain_t1_morphology_review": _profile(
+        profile_name="brain_t1_morphology_review",
+        sequence_family="brain_t1",
+        clinical_mode="morphology_review_final_release",
+        purpose="Showcase deterministic morphology-constrained mask verification on T1 studies.",
+        risk_posture="review",
+        operator_interpretation=(
+            "Review posture that keeps the raw-derived proof model while using a "
+            "morphology-constrained deterministic mask family."
+        ),
+        icsd_policy_id="policy/mri-guardian/brain-t1-morphology-review",
+        mask_rules=_morphology_mask_rules(threshold=2.5),
+        guard_band_fraction=0.8,
+        required_authority_source_types=_COMMON_FINAL_AUTHORITIES,
+        heuristic_rules={
+            "mask_fraction_guardrail": _heuristic(
+                label="Verified occupancy fraction",
+                severity=HEURISTIC_WARNING,
+                comparison="less_than_or_equal",
+                threshold=0.35,
+            ),
+            "inside_outside_contrast": _heuristic(
+                label="Inside/outside contrast delta",
+                severity=HEURISTIC_WARNING,
+                comparison="greater_than_or_equal",
+                threshold=0.75,
+            ),
+            "slice_span": _heuristic(
+                label="Slice span",
+                severity=HEURISTIC_WARNING,
+                comparison="greater_than_or_equal",
+                threshold=2.0,
+            ),
+        },
+        representative_total_ms_budget=90.0,
+        worst_case_total_ms_budget=190.0,
+        final_release_allowed=True,
+        portable_bundle_allowed=True,
+        transparency_artifact_allowed=True,
+        requires_operator_review_on_warning=True,
+        success_decision_class=DECISION_CLASS_FINAL_RELEASE,
+        **_COMMON_TOLERANCES,
+    ),
     "brain_t2_baseline": _profile(
         profile_name="brain_t2_baseline",
         sequence_family="brain_t2",
@@ -434,7 +530,7 @@ _PROFILES = {
         risk_posture="baseline",
         operator_interpretation="Standard final-release verification posture for T2-weighted studies.",
         icsd_policy_id="policy/mri-guardian/brain-t2-baseline",
-        threshold=1.75,
+        mask_rules=_threshold_mask_rules(threshold=1.75),
         guard_band_fraction=0.8,
         required_authority_source_types=_COMMON_FINAL_AUTHORITIES,
         heuristic_rules={
@@ -474,7 +570,7 @@ _PROFILES = {
         risk_posture="review",
         operator_interpretation="Final-release posture for post-contrast review with explicit protocol anchoring.",
         icsd_policy_id="policy/mri-guardian/contrast-enhanced-review",
-        threshold=3.0,
+        mask_rules=_threshold_mask_rules(threshold=3.0),
         guard_band_fraction=0.8,
         required_authority_source_types=_COMMON_FINAL_AUTHORITIES + ("contrast_protocol",),
         heuristic_rules={
@@ -516,7 +612,7 @@ _PROFILES = {
             "Stricter operational posture for audit and reproducibility; not inherently more clinically correct."
         ),
         icsd_policy_id="policy/mri-guardian/strict-research",
-        threshold=2.5,
+        mask_rules=_threshold_mask_rules(threshold=2.5),
         guard_band_fraction=0.9,
         required_authority_source_types=_COMMON_FINAL_AUTHORITIES + ("research_protocol",),
         heuristic_rules={
@@ -561,7 +657,7 @@ _PROFILES = {
         risk_posture="triage",
         operator_interpretation="Triage-only output must not be treated as a final verified release.",
         icsd_policy_id="policy/mri-guardian/fast-triage",
-        threshold=2.5,
+        mask_rules=_threshold_mask_rules(threshold=2.5),
         guard_band_fraction=0.7,
         required_authority_source_types=(
             "scanner_manifest",

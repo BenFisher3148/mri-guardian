@@ -66,6 +66,7 @@ The Guardian Layer now has a runtime profile registry rather than a single verif
 Built-in profiles:
 
 - `brain_t1_baseline`
+- `brain_t1_morphology_review`
 - `brain_t2_baseline`
 - `contrast_enhanced_review`
 - `strict_research_mode`
@@ -73,7 +74,41 @@ Built-in profiles:
 
 `fast_triage_mode` is intentionally non-final. It can produce a deterministic proof result for pre-screening, but it cannot release a final Guardian state or portable evidence bundle.
 
+For future additions, prefer profile names shaped like `<domain>_<sequence>_<policy_family>_<posture>`. Existing names are kept for continuity.
+
 The ICSD verification layer makes the release state invariant-closed. A case is either `pending_verification` with no released payload, or `released_to_radiologist` with a `verified_manifest` and `workstation_payload` that exactly match the expected mathematical trace. If the AI invents pixels or misstates the volume, the released state becomes unrepresentable and the transition fails.
+
+## Approved Mask Algorithm Catalogue
+
+Verified-mask derivation uses a fixed in-repo approved algorithm catalogue, not a plugin system:
+
+- no environment discovery
+- no user-installed engines
+- no module scanning
+- no runtime algorithm override for released verification
+
+Algorithm identifiers are proof-significant names and must remain stable once published in released profiles or replay artifacts.
+
+Canonical parameter resolution happens before execution. The dispatcher:
+
+- rejects unknown or algorithm-inapplicable parameters
+- preserves integers as integers and booleans as booleans
+- normalises enum-like values to canonical lowercase strings
+- removes ambiguity between omitted defaults and explicit defaults by serialising one resolved parameter object
+- executes from that resolved object and serialises that same object into the profile, manifest, bundle, and replay surfaces
+
+Only proof-significant outputs are serialized:
+
+- verified mask array
+- canonical algorithm identity
+- canonical resolved parameters
+
+Runtime metadata such as timing, internal operation counts, or debug notes stays out of manifests, bundle hashes, and replay material.
+
+Built-in approved algorithms:
+
+- `threshold_on_raw_derived_reconstruction`
+- `morphology_constrained_threshold_on_raw_derived_reconstruction`
 
 ## Structure
 
@@ -81,6 +116,7 @@ The ICSD verification layer makes the release state invariant-closed. A case is 
 - [mri_guardian/contracts.py](mri_guardian/contracts.py) defines the reusable `AIClaimEnvelope`, `VerifiedReconstructionTrace`, and `MaskDerivationPolicy` interfaces.
 - [mri_guardian/harness.py](mri_guardian/harness.py) defines the release transition, invariants, deterministic reconstruction checks, and manifest generation.
 - [mri_guardian/integration.py](mri_guardian/integration.py) mocks the DICOM ingress and PACS egress contracts around the verification proxy.
+- [mri_guardian/mask_engine.py](mri_guardian/mask_engine.py) defines the fixed approved mask-algorithm catalogue, canonical parameter resolution, and deterministic dispatcher.
 - [mri_guardian/profiles.py](mri_guardian/profiles.py) defines the runtime profile registry, canonical descriptor hashing, and the mapping from runtime profiles to ICSD policy identities.
 - [mri_guardian/tamper.py](mri_guardian/tamper.py) builds deterministic fake-tumour, shifted-mask, and intensity-manipulation scenarios.
 - [mri_guardian/timing.py](mri_guardian/timing.py) profiles benchmark ladders, worst-case bounds, and the streaming-validation strategy for the verification path.
@@ -220,7 +256,7 @@ The AI can suggest a reconstruction, but it cannot inject a different pixel rast
 That interface is now explicit rather than implied. The harness emits:
 
 - `AIClaimEnvelope`: the AI-side reconstruction, mask, and volume claim anchored to the raw-input hash
-- `MaskDerivationPolicy`: the deterministic rule that turns a raw-derived reconstruction into the admissible mask
+- `MaskDerivationPolicy`: the approved deterministic algorithm identity and canonical resolved parameters that turn a raw-derived reconstruction into the admissible mask
 - `VerificationTolerancePolicy`: the attack-aware tolerance contract that states which metrics are per-voxel, global-norm, and frequency-domain
 - `VerificationProfileDescriptor`: the canonical runtime profile contract with `profile_name`, `profile_revision`, `profile_digest`, release semantics, authority requirements, heuristics, and performance expectations
 - `VerifiedReconstructionTrace`: the proof object that links the raw measurements, derived reconstruction, mask policy, and verified volume back to the original claim
@@ -277,7 +313,9 @@ The PACS integration narrative is now explicit rather than conceptual:
 - the hospital-placement story states that it sits after the reconstruction AI and before PACS/workstation import, behaving like a gateway or sidecar rather than a new clinical system
 - the failure behaviour is fail-closed for the Guardian-verified handoff: if proof fails or the proxy is unavailable, no verified reconstruction, segmentation, manifest, or evidence series are auto-forwarded from the Guardian path
 
-This segmentation rule is intentionally simple for the prototype: the verified mask is derived by a deterministic threshold over the raw-derived reconstruction. The point of the verification layer is not clinical segmentation quality; it is proving that the workstation view and volume estimate are mathematically anchored to measured data and that tampering is detectable.
+The baseline release profiles still use a deterministic threshold rule because it is easy to audit and keeps the original proof-of-concept intact. The repository now also includes a morphology-constrained deterministic showcase profile to demonstrate that the verification layer can support multiple policy families without turning mask derivation into runtime-selectable freedom.
+
+The point of the verification layer is still not clinical segmentation quality by itself. It is proving that the workstation view and volume estimate are mathematically anchored to measured data and that tampering is detectable.
 
 Level 3 should be read in that light: it does not claim diagnosis quality. It is an optional, deterministic heuristics layer that helps frame whether the verified anatomy still looks clinically reasonable enough for human follow-up.
 

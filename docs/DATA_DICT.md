@@ -73,12 +73,28 @@ Defined in [`../mri_guardian/contracts.py`](../mri_guardian/contracts.py).
 
 | Interface | Purpose | Key fields |
 | --- | --- | --- |
-| `VerificationProfileDescriptor` | Canonical runtime profile contract | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, release semantics, heuristics, performance expectations |
+| `VerificationProfileDescriptor` | Canonical runtime profile contract | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, release semantics, canonical `mask_rules`, heuristics, performance expectations |
 | `AIClaimEnvelope` | AI-side claim over reconstruction, mask, and volume | case identity, `raw_kspace_hash`, AI output hashes, claimed volume |
-| `MaskDerivationPolicy` | Deterministic mapping from raw-derived reconstruction to verified mask | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, threshold rule |
+| `MaskDerivationPolicy` | Deterministic mapping from raw-derived reconstruction to verified mask | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, proof-significant `algorithm`, and canonical resolved `parameters` |
 | `VerificationTolerancePolicy` | Explicit numeric tolerance contract | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, per-voxel, per-frequency, global-norm, imaginary leakage, and volume tolerances |
 | `VerifiedReconstructionTrace` | Proof trace from raw k-space to verified reconstruction, mask, and volume | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, raw hash, derived hash, verified mask hash, measurement metrics, claim comparison metrics |
 | `GuardianIntegrationNarrative` | Hospital-facing integration narrative | DICOM compliance story, hospital placement, fail-closed behaviour |
+
+### Mask Policy Shape
+
+- `VerificationProfileDescriptor.mask_rules` stores the canonical approved mask policy object used by the selected profile.
+- `mask_rules.algorithm` is a proof-significant stable identifier, not a display label.
+- `mask_rules.parameters` is resolved canonically before execution. Unknown or algorithm-inapplicable parameters are rejected rather than ignored.
+- Runtime metadata from mask execution, such as timing or internal operation counts, is intentionally excluded from proof artifacts.
+
+### Mask Verification Shape
+
+Released manifests expose `mask_verification` in two logical sections:
+
+- `policy`: canonical `algorithm` plus canonical resolved `parameters`
+- `comparison`: exact-match outcome over AI vs verified mask, including voxel counts and deltas
+
+Flat compatibility aliases may still appear during the transition, but future non-threshold families should rely on canonical `mask_rules` and `policy`/`comparison` structure rather than `mask_threshold`.
 
 ## Integration Artifacts
 

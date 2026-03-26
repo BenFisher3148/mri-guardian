@@ -23,6 +23,7 @@ from .contracts import (
     build_verification_tolerance_policy,
     build_verified_reconstruction_trace,
 )
+from .mask_engine import MORPHOLOGY_ALGORITHM, derive_verified_mask
 from .profiles import (
     DECISION_CLASS_TRIAGE_ONLY,
     DEFAULT_PROFILE_NAME,
@@ -125,14 +126,8 @@ def build_case_verification_report(
 def build_demo_case(*, profile_name: str = DEFAULT_PROFILE_NAME) -> dict[str, Any]:
     """Return a deterministic happy-path MRI case."""
     descriptor = get_verification_profile(profile_name)
-    reconstruction = np.asarray(
-        [
-            [[0.0, 1.0], [0.0, 4.0]],
-            [[0.0, 3.0], [2.0, 0.0]],
-        ],
-        dtype=np.float64,
-    )
-    tumor_mask = (reconstruction >= descriptor.mask_threshold).astype(np.int64)
+    reconstruction = _build_demo_reconstruction(descriptor)
+    tumor_mask = _derive_verified_mask(reconstruction, descriptor)
     voxel_spacing_mm = np.asarray([0.8, 0.8, 2.5], dtype=np.float64)
     raw_kspace = np.fft.fft2(reconstruction, axes=(-2, -1))
     tumor_volume_mm3 = _round_float(int(tumor_mask.sum()) * float(np.prod(voxel_spacing_mm)))
@@ -166,6 +161,7 @@ def build_demo_authority_sources(
 ) -> tuple[AuthoritySource, ...]:
     """Return authority anchors required by the selected runtime profile."""
     descriptor = get_verification_profile(profile_name)
+    demo_shape = list(_build_demo_reconstruction(descriptor).shape)
     sources = [
         AuthoritySource(
             source_type="scanner_manifest",
@@ -177,7 +173,7 @@ def build_demo_authority_sources(
             source_type="voxel_geometry",
             source_id=f"{case_id}-geometry",
             reference=f"geometry://{case_id}/voxel-grid",
-            details={"spacing_mm": [0.8, 0.8, 2.5], "shape": [2, 2, 2]},
+            details={"spacing_mm": [0.8, 0.8, 2.5], "shape": demo_shape},
         ),
         AuthoritySource(
             source_type="model_manifest",
@@ -217,6 +213,20 @@ def build_demo_authority_sources(
             )
         )
     return tuple(sources)
+
+
+def _build_demo_reconstruction(descriptor: Any) -> np.ndarray:
+    if descriptor.mask_algorithm == MORPHOLOGY_ALGORITHM:
+        reconstruction = np.zeros((8, 8, 8), dtype=np.float64)
+        reconstruction[2:5, :, :] = 4.0
+        return reconstruction
+    return np.asarray(
+        [
+            [[0.0, 1.0], [0.0, 4.0]],
+            [[0.0, 3.0], [2.0, 0.0]],
+        ],
+        dtype=np.float64,
+    )
 
 
 def _demo_sequence_id(profile_name: str) -> str:
@@ -728,16 +738,11 @@ def _build_verified_manifest(
         "performance_expectations": contracts["verification_profile_descriptor"][
             "performance_expectations"
         ],
-        "mask_verification": {
-            "verified": mask_verified,
-            "algorithm": contracts["mask_derivation_policy"]["algorithm"],
-            "threshold": contracts["mask_derivation_policy"]["parameters"]["threshold"],
-            "ai_voxel_count": analysis["ai_mask_voxel_count"],
-            "verified_voxel_count": analysis["verified_mask_voxel_count"],
-            "voxel_delta": analysis["mask_voxel_delta"],
-            "false_positive_count": analysis["mask_false_positive_count"],
-            "false_negative_count": analysis["mask_false_negative_count"],
-        },
+        "mask_verification": _build_mask_verification_manifest(
+            analysis=analysis,
+            verified=mask_verified,
+            mask_derivation_policy=contracts["mask_derivation_policy"],
+        ),
         "measurement_consistency": {
             "verified": consistency_verified,
             "domain": "frequency_domain",
@@ -1509,8 +1514,42 @@ def _derive_verified_mask(
     derived_reconstruction: np.ndarray,
     descriptor: Any,
 ) -> np.ndarray:
-    reconstruction = np.asarray(derived_reconstruction, dtype=np.float64)
-    return (reconstruction >= descriptor.mask_threshold).astype(np.int64)
+    execution = derive_verified_mask(derived_reconstruction, descriptor.mask_rules)
+    return execution.verified_mask.astype(np.int64)
+
+
+def _build_mask_verification_manifest(
+    *,
+    analysis: Mapping[str, Any],
+    verified: bool,
+    mask_derivation_policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    policy = {
+        "algorithm": str(mask_derivation_policy["algorithm"]),
+        "parameters": dict(mask_derivation_policy["parameters"]),
+    }
+    comparison = {
+        "verified": bool(verified),
+        "ai_voxel_count": int(analysis["ai_mask_voxel_count"]),
+        "verified_voxel_count": int(analysis["verified_mask_voxel_count"]),
+        "voxel_delta": int(analysis["mask_voxel_delta"]),
+        "false_positive_count": int(analysis["mask_false_positive_count"]),
+        "false_negative_count": int(analysis["mask_false_negative_count"]),
+    }
+    payload = {
+        "verified": bool(verified),
+        "policy": policy,
+        "comparison": comparison,
+        "algorithm": policy["algorithm"],
+        "ai_voxel_count": comparison["ai_voxel_count"],
+        "verified_voxel_count": comparison["verified_voxel_count"],
+        "voxel_delta": comparison["voxel_delta"],
+        "false_positive_count": comparison["false_positive_count"],
+        "false_negative_count": comparison["false_negative_count"],
+    }
+    if "threshold" in policy["parameters"]:
+        payload["threshold"] = policy["parameters"]["threshold"]
+    return payload
 
 
 def _tolerance_metric(
@@ -1568,7 +1607,7 @@ def _build_claim_to_proof_contracts(
         profile_digest=descriptor.profile_digest(),
         icsd_policy_id=descriptor.icsd_policy_id,
         icsd_policy_version=descriptor.icsd_policy_version,
-        threshold=descriptor.mask_threshold,
+        mask_rules=descriptor.mask_rules,
     )
     verification_tolerance_policy = build_verification_tolerance_policy(
         profile_name=descriptor.profile_name,

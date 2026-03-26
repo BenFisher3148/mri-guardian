@@ -7,6 +7,7 @@ from typing import Any
 
 from icsd.core.serialise import hash_canonical_json
 
+from .mask_engine import THRESHOLD_ALGORITHM, resolve_mask_policy
 from .profiles import build_verification_profile_descriptor
 
 
@@ -54,7 +55,11 @@ class MaskDerivationPolicy:
     profile_digest: str
     icsd_policy_id: str
     icsd_policy_version: str
-    threshold: float
+    algorithm: str
+    parameters: dict[str, Any]
+    deterministic: bool
+    input_semantics: str
+    output_semantics: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -66,14 +71,11 @@ class MaskDerivationPolicy:
             "icsd_policy_id": self.icsd_policy_id,
             "icsd_policy_version": self.icsd_policy_version,
             "policy_scope": "verified_mask_from_raw_derived_reconstruction",
-            "algorithm": "threshold_on_raw_derived_reconstruction",
-            "deterministic": True,
-            "input_semantics": "raw_derived_reconstruction",
-            "output_semantics": "verified_mask",
-            "parameters": {
-                "comparison": "greater_than_or_equal",
-                "threshold": self.threshold,
-            },
+            "algorithm": self.algorithm,
+            "deterministic": self.deterministic,
+            "input_semantics": self.input_semantics,
+            "output_semantics": self.output_semantics,
+            "parameters": dict(self.parameters),
         }
 
 
@@ -261,15 +263,38 @@ def build_mask_derivation_policy(
     profile_digest: str,
     icsd_policy_id: str,
     icsd_policy_version: str,
-    threshold: float,
+    mask_rules: dict[str, Any] | None = None,
+    algorithm: str | None = None,
+    parameters: dict[str, Any] | None = None,
+    threshold: float | None = None,
 ) -> dict[str, Any]:
+    if mask_rules is not None and any(
+        value is not None for value in (algorithm, parameters, threshold)
+    ):
+        raise ValueError(
+            "build_mask_derivation_policy accepts either mask_rules or the "
+            "compatibility algorithm/parameters/threshold inputs, not both."
+        )
+    if mask_rules is None:
+        compatibility_parameters = dict(parameters or {})
+        if threshold is not None:
+            compatibility_parameters["threshold"] = threshold
+        mask_rules = {
+            "algorithm": algorithm or THRESHOLD_ALGORITHM,
+            "parameters": compatibility_parameters,
+        }
+    resolved_policy = resolve_mask_policy(mask_rules)
     return MaskDerivationPolicy(
         profile_name=profile_name,
         profile_revision=profile_revision,
         profile_digest=profile_digest,
         icsd_policy_id=icsd_policy_id,
         icsd_policy_version=icsd_policy_version,
-        threshold=float(threshold),
+        algorithm=resolved_policy.algorithm,
+        parameters=dict(resolved_policy.parameters),
+        deterministic=bool(resolved_policy.deterministic),
+        input_semantics=str(resolved_policy.input_semantics),
+        output_semantics=str(resolved_policy.output_semantics),
     ).to_dict()
 
 

@@ -43,6 +43,12 @@ from mri_guardian.integration import (
     build_mock_pacs_submission,
     restore_case_state_from_dicom_input,
 )
+from mri_guardian.mask_engine import (
+    MORPHOLOGY_ALGORITHM,
+    THRESHOLD_ALGORITHM,
+    derive_verified_mask,
+    resolve_mask_policy,
+)
 from mri_guardian.profiles import (
     DEFAULT_PROFILE_NAME,
     DEFAULT_VERIFICATION_PROFILE_NAME,
@@ -64,6 +70,18 @@ from mri_guardian.viewer import (
 )
 
 
+def _reconstruction_with_hot_voxels(
+    shape: tuple[int, int, int],
+    hot_voxels: tuple[tuple[int, int, int], ...],
+    *,
+    hot_value: float = 4.0,
+) -> np.ndarray:
+    reconstruction = np.zeros(shape, dtype=np.float64)
+    for z_index, y_index, x_index in hot_voxels:
+        reconstruction[z_index, y_index, x_index] = hot_value
+    return reconstruction
+
+
 class MriGuardianHarnessTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path("test_runs") / uuid4().hex
@@ -75,6 +93,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
             list_verification_profiles(),
             (
                 "brain_t1_baseline",
+                "brain_t1_morphology_review",
                 "brain_t2_baseline",
                 "contrast_enhanced_review",
                 "strict_research_mode",
@@ -96,6 +115,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
     def test_seeded_profiles_expose_expected_thresholds_authorities_and_budgets(self) -> None:
         expected = {
             "brain_t1_baseline": {
+                "algorithm": THRESHOLD_ALGORITHM,
                 "threshold": 2.5,
                 "authorities": (
                     "scanner_manifest",
@@ -109,7 +129,23 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 "representative_budget": 80.0,
                 "worst_case_budget": 180.0,
             },
+            "brain_t1_morphology_review": {
+                "algorithm": MORPHOLOGY_ALGORITHM,
+                "threshold": 2.5,
+                "authorities": (
+                    "scanner_manifest",
+                    "voxel_geometry",
+                    "model_manifest",
+                    "sequence_manifest",
+                ),
+                "mask_severity": "warning",
+                "contrast_enabled": True,
+                "slice_enabled": True,
+                "representative_budget": 90.0,
+                "worst_case_budget": 190.0,
+            },
             "brain_t2_baseline": {
+                "algorithm": THRESHOLD_ALGORITHM,
                 "threshold": 1.75,
                 "authorities": (
                     "scanner_manifest",
@@ -124,6 +160,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 "worst_case_budget": 180.0,
             },
             "contrast_enhanced_review": {
+                "algorithm": THRESHOLD_ALGORITHM,
                 "threshold": 3.0,
                 "authorities": (
                     "scanner_manifest",
@@ -139,6 +176,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 "worst_case_budget": 190.0,
             },
             "strict_research_mode": {
+                "algorithm": THRESHOLD_ALGORITHM,
                 "threshold": 2.5,
                 "authorities": (
                     "scanner_manifest",
@@ -154,6 +192,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 "worst_case_budget": 200.0,
             },
             "fast_triage_mode": {
+                "algorithm": THRESHOLD_ALGORITHM,
                 "threshold": 2.5,
                 "authorities": (
                     "scanner_manifest",
@@ -171,6 +210,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         for profile_name, spec in expected.items():
             with self.subTest(profile_name=profile_name):
                 descriptor = get_verification_profile(profile_name)
+                self.assertEqual(descriptor.mask_algorithm, spec["algorithm"])
                 self.assertEqual(descriptor.mask_threshold, spec["threshold"])
                 self.assertEqual(
                     descriptor.required_authority_source_types,
@@ -227,7 +267,13 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
         changed_threshold = replace(
             baseline,
-            mask_rules={**baseline.mask_rules, "threshold": 9.9},
+            mask_rules={
+                **baseline.mask_rules,
+                "parameters": {
+                    **baseline.mask_rules["parameters"],
+                    "threshold": 9.9,
+                },
+            },
         )
 
         self.assertEqual(baseline.profile_digest(), same_baseline.profile_digest())
@@ -236,10 +282,62 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
     def test_profile_descriptor_digest_mismatch_is_rejected(self) -> None:
         descriptor_payload = build_verification_profile_descriptor("brain_t1_baseline")
-        descriptor_payload["mask_rules"]["threshold"] = 9.9
+        descriptor_payload["mask_rules"]["parameters"]["threshold"] = 9.9
 
         with self.assertRaisesRegex(ValueError, "digest mismatch"):
             verification_profile_descriptor_from_dict(descriptor_payload)
+
+    def test_mask_policy_resolution_rejects_unknown_or_inapplicable_parameters(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not applicable"):
+            resolve_mask_policy(
+                {
+                    "algorithm": THRESHOLD_ALGORITHM,
+                    "parameters": {
+                        "threshold": 2.5,
+                        "opening_radius_voxels": 1,
+                    },
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "unsupported top-level keys"):
+            resolve_mask_policy(
+                {
+                    "algorithm": THRESHOLD_ALGORITHM,
+                    "parameters": {"threshold": 2.5},
+                    "unexpected": "value",
+                }
+            )
+
+    def test_mask_policy_resolution_normalises_defaults_stably(self) -> None:
+        resolved_default = resolve_mask_policy(
+            {
+                "algorithm": MORPHOLOGY_ALGORITHM,
+                "parameters": {"threshold": 2.5},
+            }
+        )
+        resolved_explicit = resolve_mask_policy(
+            {
+                "algorithm": MORPHOLOGY_ALGORITHM,
+                "parameters": {
+                    "comparison": "GREATER_THAN_OR_EQUAL",
+                    "threshold": 2.5,
+                    "opening_radius_voxels": 1,
+                    "closing_radius_voxels": 1,
+                },
+            }
+        )
+        self.assertEqual(resolved_default.to_dict(), resolved_explicit.to_dict())
+        self.assertEqual(
+            list(resolved_default.parameters),
+            [
+                "comparison",
+                "threshold",
+                "opening_radius_voxels",
+                "closing_radius_voxels",
+            ],
+        )
+        morphology_one = build_verification_profile_descriptor("brain_t1_morphology_review")
+        morphology_two = build_verification_profile_descriptor("brain_t1_morphology_review")
+        self.assertEqual(morphology_one["profile_digest"], morphology_two["profile_digest"])
 
     def test_demo_case_releases_and_generates_verifiable_evidence(self) -> None:
         state, result = self._release_demo_case()
@@ -273,6 +371,13 @@ class MriGuardianHarnessTests(unittest.TestCase):
             manifest["profile_digest"],
         )
         self.assertEqual(
+            manifest["mask_verification"]["policy"]["algorithm"],
+            THRESHOLD_ALGORITHM,
+        )
+        self.assertTrue(manifest["mask_verification"]["comparison"]["verified"])
+        self.assertEqual(manifest["mask_verification"]["comparison"]["voxel_delta"], 0)
+        self.assertEqual(manifest["mask_verification"]["threshold"], 2.5)
+        self.assertEqual(
             manifest["verification_tolerance_policy"]["icsd_policy_id"],
             manifest["icsd_policy_id"],
         )
@@ -295,6 +400,31 @@ class MriGuardianHarnessTests(unittest.TestCase):
             hash_canonical_json(report["contracts"]["verification_tolerance_policy"]),
         )
         self.assertEqual(state["verification_profile_descriptor"], report["profile"])
+
+    def test_morphology_profile_releases_and_keeps_mask_policy_nested(self) -> None:
+        _, result = self._release_demo_case(profile_name="brain_t1_morphology_review")
+        manifest = result.after_state["verified_manifest"]
+        mask_verification = manifest["mask_verification"]
+
+        self.assertEqual(manifest["profile_name"], "brain_t1_morphology_review")
+        self.assertEqual(
+            manifest["mask_derivation_policy"]["algorithm"],
+            MORPHOLOGY_ALGORITHM,
+        )
+        self.assertEqual(
+            mask_verification["policy"]["parameters"],
+            {
+                "comparison": "greater_than_or_equal",
+                "threshold": 2.5,
+                "opening_radius_voxels": 1,
+                "closing_radius_voxels": 1,
+            },
+        )
+        self.assertTrue(mask_verification["comparison"]["verified"])
+        self.assertEqual(
+            result.after_state["workstation_payload"]["verified_mask_hash"],
+            manifest["verified_mask_hash"],
+        )
 
     def test_profile_specific_authority_requirements_are_enforced(self) -> None:
         contrast_state = build_demo_case(profile_name="contrast_enhanced_review")
@@ -474,6 +604,90 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 authority_sources=build_demo_authority_sources(case_id=state["case_id"]),
                 timestamp="2026-03-26T00:00:00Z",
             )
+
+    def test_morphology_engine_edge_cases_are_deterministic(self) -> None:
+        morphology_rules = {
+            "algorithm": MORPHOLOGY_ALGORITHM,
+            "parameters": {"threshold": 2.5},
+        }
+        centered_all_one_expected = np.zeros((3, 3, 3), dtype=np.int64)
+        centered_all_one_expected[1, 1, 1] = 1
+        centered_block_expected = np.zeros((5, 5, 5), dtype=np.int64)
+        centered_block_expected[2, 2, 2] = 1
+        centered_block_expected[1, 2, 2] = 1
+        centered_block_expected[3, 2, 2] = 1
+        centered_block_expected[2, 1, 2] = 1
+        centered_block_expected[2, 3, 2] = 1
+        centered_block_expected[2, 2, 1] = 1
+        centered_block_expected[2, 2, 3] = 1
+        cases = (
+            ("all_zero", np.zeros((3, 3, 3), dtype=np.float64), np.zeros((3, 3, 3), dtype=np.int64)),
+            (
+                "all_one_bounded_volume",
+                np.full((3, 3, 3), 4.0, dtype=np.float64),
+                centered_all_one_expected,
+            ),
+            (
+                "single_voxel_removed",
+                _reconstruction_with_hot_voxels((3, 3, 3), ((1, 1, 1),)),
+                np.zeros((3, 3, 3), dtype=np.int64),
+            ),
+            (
+                "thin_line_removed",
+                _reconstruction_with_hot_voxels((5, 5, 5), ((2, 2, 1), (2, 2, 2), (2, 2, 3))),
+                np.zeros((5, 5, 5), dtype=np.int64),
+            ),
+            (
+                "corner_touching_pair_removed",
+                _reconstruction_with_hot_voxels((5, 5, 5), ((2, 2, 2), (3, 3, 3))),
+                np.zeros((5, 5, 5), dtype=np.int64),
+            ),
+            (
+                "border_touching_cube_removed",
+                _reconstruction_with_hot_voxels(
+                    (5, 5, 5),
+                    tuple((z, y, x) for z in range(2) for y in range(2) for x in range(2)),
+                ),
+                np.zeros((5, 5, 5), dtype=np.int64),
+            ),
+            (
+                "centered_block_survives_as_cross",
+                _reconstruction_with_hot_voxels(
+                    (5, 5, 5),
+                    tuple((z, y, x) for z in range(1, 4) for y in range(1, 4) for x in range(1, 4)),
+                ),
+                centered_block_expected,
+            ),
+        )
+
+        for label, reconstruction, expected in cases:
+            with self.subTest(case=label):
+                first = derive_verified_mask(reconstruction, morphology_rules).verified_mask
+                second = derive_verified_mask(reconstruction, morphology_rules).verified_mask
+                self.assertTrue(np.array_equal(first, second))
+                self.assertTrue(np.array_equal(first, expected))
+
+    def test_cross_engine_policy_non_equivalence_blocks_threshold_mask_under_morphology(self) -> None:
+        baseline_state = build_demo_case(profile_name="brain_t1_baseline")
+        baseline_report = build_case_verification_report(
+            baseline_state,
+            profile_name="brain_t1_baseline",
+        )
+        morphology_report = build_case_verification_report(
+            baseline_state,
+            profile_name="brain_t1_morphology_review",
+        )
+
+        self.assertTrue(baseline_report["release_eligible"])
+        self.assertFalse(morphology_report["release_eligible"])
+        self.assertEqual(
+            morphology_report["manifest"]["mask_derivation_policy"]["algorithm"],
+            MORPHOLOGY_ALGORITHM,
+        )
+        self.assertGreater(
+            morphology_report["manifest"]["mask_verification"]["comparison"]["voxel_delta"],
+            0,
+        )
 
     def test_mock_dicom_input_round_trips_guardian_case_state(self) -> None:
         state = build_demo_case()
@@ -702,6 +916,32 @@ class MriGuardianHarnessTests(unittest.TestCase):
             )
         self.assertEqual(manifest["profile_name"], "contrast_enhanced_review")
         self.assertEqual(profile_descriptor["profile_name"], "contrast_enhanced_review")
+
+    def test_morphology_profile_bundle_and_mock_pacs_flow_replay_identically(self) -> None:
+        _, result = self._release_demo_case(profile_name="brain_t1_morphology_review")
+        bundle_path = self.runtime_root / f"morphology{MRI_GUARD_BUNDLE_EXTENSION}"
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        verification = verify_bundle(bundle_path)
+        pacs_submission = build_mock_pacs_submission(
+            result,
+            bundle_reference=bundle_path.name,
+        )
+
+        self.assertTrue(verification["verified"])
+        self.assertTrue(verification["details"]["replay_verified"])
+        self.assertEqual(
+            pacs_submission["proof_contracts"]["mask_derivation_policy"]["algorithm"],
+            MORPHOLOGY_ALGORITHM,
+        )
+        self.assertEqual(
+            pacs_submission["verification_summary"]["profile_name"],
+            "brain_t1_morphology_review",
+        )
 
     def test_replay_uses_embedded_profile_when_runtime_default_changes(self) -> None:
         _, result = self._release_demo_case(profile_name="contrast_enhanced_review")
@@ -934,6 +1174,25 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 "verification_report.json",
             },
         )
+
+    def test_run_demo_morphology_profile_emits_verified_artifacts(self) -> None:
+        demo_root = self.runtime_root / "morphology_demo"
+
+        run_demo(
+            output_dir=demo_root,
+            profile_name="brain_t1_morphology_review",
+            tamper_mode=True,
+        )
+        verification = run_verify_command(demo_root)
+        report = json.loads((demo_root / "verification_report.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(verification["verified"])
+        self.assertEqual(report["profile"]["profile_name"], "brain_t1_morphology_review")
+        self.assertEqual(
+            report["contracts"]["mask_derivation_policy"]["algorithm"],
+            MORPHOLOGY_ALGORITHM,
+        )
+        self.assertTrue((demo_root / "tamper_fake_tumour.html").exists())
 
     def test_guardian_integration_narrative_is_fail_closed_and_gateway_positioned(self) -> None:
         narrative = build_guardian_integration_narrative(current_guardian_decision="blocked")
