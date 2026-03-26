@@ -19,6 +19,7 @@ from icsd.core.transition import Transition, TransitionResult
 from .contracts import (
     build_ai_claim_envelope,
     build_mask_derivation_policy,
+    build_verification_tolerance_policy,
     build_verified_reconstruction_trace,
 )
 from .transparency import JsonlHashChainTransparencyLog
@@ -30,7 +31,10 @@ RELEASE_STATUS_PENDING = "pending_verification"
 RELEASE_STATUS_RELEASED = "released_to_radiologist"
 _RECONSTRUCTION_TOLERANCE = 1e-9
 _IMAGINARY_LEAK_TOLERANCE = 1e-9
+_FREQUENCY_RELATIVE_L2_TOLERANCE = 1e-12
+_AI_RELATIVE_L2_TOLERANCE = 1e-12
 _VOLUME_TOLERANCE = 1e-9
+_TOLERANCE_GUARD_BAND_FRACTION = 0.8
 _VERIFIED_MASK_THRESHOLD = 2.5
 _CLINICAL_PLAUSIBILITY_MAX_MASK_FRACTION = 0.35
 _CLINICAL_PLAUSIBILITY_MIN_CONTRAST_DELTA = 0.75
@@ -512,6 +516,7 @@ def _analyse_case(state: Mapping[str, Any]) -> dict[str, Any]:
         "max_measurement_abs_error": _max_abs(measurement_residual),
         "relative_measurement_l2_error": _relative_l2(measurement_residual, raw_kspace),
         "max_ai_abs_error": _max_abs(ai_residual),
+        "relative_ai_l2_error": _relative_l2(ai_residual, derived_reconstruction),
         "reconstruction_mismatch_voxel_count": int(np.count_nonzero(reconstruction_mismatch_mask)),
         "max_imaginary_leakage": imaginary_leakage,
         "voxel_volume_mm3": _round_float(voxel_volume_mm3),
@@ -525,13 +530,58 @@ def _build_verified_manifest(
     contracts: Mapping[str, Any],
 ) -> dict[str, Any]:
     claimed_volume = _round_float(float(state["tumor_volume_mm3"]))
-    consistency_verified = (
-        analysis["max_measurement_abs_error"] <= _RECONSTRUCTION_TOLERANCE
-        and analysis["max_imaginary_leakage"] <= _IMAGINARY_LEAK_TOLERANCE
+    measurement_metrics = {
+        "per_frequency_complex_abs_error": _tolerance_metric(
+            metric="per_frequency_complex_abs_error_max",
+            domain="frequency_domain",
+            scope="per_frequency",
+            observed=analysis["max_measurement_abs_error"],
+            threshold=_RECONSTRUCTION_TOLERANCE,
+        ),
+        "global_relative_l2_error": _tolerance_metric(
+            metric="global_relative_l2_error",
+            domain="frequency_domain",
+            scope="global_norm",
+            observed=analysis["relative_measurement_l2_error"],
+            threshold=_FREQUENCY_RELATIVE_L2_TOLERANCE,
+        ),
+        "spatial_imaginary_leakage": _tolerance_metric(
+            metric="spatial_imaginary_leakage_max",
+            domain="spatial_image_domain",
+            scope="per_voxel",
+            observed=analysis["max_imaginary_leakage"],
+            threshold=_IMAGINARY_LEAK_TOLERANCE,
+        ),
+    }
+    ai_match_metrics = {
+        "per_voxel_abs_error": _tolerance_metric(
+            metric="per_voxel_abs_error_max",
+            domain="spatial_image_domain",
+            scope="per_voxel",
+            observed=analysis["max_ai_abs_error"],
+            threshold=_RECONSTRUCTION_TOLERANCE,
+        ),
+        "global_relative_l2_error": _tolerance_metric(
+            metric="global_relative_l2_error",
+            domain="spatial_image_domain",
+            scope="global_norm",
+            observed=analysis["relative_ai_l2_error"],
+            threshold=_AI_RELATIVE_L2_TOLERANCE,
+        ),
+    }
+    volume_metric = _tolerance_metric(
+        metric="absolute_error",
+        domain="scalar_volume",
+        scope="global_scalar",
+        observed=abs(claimed_volume - analysis["computed_tumor_volume_mm3"]),
+        threshold=_VOLUME_TOLERANCE,
     )
-    ai_match_verified = analysis["max_ai_abs_error"] <= _RECONSTRUCTION_TOLERANCE
+    consistency_verified = all(
+        metric["within_tolerance"] for metric in measurement_metrics.values()
+    )
+    ai_match_verified = all(metric["within_tolerance"] for metric in ai_match_metrics.values())
     mask_verified = analysis["mask_voxel_delta"] == 0
-    volume_verified = abs(claimed_volume - analysis["computed_tumor_volume_mm3"]) <= _VOLUME_TOLERANCE
+    volume_verified = volume_metric["within_tolerance"]
     clinical_plausibility = _build_clinical_plausibility_manifest(analysis)
     manifest = {
         "policy_name": MRI_GUARDIAN_POLICY_NAME,
@@ -540,6 +590,7 @@ def _build_verified_manifest(
         "ai_claim_envelope": contracts["ai_claim_envelope"],
         "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
         "mask_derivation_policy": contracts["mask_derivation_policy"],
+        "verification_tolerance_policy": contracts["verification_tolerance_policy"],
         "derived_reconstruction_hash": analysis["derived_reconstruction_hash"],
         "ai_mask_hash": analysis["ai_mask_hash"],
         "verified_mask_hash": analysis["verified_mask_hash"],
@@ -556,16 +607,34 @@ def _build_verified_manifest(
         },
         "measurement_consistency": {
             "verified": consistency_verified,
+            "domain": "frequency_domain",
+            "attack_surface": (
+                "Distributed low-amplitude k-space perturbations are checked with a "
+                "global norm in addition to the per-frequency maximum."
+            ),
             "max_abs_error": analysis["max_measurement_abs_error"],
             "relative_l2_error": analysis["relative_measurement_l2_error"],
             "max_imaginary_leakage": analysis["max_imaginary_leakage"],
-            "tolerance": _RECONSTRUCTION_TOLERANCE,
+            "max_abs_tolerance": _RECONSTRUCTION_TOLERANCE,
+            "relative_l2_tolerance": _FREQUENCY_RELATIVE_L2_TOLERANCE,
+            "imaginary_leakage_tolerance": _IMAGINARY_LEAK_TOLERANCE,
+            "guard_band_fraction": _TOLERANCE_GUARD_BAND_FRACTION,
+            "metrics": measurement_metrics,
             "forward_projection_hash": analysis["forward_projection_hash"],
         },
         "ai_reconstruction_match": {
             "verified": ai_match_verified,
+            "domain": "spatial_image_domain",
+            "attack_surface": (
+                "Distributed low-amplitude voxel perturbations are checked with a "
+                "global norm in addition to the per-voxel maximum."
+            ),
             "max_abs_error": analysis["max_ai_abs_error"],
-            "tolerance": _RECONSTRUCTION_TOLERANCE,
+            "relative_l2_error": analysis["relative_ai_l2_error"],
+            "max_abs_tolerance": _RECONSTRUCTION_TOLERANCE,
+            "relative_l2_tolerance": _AI_RELATIVE_L2_TOLERANCE,
+            "guard_band_fraction": _TOLERANCE_GUARD_BAND_FRACTION,
+            "metrics": ai_match_metrics,
         },
         "tumor_volume_proof": {
             "verified": volume_verified,
@@ -573,6 +642,7 @@ def _build_verified_manifest(
             "computed_mm3": analysis["computed_tumor_volume_mm3"],
             "voxel_count": analysis["verified_mask_voxel_count"],
             "voxel_volume_mm3": analysis["voxel_volume_mm3"],
+            "tolerance_metric": volume_metric,
         },
         "no_invented_pixels": {
             "verified": consistency_verified and ai_match_verified,
@@ -1088,21 +1158,33 @@ def _build_failure_reasons(
             }
         )
     intensity_delta = int(analysis["reconstruction_mismatch_voxel_count"])
-    if intensity_delta:
+    if not manifest["ai_reconstruction_match"]["verified"]:
+        if intensity_delta:
+            summary = (
+                "intensity_manipulation_detected "
+                f"(delta = {intensity_delta} voxels; max_abs_error = "
+                f"{_format_metric_for_summary(analysis['max_ai_abs_error'])})"
+            )
+        else:
+            summary = (
+                "intensity_manipulation_detected "
+                f"(relative_l2_error = {_format_metric_for_summary(analysis['relative_ai_l2_error'])}; "
+                f"per_voxel_max_abs_error = {_format_metric_for_summary(analysis['max_ai_abs_error'])})"
+            )
         reasons.append(
             {
                 "code": "intensity_manipulation_detected",
-                "summary": (
-                    "intensity_manipulation_detected "
-                    f"(delta = {intensity_delta} voxels; max_abs_error = {analysis['max_ai_abs_error']})"
-                ),
+                "summary": summary,
                 "delta": intensity_delta,
                 "message": (
                     "The AI reconstruction no longer matches the deterministic reconstruction "
-                    "recomputed from raw k-space."
+                    "recomputed from raw k-space under the explicit per-voxel and global-norm "
+                    "tolerance policy."
                 ),
                 "details": {
                     "max_abs_error": analysis["max_ai_abs_error"],
+                    "relative_l2_error": analysis["relative_ai_l2_error"],
+                    "metrics": manifest["ai_reconstruction_match"]["metrics"],
                 },
             }
         )
@@ -1130,15 +1212,19 @@ def _build_failure_reasons(
                 "code": "raw_measurement_inconsistency",
                 "summary": (
                     "raw_measurement_inconsistency "
-                    f"(max |Δ| = {analysis['max_measurement_abs_error']})"
+                    f"(max |Δ| = {_format_metric_for_summary(analysis['max_measurement_abs_error'])}; "
+                    f"relative_l2_error = {_format_metric_for_summary(analysis['relative_measurement_l2_error'])})"
                 ),
                 "delta": analysis["max_measurement_abs_error"],
                 "message": (
                     "The deterministic reconstruction cannot be cleanly reprojected back "
-                    "to the supplied raw measurements."
+                    "to the supplied raw measurements under the explicit per-frequency and "
+                    "global-norm tolerance policy."
                 ),
                 "details": {
                     "relative_l2_error": analysis["relative_measurement_l2_error"],
+                    "max_imaginary_leakage": analysis["max_imaginary_leakage"],
+                    "metrics": manifest["measurement_consistency"]["metrics"],
                 },
             }
         )
@@ -1148,6 +1234,39 @@ def _build_failure_reasons(
 def _derive_verified_mask(derived_reconstruction: np.ndarray) -> np.ndarray:
     reconstruction = np.asarray(derived_reconstruction, dtype=np.float64)
     return (reconstruction >= _VERIFIED_MASK_THRESHOLD).astype(np.int64)
+
+
+def _tolerance_metric(
+    *,
+    metric: str,
+    domain: str,
+    scope: str,
+    observed: float,
+    threshold: float,
+) -> dict[str, Any]:
+    observed_value = _round_metric_float(float(observed))
+    threshold_value = _round_metric_float(float(threshold))
+    guard_band_threshold = _round_metric_float(
+        threshold_value * _TOLERANCE_GUARD_BAND_FRACTION
+    )
+    if observed_value > threshold_value:
+        boundary_status = "exceeded"
+    elif observed_value >= guard_band_threshold:
+        boundary_status = "near_boundary"
+    else:
+        boundary_status = "clear"
+    return {
+        "metric": metric,
+        "domain": domain,
+        "scope": scope,
+        "observed": observed_value,
+        "threshold": threshold_value,
+        "guard_band_fraction": _TOLERANCE_GUARD_BAND_FRACTION,
+        "guard_band_threshold": guard_band_threshold,
+        "within_tolerance": observed_value <= threshold_value,
+        "boundary_status": boundary_status,
+        "margin_to_threshold": _round_metric_float(threshold_value - observed_value),
+    }
 
 
 def _build_claim_to_proof_contracts(
@@ -1166,6 +1285,17 @@ def _build_claim_to_proof_contracts(
         policy_version=MRI_GUARDIAN_POLICY_VERSION,
         threshold=_VERIFIED_MASK_THRESHOLD,
     )
+    verification_tolerance_policy = build_verification_tolerance_policy(
+        policy_name=MRI_GUARDIAN_POLICY_NAME,
+        policy_version=MRI_GUARDIAN_POLICY_VERSION,
+        guard_band_fraction=_TOLERANCE_GUARD_BAND_FRACTION,
+        spatial_per_voxel_abs_error=_RECONSTRUCTION_TOLERANCE,
+        spatial_global_relative_l2_error=_AI_RELATIVE_L2_TOLERANCE,
+        frequency_per_coefficient_abs_error=_RECONSTRUCTION_TOLERANCE,
+        frequency_global_relative_l2_error=_FREQUENCY_RELATIVE_L2_TOLERANCE,
+        imaginary_leakage_abs_error=_IMAGINARY_LEAK_TOLERANCE,
+        volume_absolute_error=_VOLUME_TOLERANCE,
+    )
     verified_reconstruction_trace = build_verified_reconstruction_trace(
         case_id=str(state["case_id"]),
         raw_kspace_hash=analysis["raw_hash"],
@@ -1175,16 +1305,19 @@ def _build_claim_to_proof_contracts(
         computed_tumor_volume_mm3=analysis["computed_tumor_volume_mm3"],
         claim_envelope=ai_claim_envelope,
         mask_derivation_policy=mask_derivation_policy,
+        tolerance_policy=verification_tolerance_policy,
         max_measurement_abs_error=analysis["max_measurement_abs_error"],
         relative_measurement_l2_error=analysis["relative_measurement_l2_error"],
         max_imaginary_leakage=analysis["max_imaginary_leakage"],
         max_ai_abs_error=analysis["max_ai_abs_error"],
+        relative_ai_l2_error=analysis["relative_ai_l2_error"],
         mask_voxel_delta=analysis["mask_voxel_delta"],
     )
     return {
         "ai_claim_envelope": ai_claim_envelope,
         "verified_reconstruction_trace": verified_reconstruction_trace,
         "mask_derivation_policy": mask_derivation_policy,
+        "verification_tolerance_policy": verification_tolerance_policy,
     }
 
 
@@ -1208,18 +1341,33 @@ def _round_float(value: float) -> float:
     return round(float(value), 9)
 
 
+def _round_metric_float(value: float) -> float:
+    if abs(value) < 1e-15:
+        return 0.0
+    return round(float(value), 15)
+
+
+def _format_metric_for_summary(value: float) -> str:
+    metric = _round_metric_float(float(value))
+    if metric == 0.0:
+        return "0.0"
+    if abs(metric) < 1e-6:
+        return f"{metric:.3e}"
+    return str(_round_float(metric))
+
+
 def _max_abs(values: np.ndarray) -> float:
     array = np.asarray(values)
     if array.size == 0:
         return 0.0
-    return _round_float(float(np.max(np.abs(array))))
+    return _round_metric_float(float(np.max(np.abs(array))))
 
 
 def _relative_l2(delta: np.ndarray, reference: np.ndarray) -> float:
     reference_norm = float(np.linalg.norm(reference.ravel()))
     if reference_norm == 0:
         return 0.0
-    return _round_float(float(np.linalg.norm(delta.ravel()) / reference_norm))
+    return _round_metric_float(float(np.linalg.norm(delta.ravel()) / reference_norm))
 
 
 def render_release_bundle_json(result: TransitionResult) -> str:

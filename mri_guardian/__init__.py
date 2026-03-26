@@ -9,9 +9,11 @@ from .bundle import (
 from .contracts import (
     AIClaimEnvelope,
     MaskDerivationPolicy,
+    VerificationTolerancePolicy,
     VerifiedReconstructionTrace,
     build_ai_claim_envelope,
     build_mask_derivation_policy,
+    build_verification_tolerance_policy,
     build_verified_reconstruction_trace,
 )
 from .harness import (
@@ -47,9 +49,11 @@ __all__ = [
     "write_portable_evidence_bundle",
     "AIClaimEnvelope",
     "MaskDerivationPolicy",
+    "VerificationTolerancePolicy",
     "VerifiedReconstructionTrace",
     "build_ai_claim_envelope",
     "build_mask_derivation_policy",
+    "build_verification_tolerance_policy",
     "build_verified_reconstruction_trace",
     "build_case_verification_report",
     "build_demo_authority_sources",

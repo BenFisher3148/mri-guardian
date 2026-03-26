@@ -7,7 +7,8 @@ It is intentionally non-invasive. The reconstruction AI and the PACS/workstation
 The core rule is simple: the downstream PACS/workstation never receives AI-supplied pixels directly. The layer treats the AI reconstruction as a claim, recomputes the displayed reconstruction from raw k-space itself, and only releases a workstation payload when all of the following are true:
 
 - the reconstructed voxel grid is mathematically consistent with the raw sensor data
-- the AI reconstruction matches the harness-derived reconstruction within a fixed tolerance
+- the AI reconstruction matches the harness-derived reconstruction under an explicit tolerance policy:
+  spatial per-voxel max-abs error plus a global relative L2 bound
 - the AI tumour mask exactly matches a deterministic policy mask derived from the raw-derived reconstruction
 - the tumour volume exactly equals `verified_mask_voxel_count * voxel_spacing`
 
@@ -64,6 +65,7 @@ Inspect the explicit claim-to-proof interfaces:
 - `demo_artifacts/ai_claim_envelope.json`
 - `demo_artifacts/verified_reconstruction_trace.json`
 - `demo_artifacts/mask_derivation_policy.json`
+- `demo_artifacts/verification_tolerance_policy.json`
 
 Verify the archive or an extracted `bundle.json` replay package in Python:
 
@@ -105,7 +107,15 @@ That interface is now explicit rather than implied. The harness emits:
 
 - `AIClaimEnvelope`: the AI-side reconstruction, mask, and volume claim anchored to the raw-input hash
 - `MaskDerivationPolicy`: the deterministic rule that turns a raw-derived reconstruction into the admissible mask
+- `VerificationTolerancePolicy`: the attack-aware tolerance contract that states which metrics are per-voxel, global-norm, and frequency-domain
 - `VerifiedReconstructionTrace`: the proof object that links the raw measurements, derived reconstruction, mask policy, and verified volume back to the original claim
+
+Tolerance handling is also explicit rather than hand-wavy. The verifier now defines:
+
+- spatial AI parity by both per-voxel max-abs error and global relative L2 error
+- frequency-domain measurement consistency by both per-frequency max-abs error and global relative L2 error
+- a separate imaginary-leakage bound on the inverse FFT output
+- a deterministic guard band so near-threshold cases are marked as boundary-hugging rather than looking identical to comfortably passing cases
 
 The portable bundle pushes that one step further. Each accepted case now emits a shareable `.mri-guard-bundle` archive containing:
 

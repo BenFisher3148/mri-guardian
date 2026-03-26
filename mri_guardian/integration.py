@@ -183,6 +183,7 @@ def build_mock_pacs_submission(
         "proof_contracts": {
             "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
             "mask_derivation_policy": contracts["mask_derivation_policy"],
+            "verification_tolerance_policy": contracts["verification_tolerance_policy"],
         },
     }
 
@@ -224,6 +225,7 @@ def build_mock_pacs_block_notice(
         "proof_contracts": {
             "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
             "mask_derivation_policy": contracts["mask_derivation_policy"],
+            "verification_tolerance_policy": contracts["verification_tolerance_policy"],
         },
         "withheld_series": [
             {

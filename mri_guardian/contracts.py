@@ -69,6 +69,97 @@ class MaskDerivationPolicy:
 
 
 @dataclass(frozen=True)
+class VerificationTolerancePolicy:
+    """Explicit tolerance contract for local and global verification metrics."""
+
+    policy_name: str
+    policy_version: str
+    guard_band_fraction: float
+    spatial_per_voxel_abs_error: float
+    spatial_global_relative_l2_error: float
+    frequency_per_coefficient_abs_error: float
+    frequency_global_relative_l2_error: float
+    imaginary_leakage_abs_error: float
+    volume_absolute_error: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "VerificationTolerancePolicy",
+            "interface_version": self.policy_version,
+            "policy_name": self.policy_name,
+            "policy_scope": "attack_aware_numeric_tolerances",
+            "guard_band_fraction": self.guard_band_fraction,
+            "rules": {
+                "ai_reconstruction_match": {
+                    "domain": "spatial_image_domain",
+                    "attack_surface": (
+                        "Distributed low-amplitude voxel perturbations are checked with a "
+                        "global norm in addition to a per-voxel maximum."
+                    ),
+                    "metrics": [
+                        {
+                            "metric": "per_voxel_abs_error_max",
+                            "scope": "per_voxel",
+                            "threshold": self.spatial_per_voxel_abs_error,
+                        },
+                        {
+                            "metric": "global_relative_l2_error",
+                            "scope": "global_norm",
+                            "threshold": self.spatial_global_relative_l2_error,
+                        },
+                    ],
+                },
+                "measurement_consistency": {
+                    "domain": "frequency_domain",
+                    "attack_surface": (
+                        "Distributed low-amplitude k-space perturbations are checked with a "
+                        "global norm in addition to a per-frequency maximum."
+                    ),
+                    "metrics": [
+                        {
+                            "metric": "per_frequency_complex_abs_error_max",
+                            "scope": "per_frequency",
+                            "threshold": self.frequency_per_coefficient_abs_error,
+                        },
+                        {
+                            "metric": "global_relative_l2_error",
+                            "scope": "global_norm",
+                            "threshold": self.frequency_global_relative_l2_error,
+                        },
+                        {
+                            "metric": "spatial_imaginary_leakage_max",
+                            "scope": "per_voxel",
+                            "threshold": self.imaginary_leakage_abs_error,
+                        },
+                    ],
+                },
+                "tumor_volume_proof": {
+                    "domain": "scalar_volume",
+                    "attack_surface": "Scalar claim delta is checked as an absolute error.",
+                    "metrics": [
+                        {
+                            "metric": "absolute_error",
+                            "scope": "global_scalar",
+                            "threshold": self.volume_absolute_error,
+                        }
+                    ],
+                },
+                "mask_verification": {
+                    "domain": "binary_mask",
+                    "attack_surface": "No numeric tolerance is allowed; the mask must match exactly.",
+                    "metrics": [
+                        {
+                            "metric": "voxel_delta",
+                            "scope": "exact_match",
+                            "threshold": 0.0,
+                        }
+                    ],
+                },
+            },
+        }
+
+
+@dataclass(frozen=True)
 class VerifiedReconstructionTrace:
     """Proof trace from raw sensor data to the verified reconstruction outputs."""
 
@@ -80,10 +171,12 @@ class VerifiedReconstructionTrace:
     computed_tumor_volume_mm3: float
     claim_envelope_hash: str
     mask_derivation_policy_hash: str
+    tolerance_policy_hash: str
     max_measurement_abs_error: float
     relative_measurement_l2_error: float
     max_imaginary_leakage: float
     max_ai_abs_error: float
+    relative_ai_l2_error: float
     mask_voxel_delta: int
 
     def to_dict(self) -> dict[str, Any]:
@@ -94,6 +187,7 @@ class VerifiedReconstructionTrace:
             "case_id": self.case_id,
             "claim_envelope_hash": self.claim_envelope_hash,
             "mask_derivation_policy_hash": self.mask_derivation_policy_hash,
+            "tolerance_policy_hash": self.tolerance_policy_hash,
             "raw_kspace_hash": self.raw_kspace_hash,
             "derived_reconstruction_hash": self.derived_reconstruction_hash,
             "forward_projection_hash": self.forward_projection_hash,
@@ -106,6 +200,7 @@ class VerifiedReconstructionTrace:
             },
             "claim_comparison": {
                 "max_ai_abs_error": self.max_ai_abs_error,
+                "relative_l2_error": self.relative_ai_l2_error,
                 "mask_voxel_delta": self.mask_voxel_delta,
             },
         }
@@ -146,6 +241,31 @@ def build_mask_derivation_policy(
     ).to_dict()
 
 
+def build_verification_tolerance_policy(
+    *,
+    policy_name: str,
+    policy_version: str,
+    guard_band_fraction: float,
+    spatial_per_voxel_abs_error: float,
+    spatial_global_relative_l2_error: float,
+    frequency_per_coefficient_abs_error: float,
+    frequency_global_relative_l2_error: float,
+    imaginary_leakage_abs_error: float,
+    volume_absolute_error: float,
+) -> dict[str, Any]:
+    return VerificationTolerancePolicy(
+        policy_name=policy_name,
+        policy_version=policy_version,
+        guard_band_fraction=float(guard_band_fraction),
+        spatial_per_voxel_abs_error=float(spatial_per_voxel_abs_error),
+        spatial_global_relative_l2_error=float(spatial_global_relative_l2_error),
+        frequency_per_coefficient_abs_error=float(frequency_per_coefficient_abs_error),
+        frequency_global_relative_l2_error=float(frequency_global_relative_l2_error),
+        imaginary_leakage_abs_error=float(imaginary_leakage_abs_error),
+        volume_absolute_error=float(volume_absolute_error),
+    ).to_dict()
+
+
 def build_verified_reconstruction_trace(
     *,
     case_id: str,
@@ -156,10 +276,12 @@ def build_verified_reconstruction_trace(
     computed_tumor_volume_mm3: float,
     claim_envelope: dict[str, Any],
     mask_derivation_policy: dict[str, Any],
+    tolerance_policy: dict[str, Any],
     max_measurement_abs_error: float,
     relative_measurement_l2_error: float,
     max_imaginary_leakage: float,
     max_ai_abs_error: float,
+    relative_ai_l2_error: float,
     mask_voxel_delta: int,
 ) -> dict[str, Any]:
     return VerifiedReconstructionTrace(
@@ -171,9 +293,11 @@ def build_verified_reconstruction_trace(
         computed_tumor_volume_mm3=float(computed_tumor_volume_mm3),
         claim_envelope_hash=hash_canonical_json(claim_envelope),
         mask_derivation_policy_hash=hash_canonical_json(mask_derivation_policy),
+        tolerance_policy_hash=hash_canonical_json(tolerance_policy),
         max_measurement_abs_error=float(max_measurement_abs_error),
         relative_measurement_l2_error=float(relative_measurement_l2_error),
         max_imaginary_leakage=float(max_imaginary_leakage),
         max_ai_abs_error=float(max_ai_abs_error),
+        relative_ai_l2_error=float(relative_ai_l2_error),
         mask_voxel_delta=int(mask_voxel_delta),
     ).to_dict()

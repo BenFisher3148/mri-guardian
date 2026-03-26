@@ -76,6 +76,10 @@ def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
         f"{canonical_json_dumps(report['contracts']['mask_derivation_policy'])}\n",
         encoding="utf-8",
     )
+    (output_path / "verification_tolerance_policy.json").write_text(
+        f"{canonical_json_dumps(report['contracts']['verification_tolerance_policy'])}\n",
+        encoding="utf-8",
+    )
     bundle_path = output_path / f"{case_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
     write_portable_evidence_bundle(
         result=result,

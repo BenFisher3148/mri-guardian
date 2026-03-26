@@ -66,11 +66,32 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertIn("ai_claim_envelope", result.after_state["verified_manifest"])
         self.assertIn("verified_reconstruction_trace", result.after_state["verified_manifest"])
         self.assertIn("mask_derivation_policy", result.after_state["verified_manifest"])
+        self.assertIn("verification_tolerance_policy", result.after_state["verified_manifest"])
         self.assertEqual(
             result.after_state["verified_manifest"]["verified_reconstruction_trace"][
                 "claim_envelope_hash"
             ],
             hash_canonical_json(result.after_state["verified_manifest"]["ai_claim_envelope"]),
+        )
+        self.assertEqual(
+            result.after_state["verified_manifest"]["verified_reconstruction_trace"][
+                "tolerance_policy_hash"
+            ],
+            hash_canonical_json(
+                result.after_state["verified_manifest"]["verification_tolerance_policy"]
+            ),
+        )
+        self.assertEqual(
+            result.after_state["verified_manifest"]["ai_reconstruction_match"]["metrics"][
+                "per_voxel_abs_error"
+            ]["scope"],
+            "per_voxel",
+        )
+        self.assertEqual(
+            result.after_state["verified_manifest"]["measurement_consistency"]["metrics"][
+                "global_relative_l2_error"
+            ]["scope"],
+            "global_norm",
         )
         self.assertEqual(
             result.after_state["workstation_payload"]["pixel_source"],
@@ -122,6 +143,12 @@ class MriGuardianHarnessTests(unittest.TestCase):
             manifest["hashes"]["verified_reconstruction_trace_hash"],
             hash_canonical_json(
                 result.after_state["verified_manifest"]["verified_reconstruction_trace"]
+            ),
+        )
+        self.assertEqual(
+            manifest["hashes"]["verification_tolerance_policy_hash"],
+            hash_canonical_json(
+                result.after_state["verified_manifest"]["verification_tolerance_policy"]
             ),
         )
         self.assertEqual(
@@ -240,6 +267,40 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 timestamp="2026-03-26T00:00:00Z",
             )
 
+    def test_rejects_distributed_low_amplitude_attack_by_global_l2_bound(self) -> None:
+        state = build_demo_case()
+        reconstruction = np.asarray(state["ai_reconstruction"], dtype=np.float64)
+        reconstruction += 9e-10
+        state["ai_reconstruction"] = reconstruction.tolist()
+
+        report = build_case_verification_report(state)
+        harness = self._build_harness()
+
+        self.assertFalse(report["release_eligible"])
+        self.assertEqual(report["failure_reasons"][0]["code"], "intensity_manipulation_detected")
+        self.assertEqual(report["analysis"]["reconstruction_mismatch_voxel_count"], 0)
+        self.assertLess(report["analysis"]["max_ai_abs_error"], 1e-9)
+        self.assertGreater(report["analysis"]["relative_ai_l2_error"], 1e-12)
+        self.assertEqual(
+            report["manifest"]["ai_reconstruction_match"]["metrics"]["per_voxel_abs_error"][
+                "boundary_status"
+            ],
+            "near_boundary",
+        )
+        self.assertEqual(
+            report["manifest"]["ai_reconstruction_match"]["metrics"]["global_relative_l2_error"][
+                "boundary_status"
+            ],
+            "exceeded",
+        )
+        with self.assertRaises(InvariantViolationError):
+            harness.release_case(
+                state=state,
+                actor="guardian:test",
+                authority_sources=build_demo_authority_sources(case_id=state["case_id"]),
+                timestamp="2026-03-26T00:00:00Z",
+            )
+
     def test_mock_dicom_input_round_trips_guardian_case_state(self) -> None:
         state = build_demo_case()
 
@@ -309,6 +370,12 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(
             pacs_block["proof_contracts"]["mask_derivation_policy"]["interface_type"],
             "MaskDerivationPolicy",
+        )
+        self.assertEqual(
+            pacs_block["proof_contracts"]["verification_tolerance_policy"][
+                "interface_type"
+            ],
+            "VerificationTolerancePolicy",
         )
         self.assertEqual(integration_trace["pipeline"][1]["decision"], "blocked")
         self.assertEqual(integration_trace["pipeline"][2]["label"], "PACS Output Blocked")

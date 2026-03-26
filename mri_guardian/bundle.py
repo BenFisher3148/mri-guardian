@@ -314,6 +314,9 @@ def _build_bundle_manifest(
             "mask_derivation_policy_hash": hash_canonical_json(
                 contracts["mask_derivation_policy"]
             ),
+            "verification_tolerance_policy_hash": hash_canonical_json(
+                contracts["verification_tolerance_policy"]
+            ),
             "verified_reconstruction_trace_hash": hash_canonical_json(
                 contracts["verified_reconstruction_trace"]
             ),
