@@ -16,6 +16,11 @@ from icsd.core.invariants import Invariant, InvariantProfile, InvariantProfileRe
 from icsd.core.serialise import canonical_json_dumps, hash_canonical_json
 from icsd.core.transition import Transition, TransitionResult
 
+from .contracts import (
+    build_ai_claim_envelope,
+    build_mask_derivation_policy,
+    build_verified_reconstruction_trace,
+)
 from .transparency import JsonlHashChainTransparencyLog
 
 MRI_GUARDIAN_POLICY_NAME = "mri_guardian_release"
@@ -74,11 +79,13 @@ class MriGuardianHarness:
 def build_case_verification_report(state: Mapping[str, Any]) -> dict[str, Any]:
     """Return the deterministic verification envelope for one MRI case."""
     analysis = _analyse_case(state)
-    manifest = _build_verified_manifest(state, analysis)
+    contracts = _build_claim_to_proof_contracts(state, analysis)
+    manifest = _build_verified_manifest(state, analysis, contracts)
     reasons = _build_failure_reasons(state, analysis, manifest)
     tiers = manifest["verification_tiers"]
     return {
         "analysis": analysis,
+        "contracts": contracts,
         "manifest": manifest,
         "verification_tiers": tiers,
         "failure_reasons": reasons,
@@ -241,7 +248,8 @@ def _build_release_transition(*, transparency_log_path: Path) -> Transition:
 
 def _release_to_radiologist(state: dict[str, Any]) -> None:
     analysis = _analyse_case(state)
-    state["verified_manifest"] = _build_verified_manifest(state, analysis)
+    contracts = _build_claim_to_proof_contracts(state, analysis)
+    state["verified_manifest"] = _build_verified_manifest(state, analysis, contracts)
     state["workstation_payload"] = _build_workstation_payload(state, analysis)
     state["release_status"] = RELEASE_STATUS_RELEASED
 
@@ -471,6 +479,7 @@ def _analyse_case(state: Mapping[str, Any]) -> dict[str, Any]:
     verified_mask_voxel_count = int(np.count_nonzero(verified_mask))
     computed_tumor_volume_mm3 = _round_float(verified_mask_voxel_count * voxel_volume_mm3)
     derived_reconstruction_list = _float_array_to_list(derived_reconstruction)
+    ai_reconstruction_list = _float_array_to_list(ai_reconstruction)
     ai_mask_list = ai_mask.tolist()
     verified_mask_list = verified_mask.astype(np.int64).tolist()
     forward_projection_pairs = _complex_array_to_pairs(reprojection)
@@ -481,10 +490,12 @@ def _analyse_case(state: Mapping[str, Any]) -> dict[str, Any]:
         }
     )
     derived_reconstruction_hash = hash_canonical_json(derived_reconstruction_list)
+    ai_reconstruction_hash = hash_canonical_json(ai_reconstruction_list)
     ai_mask_hash = hash_canonical_json(ai_mask_list)
     verified_mask_hash = hash_canonical_json(verified_mask_list)
     return {
         "raw_hash": raw_hash,
+        "ai_reconstruction_hash": ai_reconstruction_hash,
         "derived_reconstruction": derived_reconstruction_list,
         "derived_reconstruction_hash": derived_reconstruction_hash,
         "ai_mask": ai_mask_list,
@@ -511,6 +522,7 @@ def _analyse_case(state: Mapping[str, Any]) -> dict[str, Any]:
 def _build_verified_manifest(
     state: Mapping[str, Any],
     analysis: Mapping[str, Any],
+    contracts: Mapping[str, Any],
 ) -> dict[str, Any]:
     claimed_volume = _round_float(float(state["tumor_volume_mm3"]))
     consistency_verified = (
@@ -525,14 +537,17 @@ def _build_verified_manifest(
         "policy_name": MRI_GUARDIAN_POLICY_NAME,
         "policy_version": MRI_GUARDIAN_POLICY_VERSION,
         "raw_hash": analysis["raw_hash"],
+        "ai_claim_envelope": contracts["ai_claim_envelope"],
+        "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
+        "mask_derivation_policy": contracts["mask_derivation_policy"],
         "derived_reconstruction_hash": analysis["derived_reconstruction_hash"],
         "ai_mask_hash": analysis["ai_mask_hash"],
         "verified_mask_hash": analysis["verified_mask_hash"],
         "reconstruction_algorithm": "numpy.ifft2_per_slice.real",
         "mask_verification": {
             "verified": mask_verified,
-            "algorithm": "threshold_on_raw_derived_reconstruction",
-            "threshold": _VERIFIED_MASK_THRESHOLD,
+            "algorithm": contracts["mask_derivation_policy"]["algorithm"],
+            "threshold": contracts["mask_derivation_policy"]["parameters"]["threshold"],
             "ai_voxel_count": analysis["ai_mask_voxel_count"],
             "verified_voxel_count": analysis["verified_mask_voxel_count"],
             "voxel_delta": analysis["mask_voxel_delta"],
@@ -1133,6 +1148,44 @@ def _build_failure_reasons(
 def _derive_verified_mask(derived_reconstruction: np.ndarray) -> np.ndarray:
     reconstruction = np.asarray(derived_reconstruction, dtype=np.float64)
     return (reconstruction >= _VERIFIED_MASK_THRESHOLD).astype(np.int64)
+
+
+def _build_claim_to_proof_contracts(
+    state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+) -> dict[str, Any]:
+    ai_claim_envelope = build_ai_claim_envelope(
+        state=dict(state),
+        raw_kspace_hash=analysis["raw_hash"],
+        ai_reconstruction_hash=analysis["ai_reconstruction_hash"],
+        ai_mask_hash=analysis["ai_mask_hash"],
+        claimed_tumor_volume_mm3=_round_float(float(state["tumor_volume_mm3"])),
+    )
+    mask_derivation_policy = build_mask_derivation_policy(
+        policy_name=MRI_GUARDIAN_POLICY_NAME,
+        policy_version=MRI_GUARDIAN_POLICY_VERSION,
+        threshold=_VERIFIED_MASK_THRESHOLD,
+    )
+    verified_reconstruction_trace = build_verified_reconstruction_trace(
+        case_id=str(state["case_id"]),
+        raw_kspace_hash=analysis["raw_hash"],
+        derived_reconstruction_hash=analysis["derived_reconstruction_hash"],
+        forward_projection_hash=analysis["forward_projection_hash"],
+        verified_mask_hash=analysis["verified_mask_hash"],
+        computed_tumor_volume_mm3=analysis["computed_tumor_volume_mm3"],
+        claim_envelope=ai_claim_envelope,
+        mask_derivation_policy=mask_derivation_policy,
+        max_measurement_abs_error=analysis["max_measurement_abs_error"],
+        relative_measurement_l2_error=analysis["relative_measurement_l2_error"],
+        max_imaginary_leakage=analysis["max_imaginary_leakage"],
+        max_ai_abs_error=analysis["max_ai_abs_error"],
+        mask_voxel_delta=analysis["mask_voxel_delta"],
+    )
+    return {
+        "ai_claim_envelope": ai_claim_envelope,
+        "verified_reconstruction_trace": verified_reconstruction_trace,
+        "mask_derivation_policy": mask_derivation_policy,
+    }
 
 
 def _float_array_to_list(values: np.ndarray | list[float] | list[list[float]]) -> Any:

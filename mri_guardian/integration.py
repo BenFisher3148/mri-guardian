@@ -40,8 +40,8 @@ def build_mock_dicom_input(
     """Return a mocked DICOM ingress envelope for the Guardian Layer."""
     report = build_case_verification_report(state)
     analysis = report["analysis"]
-    volume_claim_hash = hash_canonical_json({"tumor_volume_mm3": state["tumor_volume_mm3"]})
-    ai_reconstruction_hash = hash_canonical_json(state["ai_reconstruction"])
+    contracts = report["contracts"]
+    claim_envelope = contracts["ai_claim_envelope"]
     return {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_dicom_input",
@@ -75,19 +75,20 @@ def build_mock_dicom_input(
             {
                 "role": "ai_reconstruction",
                 "sop_class": "MR Image Storage (mock)",
-                "hash": ai_reconstruction_hash,
+                "hash": claim_envelope["claimed_outputs"]["ai_reconstruction_hash"],
             },
             {
                 "role": "ai_segmentation",
                 "sop_class": "Segmentation Storage (mock)",
-                "hash": analysis["ai_mask_hash"],
+                "hash": claim_envelope["claimed_outputs"]["ai_mask_hash"],
             },
             {
                 "role": "ai_volume_claim",
                 "sop_class": "Comprehensive SR Storage (mock)",
-                "hash": volume_claim_hash,
+                "hash": hash_canonical_json(claim_envelope["claimed_outputs"]),
             },
         ],
+        "ai_claim_envelope": claim_envelope,
         "guardian_case": {field: deepcopy(state[field]) for field in _STATE_FIELDS},
     }
 
@@ -118,6 +119,7 @@ def build_mock_pacs_submission(
     """Return a mocked PACS handoff envelope for an accepted case."""
     state = result.after_state
     report = build_case_verification_report(state)
+    contracts = report["contracts"]
     if not report["release_eligible"]:
         raise ValueError("Mock PACS submission requires a release-eligible case.")
     workstation_payload = state["workstation_payload"]
@@ -178,6 +180,10 @@ def build_mock_pacs_submission(
             "bundle_reference": bundle_reference,
             "evidence_hash": evidence_hash,
         },
+        "proof_contracts": {
+            "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
+            "mask_derivation_policy": contracts["mask_derivation_policy"],
+        },
     }
 
 
@@ -189,6 +195,7 @@ def build_mock_pacs_block_notice(
 ) -> dict[str, Any]:
     """Return a mocked PACS block notice for a rejected case."""
     report = build_case_verification_report(state)
+    contracts = report["contracts"]
     if report["release_eligible"]:
         raise ValueError("Mock PACS block notice requires a rejected case.")
     analysis = report["analysis"]
@@ -213,6 +220,10 @@ def build_mock_pacs_block_notice(
             "decision": "blocked",
             "tier_statuses": _tier_statuses(report),
             "verified_tumor_volume_mm3": analysis["computed_tumor_volume_mm3"],
+        },
+        "proof_contracts": {
+            "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
+            "mask_derivation_policy": contracts["mask_derivation_policy"],
         },
         "withheld_series": [
             {

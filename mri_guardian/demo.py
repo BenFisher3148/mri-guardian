@@ -14,6 +14,7 @@ from .bundle import (
 )
 from .harness import (
     MriGuardianHarness,
+    build_case_verification_report,
     build_demo_authority_sources,
     build_demo_case,
     render_release_bundle_json,
@@ -60,6 +61,19 @@ def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
     released_state = canonical_json_dumps(result.after_state)
     (output_path / "released_state.json").write_text(
         f"{released_state}\n",
+        encoding="utf-8",
+    )
+    report = build_case_verification_report(result.after_state)
+    (output_path / "ai_claim_envelope.json").write_text(
+        f"{canonical_json_dumps(report['contracts']['ai_claim_envelope'])}\n",
+        encoding="utf-8",
+    )
+    (output_path / "verified_reconstruction_trace.json").write_text(
+        f"{canonical_json_dumps(report['contracts']['verified_reconstruction_trace'])}\n",
+        encoding="utf-8",
+    )
+    (output_path / "mask_derivation_policy.json").write_text(
+        f"{canonical_json_dumps(report['contracts']['mask_derivation_policy'])}\n",
         encoding="utf-8",
     )
     bundle_path = output_path / f"{case_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"

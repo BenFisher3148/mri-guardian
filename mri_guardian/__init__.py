@@ -6,6 +6,14 @@ from .bundle import (
     verify_portable_evidence_bundle,
     write_portable_evidence_bundle,
 )
+from .contracts import (
+    AIClaimEnvelope,
+    MaskDerivationPolicy,
+    VerifiedReconstructionTrace,
+    build_ai_claim_envelope,
+    build_mask_derivation_policy,
+    build_verified_reconstruction_trace,
+)
 from .harness import (
     MRI_GUARDIAN_POLICY_NAME,
     MRI_GUARDIAN_POLICY_VERSION,
@@ -37,6 +45,12 @@ __all__ = [
     "verify_bundle",
     "verify_portable_evidence_bundle",
     "write_portable_evidence_bundle",
+    "AIClaimEnvelope",
+    "MaskDerivationPolicy",
+    "VerifiedReconstructionTrace",
+    "build_ai_claim_envelope",
+    "build_mask_derivation_policy",
+    "build_verified_reconstruction_trace",
     "build_case_verification_report",
     "build_demo_authority_sources",
     "build_demo_case",

@@ -22,6 +22,7 @@ The ICSD verification layer makes the release state invariant-closed. A case is 
 ## Structure
 
 - [mri_guardian/bundle.py](mri_guardian/bundle.py) builds and verifies portable `.mri-guard-bundle` proof artifacts.
+- [mri_guardian/contracts.py](mri_guardian/contracts.py) defines the reusable `AIClaimEnvelope`, `VerifiedReconstructionTrace`, and `MaskDerivationPolicy` interfaces.
 - [mri_guardian/harness.py](mri_guardian/harness.py) defines the policy profile, invariants, deterministic reconstruction checks, and release transition.
 - [mri_guardian/integration.py](mri_guardian/integration.py) mocks the DICOM ingress and PACS egress contracts around the verification proxy.
 - [mri_guardian/tamper.py](mri_guardian/tamper.py) builds deterministic fake-tumour, shifted-mask, and intensity-manipulation scenarios.
@@ -58,6 +59,12 @@ Inspect the mocked integration artifacts:
 - `demo_artifacts/tamper_shifted_mask_pacs_block.json`
 - `demo_artifacts/tamper_intensity_manipulation_pacs_block.json`
 
+Inspect the explicit claim-to-proof interfaces:
+
+- `demo_artifacts/ai_claim_envelope.json`
+- `demo_artifacts/verified_reconstruction_trace.json`
+- `demo_artifacts/mask_derivation_policy.json`
+
 Verify the archive or an extracted `bundle.json` replay package in Python:
 
 ```python
@@ -93,6 +100,12 @@ This prototype does that by making the Guardian Layer handoff payload a determin
 - the active ICSD policy profile
 
 The AI can suggest a reconstruction, but it cannot inject a different pixel raster into the released state. The released view is always recomputed inside the verification layer from raw data, hashed into ICSD evidence, and appended to a transparency log with a verifiable receipt.
+
+That interface is now explicit rather than implied. The harness emits:
+
+- `AIClaimEnvelope`: the AI-side reconstruction, mask, and volume claim anchored to the raw-input hash
+- `MaskDerivationPolicy`: the deterministic rule that turns a raw-derived reconstruction into the admissible mask
+- `VerifiedReconstructionTrace`: the proof object that links the raw measurements, derived reconstruction, mask policy, and verified volume back to the original claim
 
 The portable bundle pushes that one step further. Each accepted case now emits a shareable `.mri-guard-bundle` archive containing:
 

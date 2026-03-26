@@ -297,6 +297,7 @@ def _build_bundle_manifest(
     receipt_entry: Mapping[str, Any],
 ) -> dict[str, Any]:
     analysis = report["analysis"]
+    contracts = report["contracts"]
     return {
         "schema_version": _BUNDLE_SCHEMA_VERSION,
         "bundle_type": "mri_guard_bundle",
@@ -309,6 +310,13 @@ def _build_bundle_manifest(
         "verdict": "This scan is verifiably correct.",
         "hashes": {
             "raw_kspace_hash": analysis["raw_hash"],
+            "ai_claim_envelope_hash": hash_canonical_json(contracts["ai_claim_envelope"]),
+            "mask_derivation_policy_hash": hash_canonical_json(
+                contracts["mask_derivation_policy"]
+            ),
+            "verified_reconstruction_trace_hash": hash_canonical_json(
+                contracts["verified_reconstruction_trace"]
+            ),
             "reconstruction_hash": analysis["derived_reconstruction_hash"],
             "ai_mask_hash": analysis["ai_mask_hash"],
             "verified_mask_hash": analysis["verified_mask_hash"],

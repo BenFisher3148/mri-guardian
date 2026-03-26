@@ -14,7 +14,7 @@ from mri_guardian.bundle import (
     verify_bundle,
     write_portable_evidence_bundle,
 )
-from icsd.core.serialise import canonical_json_dumps
+from icsd.core.serialise import canonical_json_dumps, hash_canonical_json
 from icsd.core.errors import InvariantViolationError
 from icsd.core.evidence import validate_evidence_payload
 
@@ -63,6 +63,15 @@ class MriGuardianHarnessTests(unittest.TestCase):
             )
         )
         self.assertTrue(result.after_state["verified_manifest"]["mask_verification"]["verified"])
+        self.assertIn("ai_claim_envelope", result.after_state["verified_manifest"])
+        self.assertIn("verified_reconstruction_trace", result.after_state["verified_manifest"])
+        self.assertIn("mask_derivation_policy", result.after_state["verified_manifest"])
+        self.assertEqual(
+            result.after_state["verified_manifest"]["verified_reconstruction_trace"][
+                "claim_envelope_hash"
+            ],
+            hash_canonical_json(result.after_state["verified_manifest"]["ai_claim_envelope"]),
+        )
         self.assertEqual(
             result.after_state["workstation_payload"]["pixel_source"],
             "harness_reconstructed_from_raw_kspace",
@@ -104,6 +113,16 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(
             manifest["hashes"]["raw_kspace_hash"],
             result.after_state["verified_manifest"]["raw_hash"],
+        )
+        self.assertEqual(
+            manifest["hashes"]["ai_claim_envelope_hash"],
+            hash_canonical_json(result.after_state["verified_manifest"]["ai_claim_envelope"]),
+        )
+        self.assertEqual(
+            manifest["hashes"]["verified_reconstruction_trace_hash"],
+            hash_canonical_json(
+                result.after_state["verified_manifest"]["verified_reconstruction_trace"]
+            ),
         )
         self.assertEqual(
             manifest["hashes"]["reconstruction_hash"],
@@ -230,6 +249,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(restored_state, state)
         self.assertEqual(dicom_input["endpoint"]["destination_ae_title"], "MRI-GUARDIAN-LAYER")
         self.assertEqual(dicom_input["objects"][0]["role"], "raw_kspace")
+        self.assertEqual(dicom_input["ai_claim_envelope"]["interface_type"], "AIClaimEnvelope")
 
     def test_mock_pacs_submission_exposes_verified_handoff_contract(self) -> None:
         state = build_demo_case()
@@ -261,6 +281,12 @@ class MriGuardianHarnessTests(unittest.TestCase):
             "mri-case-0001.mri-guard-bundle",
         )
         self.assertEqual(pacs_submission["series"][0]["role"], "verified_reconstruction")
+        self.assertEqual(
+            pacs_submission["proof_contracts"]["verified_reconstruction_trace"][
+                "interface_type"
+            ],
+            "VerifiedReconstructionTrace",
+        )
         self.assertEqual(integration_trace["pipeline"][0]["label"], "DICOM Input")
         self.assertEqual(integration_trace["pipeline"][2]["label"], "PACS Output")
 
@@ -280,6 +306,10 @@ class MriGuardianHarnessTests(unittest.TestCase):
             "mask_voxel_mismatch (delta = 342 voxels)",
         )
         self.assertEqual(pacs_block["withheld_series"][0]["role"], "verified_reconstruction")
+        self.assertEqual(
+            pacs_block["proof_contracts"]["mask_derivation_policy"]["interface_type"],
+            "MaskDerivationPolicy",
+        )
         self.assertEqual(integration_trace["pipeline"][1]["decision"], "blocked")
         self.assertEqual(integration_trace["pipeline"][2]["label"], "PACS Output Blocked")
 
@@ -409,6 +439,11 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertFalse(fake_report["release_eligible"])
         self.assertEqual(fake_report["failure_reasons"][0]["code"], "mask_voxel_mismatch")
         self.assertEqual(fake_report["failure_reasons"][0]["delta"], 342)
+        self.assertEqual(fake_report["contracts"]["ai_claim_envelope"]["interface_type"], "AIClaimEnvelope")
+        self.assertEqual(
+            fake_report["contracts"]["verified_reconstruction_trace"]["interface_type"],
+            "VerifiedReconstructionTrace",
+        )
         self.assertEqual(fake_report["verification_tiers"]["level_1"]["status"], "passed")
         self.assertEqual(fake_report["verification_tiers"]["level_2"]["status"], "failed")
         self.assertEqual(fake_report["verification_tiers"]["level_3"]["status"], "passed")
