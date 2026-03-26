@@ -15,10 +15,28 @@ It is intentionally non-invasive. The reconstruction AI and the PACS/workstation
 
 If you are short on time, the fastest way to understand the repo is:
 
-1. Install the general environment from [requirements.txt](requirements.txt) or the exact reviewed stack from [requirements-review.txt](requirements-review.txt).
-2. Run the deterministic demo with `python -m mri_guardian.demo --output-dir demo_artifacts --tamper-mode`.
+1. Install the general environment from [requirements.txt](requirements.txt) or the exact reviewed stack from [requirements-review.txt](requirements-review.txt), then install the local package with `pip install -e .`.
+2. Run the deterministic demo with `mri-guardian demo --output-dir demo_artifacts --tamper-mode`.
 3. Open `demo_artifacts/comparison.html` and one of the `tamper_*.html` reports.
 4. If you want the deeper model, then read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/INTEROPERABILITY.md](docs/INTEROPERABILITY.md), and [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
+## Happy Path Commands
+
+After `pip install -e .`, the repository exposes a single CLI:
+
+```powershell
+mri-guardian demo --output-dir demo_artifacts --tamper-mode
+mri-guardian verify demo_artifacts
+mri-guardian test
+```
+
+The same commands also work as a module entrypoint:
+
+```powershell
+python -m mri_guardian demo --output-dir demo_artifacts --tamper-mode
+python -m mri_guardian verify demo_artifacts
+python -m mri_guardian test
+```
 
 ## Verification Model
 
@@ -76,18 +94,14 @@ Recommended general clone -> install -> test path:
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\mri-guardian.exe test
 ```
 
 If you want the exact reviewed environment used in the current docs and demo artifacts, use:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-review.txt
-```
-
-If you want local package metadata installed as well, use:
-
-```powershell
 .\.venv\Scripts\python.exe -m pip install -e .
 ```
 
@@ -102,13 +116,13 @@ Optional extra acceleration dependencies are exposed through the package extras:
 Run the deterministic demo:
 
 ```powershell
-.\.venv\Scripts\python.exe -m mri_guardian.demo --output-dir demo_artifacts --tamper-mode
+mri-guardian demo --output-dir demo_artifacts --tamper-mode
 ```
 
-Verify the emitted ICSD evidence envelope:
+Verify the emitted evidence and bundle artifacts:
 
 ```powershell
-.\.venv\Scripts\icsd-dpa verify demo_artifacts\evidence.json
+mri-guardian verify demo_artifacts
 ```
 
 Inspect the portable proof artifact:
@@ -156,7 +170,7 @@ Open the visual comparison outputs:
 Run the unit tests:
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+mri-guardian test
 ```
 
 ## Why this satisfies the challenge

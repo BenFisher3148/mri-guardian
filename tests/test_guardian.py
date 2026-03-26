@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+import sys
 import unittest
 from zipfile import ZipFile, ZipInfo
 from pathlib import Path
@@ -14,6 +16,7 @@ from mri_guardian.bundle import (
     verify_bundle,
     write_portable_evidence_bundle,
 )
+from mri_guardian.cli import run_test_command, run_verify_command
 from icsd.core.serialise import canonical_json_dumps, hash_canonical_json
 from icsd.core.errors import InvariantViolationError
 from icsd.core.evidence import validate_evidence_payload
@@ -635,6 +638,95 @@ class MriGuardianHarnessTests(unittest.TestCase):
             narrative["dicom_compliance_story"]["ingress_transport"],
             "dicom-c-store",
         )
+
+    def test_cli_verify_command_reports_directory_success(self) -> None:
+        state = build_demo_case()
+        harness = self._build_harness()
+        result = harness.release_case(
+            state=state,
+            actor="guardian:test",
+            authority_sources=build_demo_authority_sources(case_id=state["case_id"]),
+            timestamp="2026-03-26T00:00:00Z",
+        )
+        bundle_path = self.runtime_root / f"{state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
+        (self.runtime_root / "evidence.json").write_text(
+            f"{result.evidence_json}\n",
+            encoding="utf-8",
+        )
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+
+        verification = run_verify_command(self.runtime_root)
+
+        self.assertTrue(verification["verified"])
+        self.assertIn("evidence", verification["parts"])
+        self.assertIn("bundle", verification["parts"])
+
+    def test_cli_test_command_runs_sample_suite(self) -> None:
+        sample_root = self.runtime_root / "sample_tests"
+        sample_root.mkdir()
+        (sample_root / "test_smoke.py").write_text(
+            "import unittest\n\n"
+            "class SmokeTest(unittest.TestCase):\n"
+            "    def test_ok(self):\n"
+            "        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+
+        result = run_test_command(
+            start_dir=str(sample_root),
+            pattern="test_smoke.py",
+            top_level_dir=str(sample_root),
+            verbosity=0,
+        )
+
+        self.assertTrue(result["successful"])
+        self.assertEqual(result["tests_run"], 1)
+
+    def test_python_module_cli_demo_and_verify_commands_work(self) -> None:
+        demo_root = self.runtime_root / "cli_demo"
+        demo_command = [
+            sys.executable,
+            "-m",
+            "mri_guardian",
+            "demo",
+            "--output-dir",
+            str(demo_root),
+            "--tamper-mode",
+        ]
+        verify_command = [
+            sys.executable,
+            "-m",
+            "mri_guardian",
+            "verify",
+            str(demo_root),
+            "--format",
+            "json",
+        ]
+
+        demo_run = subprocess.run(
+            demo_command,
+            cwd=Path.cwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        verify_run = subprocess.run(
+            verify_command,
+            cwd=Path.cwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(demo_run.returncode, 0, demo_run.stderr)
+        self.assertTrue((demo_root / "comparison.html").exists())
+        self.assertEqual(verify_run.returncode, 0, verify_run.stderr)
+        verification = json.loads(verify_run.stdout)
+        self.assertTrue(verification["verified"])
 
     def _build_harness(self) -> MriGuardianHarness:
         return MriGuardianHarness(

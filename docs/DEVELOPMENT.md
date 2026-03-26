@@ -30,7 +30,8 @@ Recommended first-run path:
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\mri-guardian.exe test
 ```
 
 If you need the exact reviewed environment used by the current docs and generated demo artifacts:
@@ -58,16 +59,34 @@ Pinned review stack in `requirements-review.txt`:
 - `numba==0.64.0`
 - `cython==3.2.4`
 
+## One-Command Happy Path
+
+After `pip install -e .`, the installed CLI exposes the repo’s primary flows:
+
+```powershell
+mri-guardian demo --output-dir demo_artifacts --tamper-mode
+mri-guardian verify demo_artifacts
+mri-guardian test
+```
+
+Equivalent module entrypoint:
+
+```powershell
+python -m mri_guardian demo --output-dir demo_artifacts --tamper-mode
+python -m mri_guardian verify demo_artifacts
+python -m mri_guardian test
+```
+
 Run the deterministic demo:
 
 ```powershell
-.\.venv\Scripts\python.exe -m mri_guardian.demo --output-dir demo_artifacts --tamper-mode
+.\.venv\Scripts\mri-guardian.exe demo --output-dir demo_artifacts --tamper-mode
 ```
 
 Run tests:
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\mri-guardian.exe test
 ```
 
 Run ICSD lint:
@@ -80,7 +99,7 @@ Run ICSD lint:
 Verify emitted evidence:
 
 ```powershell
-.\.venv\Scripts\icsd-dpa verify demo_artifacts\evidence.json --format json
+.\.venv\Scripts\mri-guardian.exe verify demo_artifacts --format json
 ```
 
 Verify the portable bundle:

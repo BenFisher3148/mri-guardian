@@ -27,5 +27,8 @@ dev = [
   "cython>=3,<4",
 ]
 
+[project.scripts]
+mri-guardian = "mri_guardian.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["mri_guardian*"]
