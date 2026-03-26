@@ -31,6 +31,7 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
     analysis = report["analysis"]
     manifest = report["manifest"]
     reasons = report["failure_reasons"]
+    tiers = report["verification_tiers"]
     ai_reconstruction = np.asarray(arrays["ai_reconstruction"], dtype=np.float64)
     ai_mask = np.asarray(analysis["ai_mask"], dtype=np.int64)
     verified_reconstruction = np.asarray(analysis["derived_reconstruction"], dtype=np.float64)
@@ -82,10 +83,15 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
         rejected_mask=rejected_mask,
         missing_mask=missing_mask,
     )
-    verification = _build_verification_summary(reasons=reasons)
+    verification = _build_verification_summary(
+        reasons=reasons,
+        tiers=tiers,
+        release_eligible=bool(report["release_eligible"]),
+    )
     timing = build_timing_overlay_snapshot()
     findings = _build_findings(
         reasons=reasons,
+        tiers=tiers,
         mask_delta=mask_delta,
         rejected_count=rejected_count,
         intensity_mismatch_count=intensity_mismatch_count,
@@ -142,6 +148,7 @@ def render_side_by_side_report_html(
     summary = view_model["summary"]
     verification = view_model["verification"]
     timing = view_model["timing"]
+    tier_cards_markup = _tier_cards_markup(verification["tiers"])
     findings_markup = "\n".join(
         f"<li>{escape(finding)}</li>" for finding in view_model["findings"]
     )
@@ -340,6 +347,94 @@ def render_side_by_side_report_html(
       color: rgba(245, 247, 251, 0.72);
       font-size: 0.84rem;
       line-height: 1.45;
+    }}
+
+    .tier-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin: 18px 0 18px;
+    }}
+
+    .tier-card {{
+      padding: 16px;
+      border-radius: 20px;
+      background: rgba(7, 15, 24, 0.34);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }}
+
+    .tier-header {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }}
+
+    .tier-title {{
+      margin: 0;
+      font-size: 1rem;
+      line-height: 1.2;
+    }}
+
+    .tier-subtitle {{
+      margin: 6px 0 0;
+      color: rgba(245, 247, 251, 0.68);
+      font-size: 0.82rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }}
+
+    .tier-status {{
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 10px;
+      border-radius: 999px;
+      font-size: 0.74rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }}
+
+    .tier-status-pass {{
+      color: #ddffec;
+      background: rgba(54, 226, 143, 0.18);
+    }}
+
+    .tier-status-fail {{
+      color: #ffe5e6;
+      background: rgba(255, 90, 95, 0.18);
+    }}
+
+    .tier-status-warn {{
+      color: #fff0d1;
+      background: rgba(255, 194, 75, 0.2);
+    }}
+
+    .tier-scope {{
+      margin: 0 0 10px;
+      color: rgba(245, 247, 251, 0.78);
+      font-size: 0.86rem;
+    }}
+
+    .tier-summary {{
+      margin: 0 0 12px;
+      color: rgba(245, 247, 251, 0.9);
+      font-size: 0.92rem;
+      line-height: 1.45;
+    }}
+
+    .tier-checks {{
+      margin: 0;
+      padding-left: 18px;
+      color: rgba(245, 247, 251, 0.82);
+      font-size: 0.88rem;
+      line-height: 1.4;
+    }}
+
+    .tier-checks li + li {{
+      margin-top: 6px;
     }}
 
     .metric-card {{
@@ -624,6 +719,9 @@ def render_side_by_side_report_html(
         Probe: {escape(_display_probe_shape(timing["probe_shape"]))}. Median of {timing["sample_runs"]} runs after {timing["warmup_runs"]} warm-up runs.
         Backend: {escape(timing["backend"])}. Total pipeline: {_display_ms(timing["total_pipeline_ms"])}.
       </p>
+      <div class="tier-grid">
+        {tier_cards_markup}
+      </div>
       <div class="failure-banner">
         <h2>{escape(verification["headline"])}</h2>
         <p class="failure-reason">Reason: {escape(verification["primary_reason_summary"])}</p>
@@ -899,8 +997,37 @@ def _difference_rows(
     return rows, total_count
 
 
-def _build_verification_summary(*, reasons: list[dict[str, Any]]) -> dict[str, Any]:
-    if not reasons:
+def _build_verification_summary(
+    *,
+    reasons: list[dict[str, Any]],
+    tiers: dict[str, Any],
+    release_eligible: bool,
+) -> dict[str, Any]:
+    ordered_tiers = _ordered_tiers(tiers)
+    tier_view_models = [_tier_view_model(tier) for tier in ordered_tiers]
+    if release_eligible:
+        level_3 = tiers["level_3"]
+        if level_3["status"] == "warning":
+            return {
+                "headline": "Verification PASSED",
+                "primary_reason_summary": (
+                    "all_blocking_checks_passed; clinical_plausibility_review_recommended"
+                ),
+                "reasons": [
+                    {
+                        "code": "all_blocking_checks_passed",
+                        "message": (
+                            "Level 1 structural validity and Level 2 physical consistency "
+                            "both passed."
+                        ),
+                    },
+                    {
+                        "code": "clinical_plausibility_review_recommended",
+                        "message": level_3["summary"],
+                    },
+                ],
+                "tiers": tier_view_models,
+            }
         return {
             "headline": "Verification PASSED",
             "primary_reason_summary": "all_verification_checks_passed",
@@ -913,21 +1040,47 @@ def _build_verification_summary(*, reasons: list[dict[str, Any]]) -> dict[str, A
                     ),
                 }
             ],
+            "tiers": tier_view_models,
         }
-    primary_reason = reasons[0]
+    if reasons:
+        primary_reason = reasons[0]
+        return {
+            "headline": "Verification FAILED",
+            "primary_reason_summary": primary_reason["summary"],
+            "reasons": [
+                {"code": reason["code"], "message": reason["message"]}
+                for reason in reasons
+            ],
+            "tiers": tier_view_models,
+        }
+    failing_tier = next(
+        (
+            tier
+            for tier in ordered_tiers
+            if tier["blocking"] and tier["status"] != "passed"
+        ),
+        None,
+    )
+    primary_reason_summary = "verification_blocked_by_structural_or_physical_gate"
+    if failing_tier is not None:
+        primary_reason_summary = failing_tier["summary"]
     return {
         "headline": "Verification FAILED",
-        "primary_reason_summary": primary_reason["summary"],
+        "primary_reason_summary": primary_reason_summary,
         "reasons": [
-            {"code": reason["code"], "message": reason["message"]}
-            for reason in reasons
+            {
+                "code": "verification_blocked_by_structural_or_physical_gate",
+                "message": primary_reason_summary,
+            }
         ],
+        "tiers": tier_view_models,
     }
 
 
 def _build_findings(
     *,
     reasons: list[dict[str, Any]],
+    tiers: dict[str, Any],
     mask_delta: int,
     rejected_count: int,
     intensity_mismatch_count: int,
@@ -935,12 +1088,18 @@ def _build_findings(
     computed_volume: float,
     volume_verified: bool,
 ) -> list[str]:
+    clinical_tier = tiers["level_3"]
     if not reasons:
-        return [
-            "Verification passed. The AI image, tumour mask, and claimed volume all survive the ICSD guard.",
+        findings = [
+            "Blocking verification passed. Level 1 structural validity and Level 2 physical consistency both held.",
             "No mask drift was detected between the AI overlay and the policy-derived verified mask.",
             "No intensity manipulation was detected in the AI reconstruction.",
         ]
+        if clinical_tier["status"] == "warning":
+            findings.append(
+                "Clinical plausibility raised advisory review flags even though the blocking verification gate passed."
+            )
+        return findings
     findings: list[str] = []
     if mask_delta:
         findings.append(
@@ -962,7 +1121,65 @@ def _build_findings(
         findings.append(
             f"Volume verification failed: claimed {claimed_volume} mm3, verified {computed_volume} mm3."
         )
+    if clinical_tier["status"] == "warning":
+        findings.append(
+            "Clinical plausibility heuristics also raised advisory review flags on the verified anatomy."
+        )
     return findings
+
+
+def _ordered_tiers(tiers: dict[str, Any]) -> list[dict[str, Any]]:
+    return [tiers[key] for key in ("level_1", "level_2", "level_3")]
+
+
+def _tier_view_model(tier: dict[str, Any]) -> dict[str, Any]:
+    status = tier["status"]
+    status_label_map = {
+        "passed": "PASS" if tier["blocking"] else "ADVISORY PASS",
+        "failed": "FAIL",
+        "warning": "ADVISORY WARN",
+        "not_evaluated": "NOT EVALUATED",
+    }
+    status_class_map = {
+        "passed": "tier-status-pass",
+        "failed": "tier-status-fail",
+        "warning": "tier-status-warn",
+        "not_evaluated": "tier-status-warn",
+    }
+    return {
+        **tier,
+        "scope_label": "Blocking gate" if tier["blocking"] else "Advisory only",
+        "status_label": status_label_map.get(status, status.upper()),
+        "status_class": status_class_map.get(status, "tier-status-warn"),
+    }
+
+
+def _tier_cards_markup(tiers: list[dict[str, Any]]) -> str:
+    cards = []
+    for tier in tiers:
+        checks_markup = "\n".join(
+            (
+                "<li>"
+                f"<strong>{escape(check['label'])}</strong>: {escape(check['message'])}"
+                "</li>"
+            )
+            for check in tier["checks"]
+        )
+        cards.append(
+            "<article class=\"tier-card\">"
+            "<div class=\"tier-header\">"
+            "<div>"
+            f"<h2 class=\"tier-title\">{escape(tier['title'])}</h2>"
+            f"<p class=\"tier-subtitle\">{escape(tier['subtitle'])}</p>"
+            "</div>"
+            f"<span class=\"tier-status {escape(tier['status_class'])}\">{escape(tier['status_label'])}</span>"
+            "</div>"
+            f"<p class=\"tier-scope\">{escape(tier['scope_label'])}</p>"
+            f"<p class=\"tier-summary\">{escape(tier['summary'])}</p>"
+            f"<ul class=\"tier-checks\">{checks_markup}</ul>"
+            "</article>"
+        )
+    return "\n".join(cards)
 
 
 def _difference_table_markup(differences: dict[str, Any]) -> str:

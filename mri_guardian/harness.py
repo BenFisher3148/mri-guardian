@@ -26,6 +26,9 @@ _RECONSTRUCTION_TOLERANCE = 1e-9
 _IMAGINARY_LEAK_TOLERANCE = 1e-9
 _VOLUME_TOLERANCE = 1e-9
 _VERIFIED_MASK_THRESHOLD = 2.5
+_CLINICAL_PLAUSIBILITY_MAX_MASK_FRACTION = 0.35
+_CLINICAL_PLAUSIBILITY_MIN_CONTRAST_DELTA = 0.75
+_CLINICAL_PLAUSIBILITY_MIN_SLICE_SPAN = 2
 _REQUIRED_AUTHORITY_SOURCE_TYPES = frozenset(
     {"scanner_manifest", "voxel_geometry", "model_manifest"}
 )
@@ -70,12 +73,15 @@ def build_case_verification_report(state: Mapping[str, Any]) -> dict[str, Any]:
     analysis = _analyse_case(state)
     manifest = _build_verified_manifest(state, analysis)
     reasons = _build_failure_reasons(state, analysis, manifest)
+    tiers = manifest["verification_tiers"]
     return {
         "analysis": analysis,
         "manifest": manifest,
+        "verification_tiers": tiers,
         "failure_reasons": reasons,
         "release_eligible": not reasons
-        and all(manifest[section]["verified"] for section in _release_gate_sections()),
+        and tiers["level_1"]["status"] == "passed"
+        and tiers["level_2"]["status"] == "passed",
     }
 
 
@@ -511,7 +517,8 @@ def _build_verified_manifest(
     ai_match_verified = analysis["max_ai_abs_error"] <= _RECONSTRUCTION_TOLERANCE
     mask_verified = analysis["mask_voxel_delta"] == 0
     volume_verified = abs(claimed_volume - analysis["computed_tumor_volume_mm3"]) <= _VOLUME_TOLERANCE
-    return {
+    clinical_plausibility = _build_clinical_plausibility_manifest(analysis)
+    manifest = {
         "policy_name": MRI_GUARDIAN_POLICY_NAME,
         "policy_version": MRI_GUARDIAN_POLICY_VERSION,
         "raw_hash": analysis["raw_hash"],
@@ -554,7 +561,431 @@ def _build_verified_manifest(
             "pixel_source": "harness_reconstructed_from_raw_kspace",
             "ai_render_passthrough_allowed": False,
         },
+        "clinical_plausibility": clinical_plausibility,
     }
+    manifest["verification_tiers"] = _build_verification_tiers(state, manifest)
+    return manifest
+
+
+def _build_clinical_plausibility_manifest(
+    analysis: Mapping[str, Any],
+) -> dict[str, Any]:
+    derived_reconstruction = np.asarray(analysis["derived_reconstruction"], dtype=np.float64)
+    verified_mask = np.asarray(analysis["verified_mask"], dtype=np.int64)
+    total_voxels = int(verified_mask.size)
+    verified_voxels = int(analysis["verified_mask_voxel_count"])
+    mask_fraction = 0.0
+    if total_voxels:
+        mask_fraction = verified_voxels / total_voxels
+    heuristics = [
+        _heuristic_entry(
+            code="mask_fraction_guardrail",
+            label="Verified occupancy fraction",
+            status=(
+                "warning"
+                if mask_fraction > _CLINICAL_PLAUSIBILITY_MAX_MASK_FRACTION
+                else "passed"
+            ),
+            message=(
+                "The verified mask occupies an unusually large share of the voxel grid "
+                f"({mask_fraction:.1%} vs advisory cap {_CLINICAL_PLAUSIBILITY_MAX_MASK_FRACTION:.0%})."
+                if mask_fraction > _CLINICAL_PLAUSIBILITY_MAX_MASK_FRACTION
+                else (
+                    "The verified mask occupies a bounded share of the voxel grid "
+                    f"({mask_fraction:.1%})."
+                )
+            ),
+            observed=_round_float(mask_fraction),
+            threshold=_round_float(_CLINICAL_PLAUSIBILITY_MAX_MASK_FRACTION),
+        ),
+    ]
+
+    if verified_voxels and verified_voxels < total_voxels:
+        inside_mean = float(np.mean(derived_reconstruction[verified_mask == 1]))
+        outside_mean = float(np.mean(derived_reconstruction[verified_mask == 0]))
+        contrast_delta = inside_mean - outside_mean
+        heuristics.append(
+            _heuristic_entry(
+                code="inside_outside_contrast",
+                label="Inside/outside contrast delta",
+                status=(
+                    "warning"
+                    if contrast_delta < _CLINICAL_PLAUSIBILITY_MIN_CONTRAST_DELTA
+                    else "passed"
+                ),
+                message=(
+                    "The verified lesion is not meaningfully brighter than the surrounding "
+                    f"background ({_round_float(contrast_delta)} vs advisory floor "
+                    f"{_round_float(_CLINICAL_PLAUSIBILITY_MIN_CONTRAST_DELTA)})."
+                    if contrast_delta < _CLINICAL_PLAUSIBILITY_MIN_CONTRAST_DELTA
+                    else (
+                        "The verified lesion remains visually separable from the "
+                        f"surrounding background (delta = {_round_float(contrast_delta)})."
+                    )
+                ),
+                observed=_round_float(contrast_delta),
+                threshold=_round_float(_CLINICAL_PLAUSIBILITY_MIN_CONTRAST_DELTA),
+            )
+        )
+    else:
+        heuristics.append(
+            _heuristic_entry(
+                code="inside_outside_contrast",
+                label="Inside/outside contrast delta",
+                status="not_evaluated",
+                message=(
+                    "Contrast heuristics were not evaluated because the verified mask "
+                    "does not leave both lesion and background voxels to compare."
+                ),
+            )
+        )
+
+    slice_span = int(np.count_nonzero(np.any(verified_mask == 1, axis=(1, 2))))
+    heuristics.append(
+        _heuristic_entry(
+            code="slice_span",
+            label="Slice span",
+            status=(
+                "warning"
+                if verified_voxels and slice_span < _CLINICAL_PLAUSIBILITY_MIN_SLICE_SPAN
+                else "passed"
+            ),
+            message=(
+                "The verified lesion only appears on "
+                f"{slice_span} slice(s), below the advisory floor of "
+                f"{_CLINICAL_PLAUSIBILITY_MIN_SLICE_SPAN}."
+                if verified_voxels and slice_span < _CLINICAL_PLAUSIBILITY_MIN_SLICE_SPAN
+                else f"The verified lesion spans {slice_span} slice(s)."
+            ),
+            observed=slice_span,
+            threshold=_CLINICAL_PLAUSIBILITY_MIN_SLICE_SPAN,
+        )
+    )
+
+    warnings = [
+        {
+            "code": entry["code"],
+            "label": entry["label"],
+            "message": entry["message"],
+        }
+        for entry in heuristics
+        if entry["status"] == "warning"
+    ]
+    status = "warning" if warnings else "passed"
+    return {
+        "advisory_only": True,
+        "status": status,
+        "summary": (
+            f"{len(warnings)} advisory clinical plausibility warning(s) detected."
+            if warnings
+            else "No advisory clinical plausibility warnings were detected."
+        ),
+        "warning_count": len(warnings),
+        "warnings": warnings,
+        "heuristics": heuristics,
+    }
+
+
+def _build_verification_tiers(
+    state: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    structural_checks = _build_structural_validity_checks(state)
+    structural_status = _tier_status_from_checks(structural_checks)
+    physical_checks = _build_physical_consistency_checks(manifest)
+    physical_status = _tier_status_from_checks(physical_checks)
+    clinical_section = manifest["clinical_plausibility"]
+    clinical_checks = [
+        {
+            "code": entry["code"],
+            "label": entry["label"],
+            "status": entry["status"],
+            "message": entry["message"],
+        }
+        for entry in clinical_section["heuristics"]
+    ]
+    return {
+        "level_1": {
+            "level": 1,
+            "title": "Level 1: Structural Validity",
+            "subtitle": "ICSD envelope",
+            "blocking": True,
+            "status": structural_status,
+            "summary": (
+                "ICSD structural checks passed for identifiers, numeric fields, voxel geometry, "
+                "and release payload shape."
+                if structural_status == "passed"
+                else "ICSD structural checks failed before mathematical verification can be trusted."
+            ),
+            "checks": structural_checks,
+        },
+        "level_2": {
+            "level": 2,
+            "title": "Level 2: Physical Consistency",
+            "subtitle": "k-space reconstruction",
+            "blocking": True,
+            "status": physical_status,
+            "summary": (
+                "Raw k-space, deterministic reconstruction, verified mask, and tumour volume "
+                "all agree."
+                if physical_status == "passed"
+                else "Raw-derived physical consistency failed; the AI claim diverges from measured reality."
+            ),
+            "checks": physical_checks,
+        },
+        "level_3": {
+            "level": 3,
+            "title": "Level 3: Clinical Plausibility",
+            "subtitle": "Optional heuristics",
+            "blocking": False,
+            "status": clinical_section["status"],
+            "summary": clinical_section["summary"],
+            "checks": clinical_checks,
+        },
+    }
+
+
+def _build_structural_validity_checks(
+    state: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    checks = [
+        _invariant_check_result(
+            code="required_strings_present",
+            label="Required identifiers",
+            failure=_check_required_strings(state),
+            success_message="Required identifiers are present and non-empty.",
+        ),
+        _invariant_check_result(
+            code="release_status_known",
+            label="Release status",
+            failure=_check_release_status(state),
+            success_message="release_status is a known guardian state.",
+        ),
+    ]
+    checks.extend(_numeric_field_checks(state))
+    checks.extend(
+        [
+            _invariant_check_result(
+                code="geometry_consistent",
+                label="Voxel grid geometry",
+                failure=_check_geometry_consistent(state),
+                success_message="Raw k-space, AI reconstruction, and tumour mask share one voxel grid.",
+            ),
+            _invariant_check_result(
+                code="voxel_spacing_positive",
+                label="Voxel spacing",
+                failure=_check_voxel_spacing_positive(state),
+                success_message="voxel_spacing_mm is positive and shaped for a 3D study.",
+            ),
+            _invariant_check_result(
+                code="release_payloads_guarded",
+                label="Release payload contract",
+                failure=_check_release_payload_contract(state),
+                success_message="The state shape matches its pending or released contract.",
+            ),
+        ]
+    )
+    return checks
+
+
+def _numeric_field_checks(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    checks = []
+    field_specs = (
+        ("raw_real", "Raw real component", False),
+        ("raw_imag", "Raw imaginary component", False),
+        ("ai_reconstruction", "AI reconstruction tensor", False),
+        ("tumor_mask", "Tumour mask tensor", True),
+    )
+    for field_name, label, binary_only in field_specs:
+        checks.append(
+            _numeric_field_check(
+                state=state,
+                field_name=field_name,
+                label=label,
+                binary_only=binary_only,
+            )
+        )
+    return checks
+
+
+def _numeric_field_check(
+    *,
+    state: Mapping[str, Any],
+    field_name: str,
+    label: str,
+    binary_only: bool,
+) -> dict[str, Any]:
+    value = state.get(field_name)
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except Exception as exc:
+        return {
+            "code": field_name,
+            "label": label,
+            "status": "failed",
+            "message": (
+                f"{field_name!r} could not be cast into a numeric array "
+                f"({type(exc).__name__})."
+            ),
+        }
+    if array.ndim != 3:
+        return {
+            "code": field_name,
+            "label": label,
+            "status": "failed",
+            "message": f"{field_name!r} must be a non-empty 3D numeric tensor.",
+        }
+    if array.size == 0:
+        return {
+            "code": field_name,
+            "label": label,
+            "status": "failed",
+            "message": f"{field_name!r} must not be empty.",
+        }
+    if not np.isfinite(array).all():
+        return {
+            "code": field_name,
+            "label": label,
+            "status": "failed",
+            "message": f"{field_name!r} contains non-finite values.",
+        }
+    if binary_only and not np.isin(array, (0.0, 1.0)).all():
+        return {
+            "code": field_name,
+            "label": label,
+            "status": "failed",
+            "message": f"{field_name!r} must contain only 0/1 mask values.",
+        }
+    return {
+        "code": field_name,
+        "label": label,
+        "status": "passed",
+        "message": f"{field_name!r} is a finite 3D tensor.",
+    }
+
+
+def _build_physical_consistency_checks(
+    manifest: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    return [
+        _physical_check_result(
+            code="measurement_consistency",
+            label="Raw k-space re-projection",
+            verified=manifest["measurement_consistency"]["verified"],
+            success_message=(
+                "The deterministic reconstruction reprojects back to the supplied raw k-space."
+            ),
+            failure_message=(
+                "The deterministic reconstruction does not cleanly reproject back to the "
+                "supplied raw k-space."
+            ),
+        ),
+        _physical_check_result(
+            code="ai_reconstruction_match",
+            label="AI reconstruction parity",
+            verified=manifest["ai_reconstruction_match"]["verified"],
+            success_message=(
+                "The AI reconstruction matches the deterministic reconstruction on the measured grid."
+            ),
+            failure_message=(
+                "The AI reconstruction diverges from the deterministic reconstruction."
+            ),
+        ),
+        _physical_check_result(
+            code="mask_verification",
+            label="Verified mask parity",
+            verified=manifest["mask_verification"]["verified"],
+            success_message="The AI tumour mask matches the deterministic verified mask.",
+            failure_message=(
+                "The AI tumour mask diverges from the deterministic verified mask."
+            ),
+        ),
+        _physical_check_result(
+            code="tumor_volume_proof",
+            label="Tumour volume proof",
+            verified=manifest["tumor_volume_proof"]["verified"],
+            success_message=(
+                "The submitted tumour volume equals the verified voxel count times voxel spacing."
+            ),
+            failure_message=(
+                "The submitted tumour volume does not match the verified voxel geometry."
+            ),
+        ),
+        _physical_check_result(
+            code="no_invented_pixels",
+            label="Invented pixel guard",
+            verified=manifest["no_invented_pixels"]["verified"],
+            success_message="No AI-supplied pixels bypass the raw-derived workstation path.",
+            failure_message="The workstation path is no longer fully explained by raw-derived pixels.",
+        ),
+    ]
+
+
+def _physical_check_result(
+    *,
+    code: str,
+    label: str,
+    verified: bool,
+    success_message: str,
+    failure_message: str,
+) -> dict[str, Any]:
+    return {
+        "code": code,
+        "label": label,
+        "status": "passed" if verified else "failed",
+        "message": success_message if verified else failure_message,
+    }
+
+
+def _invariant_check_result(
+    *,
+    code: str,
+    label: str,
+    failure: InvariantFailure | None,
+    success_message: str,
+) -> dict[str, Any]:
+    if failure is None:
+        return {
+            "code": code,
+            "label": label,
+            "status": "passed",
+            "message": success_message,
+        }
+    return {
+        "code": code,
+        "label": label,
+        "status": "failed",
+        "message": failure.message,
+    }
+
+
+def _tier_status_from_checks(checks: list[dict[str, Any]]) -> str:
+    for check in checks:
+        if check["status"] == "failed":
+            return "failed"
+    return "passed"
+
+
+def _heuristic_entry(
+    *,
+    code: str,
+    label: str,
+    status: str,
+    message: str,
+    observed: float | int | None = None,
+    threshold: float | int | None = None,
+) -> dict[str, Any]:
+    entry = {
+        "code": code,
+        "label": label,
+        "status": status,
+        "message": message,
+    }
+    if observed is not None:
+        entry["observed"] = observed
+    if threshold is not None:
+        entry["threshold"] = threshold
+    return entry
 
 
 def _build_workstation_payload(

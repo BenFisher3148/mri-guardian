@@ -9,6 +9,12 @@ The core rule is simple: the radiologist never receives AI-supplied pixels. The 
 - the AI tumour mask exactly matches a deterministic policy mask derived from the raw-derived reconstruction
 - the tumour volume exactly equals `verified_mask_voxel_count * voxel_spacing`
 
+The verification envelope is now split into three explainability tiers:
+
+- Level 1: Structural validity. ICSD-facing checks over identifiers, numeric tensors, voxel geometry, and release-state shape.
+- Level 2: Physical consistency. Raw k-space reprojection, deterministic reconstruction parity, mask parity, and tumour-volume proof.
+- Level 3: Clinical plausibility. Advisory-only heuristics over the verified anatomy, intended to prompt review without blocking release.
+
 The ICSD layer makes the release state invariant-closed. A case is either `pending_verification` with no released payload, or `released_to_radiologist` with a `verified_manifest` and `workstation_payload` that exactly match the expected mathematical trace. If the AI invents pixels or misstates the volume, the released state becomes unrepresentable and the transition fails.
 
 ## Structure
@@ -66,6 +72,7 @@ The added viewer makes that boundary human-visible. It renders:
 
 - left: AI reconstruction plus the AI tumour mask
 - right: deterministic reconstruction plus the admissible mask
+- Level 1 / Level 2 / Level 3 verification cards so reviewers can see which trust layer passed, failed, or only warned
 - highlighted mismatched voxels
 - highlighted rejected mask regions where the AI overlay rests on unsupported pixels
 - a timing overlay that measures reconstruction, verification, and total overhead on a cached in-memory performance probe
@@ -77,5 +84,7 @@ The tamper-mode reports make failure detection explicit:
 - `intensity_manipulation` alters the AI image while raw k-space stays fixed and fails with `intensity_manipulation_detected`
 
 This segmentation rule is intentionally simple for the prototype: the verified mask is derived by a deterministic threshold over the raw-derived reconstruction. The point of the harness is not clinical segmentation quality; it is proving that the workstation view and volume estimate are mathematically anchored to measured data and that tampering is detectable.
+
+Level 3 should be read in that light: it does not claim diagnosis quality. It is an optional, deterministic heuristics layer that helps frame whether the verified anatomy still looks clinically reasonable enough for human follow-up.
 
 The timing overlay uses a cached synthetic probe derived from the deterministic tamper baseline, scaled to a larger in-memory volume. It reports median reconstruction and verification timings across repeated runs and includes the active NumPy/Numba backend so reviewers can see the numerical path is fast enough to be practical.

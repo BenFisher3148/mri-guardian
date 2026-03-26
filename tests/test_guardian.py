@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from uuid import uuid4
 
+import numpy as np
+
 from icsd.core.errors import InvariantViolationError
 from icsd.core.evidence import validate_evidence_payload
 
@@ -51,6 +53,11 @@ class MriGuardianHarnessTests(unittest.TestCase):
             "harness_reconstructed_from_raw_kspace",
         )
         self.assertIn("verified_mask", result.after_state["workstation_payload"])
+        self.assertIn("verification_tiers", result.after_state["verified_manifest"])
+        self.assertEqual(
+            result.after_state["verified_manifest"]["verification_tiers"]["level_2"]["status"],
+            "passed",
+        )
 
     def test_rejects_ai_mask_with_fake_tumour_voxel(self) -> None:
         state = build_demo_case()
@@ -98,6 +105,10 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
         self.assertTrue(view_model["release_eligible"])
         self.assertEqual(view_model["verification"]["headline"], "Verification PASSED")
+        self.assertEqual(
+            [tier["status"] for tier in view_model["verification"]["tiers"]],
+            ["passed", "passed", "passed"],
+        )
         self.assertGreater(view_model["timing"]["reconstruction_ms"], 0)
         self.assertGreaterEqual(view_model["timing"]["verification_ms"], 0)
         self.assertGreaterEqual(view_model["timing"]["overhead_percent"], 0)
@@ -143,6 +154,9 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertIn("Rejected Region", html)
         self.assertIn("Verification FAILED", html)
         self.assertIn("mask_voxel_mismatch", html)
+        self.assertIn("Level 1: Structural Validity", html)
+        self.assertIn("Level 2: Physical Consistency", html)
+        self.assertIn("Level 3: Clinical Plausibility", html)
         self.assertIn("Reconstruction", html)
         self.assertIn("Verification", html)
         self.assertIn("Total Overhead", html)
@@ -160,6 +174,8 @@ class MriGuardianHarnessTests(unittest.TestCase):
             fake_view["verification"]["primary_reason_summary"],
             "mask_voxel_mismatch (delta = 342 voxels)",
         )
+        self.assertEqual(fake_view["verification"]["tiers"][0]["status"], "passed")
+        self.assertEqual(fake_view["verification"]["tiers"][1]["status"], "failed")
         self.assertEqual(fake_view["summary"]["mask_voxel_delta"], 342)
         self.assertEqual(shift_view["summary"]["mask_voxel_delta"], 46)
         self.assertTrue(
@@ -171,6 +187,8 @@ class MriGuardianHarnessTests(unittest.TestCase):
             intensity_view["verification"]["primary_reason_summary"],
             "intensity_manipulation_detected (delta = 147 voxels; max_abs_error = 0.55)",
         )
+        self.assertEqual(intensity_view["verification"]["tiers"][0]["status"], "passed")
+        self.assertEqual(intensity_view["verification"]["tiers"][1]["status"], "failed")
         self.assertEqual(intensity_view["summary"]["intensity_mismatch_voxel_count"], 147)
 
     def test_verification_report_exposes_mask_and_intensity_failure_codes(self) -> None:
@@ -184,12 +202,39 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertFalse(fake_report["release_eligible"])
         self.assertEqual(fake_report["failure_reasons"][0]["code"], "mask_voxel_mismatch")
         self.assertEqual(fake_report["failure_reasons"][0]["delta"], 342)
+        self.assertEqual(fake_report["verification_tiers"]["level_1"]["status"], "passed")
+        self.assertEqual(fake_report["verification_tiers"]["level_2"]["status"], "failed")
+        self.assertEqual(fake_report["verification_tiers"]["level_3"]["status"], "passed")
         self.assertFalse(intensity_report["release_eligible"])
         self.assertEqual(
             intensity_report["failure_reasons"][0]["code"],
             "intensity_manipulation_detected",
         )
         self.assertEqual(intensity_report["failure_reasons"][0]["delta"], 147)
+        self.assertEqual(intensity_report["verification_tiers"]["level_1"]["status"], "passed")
+        self.assertEqual(intensity_report["verification_tiers"]["level_2"]["status"], "failed")
+
+    def test_clinical_plausibility_warning_is_advisory_only(self) -> None:
+        state = self._build_advisory_warning_case()
+
+        report = build_case_verification_report(state)
+        view_model = build_side_by_side_view_model(state)
+
+        self.assertTrue(report["release_eligible"])
+        self.assertEqual(report["verification_tiers"]["level_1"]["status"], "passed")
+        self.assertEqual(report["verification_tiers"]["level_2"]["status"], "passed")
+        self.assertEqual(report["verification_tiers"]["level_3"]["status"], "warning")
+        self.assertEqual(
+            report["manifest"]["clinical_plausibility"]["warning_count"],
+            1,
+        )
+        self.assertTrue(view_model["release_eligible"])
+        self.assertEqual(view_model["verification"]["headline"], "Verification PASSED")
+        self.assertEqual(
+            view_model["verification"]["primary_reason_summary"],
+            "all_blocking_checks_passed; clinical_plausibility_review_recommended",
+        )
+        self.assertEqual(view_model["verification"]["tiers"][2]["status_label"], "ADVISORY WARN")
 
     def test_timing_overlay_snapshot_is_positive_and_has_probe_metadata(self) -> None:
         snapshot = build_timing_overlay_snapshot()
@@ -207,6 +252,25 @@ class MriGuardianHarnessTests(unittest.TestCase):
         return MriGuardianHarness(
             transparency_log_path=self.runtime_root / "transparency-log.jsonl",
         )
+
+    def _build_advisory_warning_case(self) -> dict[str, object]:
+        state = build_demo_case()
+        reconstruction = np.asarray(
+            [
+                [[3.0, 3.0], [3.0, 3.0]],
+                [[3.0, 3.0], [3.0, 0.0]],
+            ],
+            dtype=np.float64,
+        )
+        mask = (reconstruction >= 2.5).astype(np.int64)
+        raw_kspace = np.fft.fft2(reconstruction, axes=(-2, -1))
+        voxel_spacing = np.asarray(state["voxel_spacing_mm"], dtype=np.float64)
+        state["raw_real"] = raw_kspace.real.tolist()
+        state["raw_imag"] = raw_kspace.imag.tolist()
+        state["ai_reconstruction"] = reconstruction.tolist()
+        state["tumor_mask"] = mask.tolist()
+        state["tumor_volume_mm3"] = round(float(mask.sum() * np.prod(voxel_spacing)), 9)
+        return state
 
     def _cleanup_runtime_root(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
