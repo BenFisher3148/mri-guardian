@@ -1,4 +1,4 @@
-"""Side-by-side visual report for AI output versus verified MRI reality."""
+"""Side-by-side visual report for the MRI Guardian Layer."""
 
 from __future__ import annotations
 
@@ -104,12 +104,12 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
         <= _VOLUME_TOLERANCE,
     )
     return {
-        "title": "The Verifiable MRI Guardian",
-        "subtitle": "AI claim versus measured reality on the radiologist boundary.",
+        "title": "MRI Guardian Layer",
+        "subtitle": "Verification proxy between the reconstruction AI and the PACS/workstation boundary.",
         "policy_name": MRI_GUARDIAN_POLICY_NAME,
         "policy_version": MRI_GUARDIAN_POLICY_VERSION,
-        "ai_label": "AI Reconstruction + Tumour Mask",
-        "verified_label": "Deterministic Reconstruction + Verified Mask",
+        "ai_label": "AI Reconstruction + Proposed Tumour Mask",
+        "verified_label": "Guardian Layer Reconstruction + Verified Mask",
         "release_eligible": bool(report["release_eligible"]),
         "verification": verification,
         "timing": timing,
@@ -692,7 +692,7 @@ def render_side_by_side_report_html(
 <body>
   <main class="shell">
     <section class="hero">
-      <p class="eyebrow">ICSD Visual Evidence</p>
+      <p class="eyebrow">ICSD Verification Layer</p>
       <h1>{escape(title)}</h1>
       <p class="subtitle">{escape(view_model["subtitle"])}</p>
       <div class="status-row">
@@ -738,7 +738,7 @@ def render_side_by_side_report_html(
         <article class="metric-card">
           <span class="metric-label">Rejected Regions</span>
           <div class="metric-value">{summary["rejected_region_count"]}</div>
-          <div class="metric-note">AI mask voxels that the guard removed before workstation release.</div>
+          <div class="metric-note">AI mask voxels that the verification layer removed before PACS/workstation release.</div>
         </article>
         <article class="metric-card">
           <span class="metric-label">Intensity Delta</span>
@@ -765,7 +765,7 @@ def render_side_by_side_report_html(
         <span class="legend-item"><span class="swatch swatch-rejected"></span> Rejected AI region</span>
       </div>
       <p class="footnote">
-        Left panels show exactly what the AI tried to send downstream. Right panels show what the ICSD guard can defend:
+        Left panels show exactly what the AI attempted to hand downstream. Right panels show what the Guardian Layer can pass through to PACS/workstation:
         reconstruction recomputed from raw k-space and a tumour mask derived by deterministic policy from measured reality.
       </p>
     </section>
@@ -797,12 +797,12 @@ def render_side_by_side_report_html(
         <div class="panel-grid">
           <section class="panel">
             <h3>${{comparisonData.ai_label}}</h3>
-            <p>AI-proposed image and mask, shown before the guard accepts or rejects them.</p>
+            <p>AI-proposed image and mask, shown before the verification layer accepts or rejects the handoff.</p>
             <canvas data-side="ai"></canvas>
           </section>
           <section class="panel">
             <h3>${{comparisonData.verified_label}}</h3>
-            <p>Raw-derived reconstruction with the policy-verified tumour mask.</p>
+            <p>Guardian-layer reconstruction from raw k-space with the policy-verified tumour mask.</p>
             <canvas data-side="verified"></canvas>
           </section>
         </div>

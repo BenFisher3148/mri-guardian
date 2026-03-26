@@ -1,4 +1,4 @@
-"""Deterministic demo runner for the Verifiable MRI Guardian."""
+"""Deterministic demo runner for the MRI Guardian Layer."""
 
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
     (output_path / "comparison.html").write_text(
         render_side_by_side_report_html(
             case_state,
-            report_title="Accepted Case: AI vs Verified Reality",
+            report_title="Accepted Case: Guardian Layer Verification",
         ),
         encoding="utf-8",
     )

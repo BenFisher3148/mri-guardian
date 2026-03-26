@@ -264,12 +264,14 @@ class MriGuardianHarnessTests(unittest.TestCase):
             report_title="Tamper Mode: Fake Tumour Injection",
         )
 
-        self.assertIn("AI Reconstruction + Tumour Mask", html)
-        self.assertIn("Deterministic Reconstruction + Verified Mask", html)
+        self.assertIn("MRI Guardian Layer", html)
+        self.assertIn("AI Reconstruction + Proposed Tumour Mask", html)
+        self.assertIn("Guardian Layer Reconstruction + Verified Mask", html)
         self.assertIn("Difference Register", html)
         self.assertIn("Rejected Region", html)
         self.assertIn("Verification FAILED", html)
         self.assertIn("mask_voxel_mismatch", html)
+        self.assertIn("verification layer", html)
         self.assertIn("Level 1: Structural Validity", html)
         self.assertIn("Level 2: Physical Consistency", html)
         self.assertIn("Level 3: Clinical Plausibility", html)

@@ -1,4 +1,4 @@
-"""ICSD-bound MRI release harness that blocks invented pixels."""
+"""ICSD-bound MRI verification layer that blocks invented pixels."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ _REQUIRED_AUTHORITY_SOURCE_TYPES = frozenset(
 
 
 class MriGuardianHarness:
-    """Release MRI AI outputs only when raw-data derivation is provable."""
+    """Verify MRI AI outputs before forwarding them downstream."""
 
     def __init__(self, *, transparency_log_path: Path | str) -> None:
         self._transition = _build_release_transition(
@@ -918,8 +918,11 @@ def _build_physical_consistency_checks(
             code="no_invented_pixels",
             label="Invented pixel guard",
             verified=manifest["no_invented_pixels"]["verified"],
-            success_message="No AI-supplied pixels bypass the raw-derived workstation path.",
-            failure_message="The workstation path is no longer fully explained by raw-derived pixels.",
+            success_message="No AI-supplied pixels bypass the raw-derived verification-layer path.",
+            failure_message=(
+                "The downstream PACS/workstation path is no longer fully explained "
+                "by raw-derived pixels."
+            ),
         ),
     ]
 

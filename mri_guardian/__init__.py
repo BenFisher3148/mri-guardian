@@ -1,4 +1,4 @@
-"""Verifiable MRI Guardian built on top of dpa-icsd."""
+"""MRI Guardian Layer built on top of dpa-icsd."""
 
 from .bundle import (
     MRI_GUARD_BUNDLE_EXTENSION,

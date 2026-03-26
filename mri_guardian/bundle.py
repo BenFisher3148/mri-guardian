@@ -1,4 +1,4 @@
-"""Portable MRI guard bundle builder and deterministic replay verifier."""
+"""Portable MRI Guardian Layer bundle builder and deterministic replay verifier."""
 
 from __future__ import annotations
 
@@ -381,7 +381,7 @@ def _build_bundle_transcript(
             },
             {
                 "stage": "reconstruction",
-                "summary": "Recomputed the workstation reconstruction directly from raw k-space.",
+                "summary": "Recomputed the Guardian Layer reconstruction directly from raw k-space.",
                 "details": {
                     "reconstruction_hash": analysis["derived_reconstruction_hash"],
                     "forward_projection_hash": analysis["forward_projection_hash"],
@@ -414,7 +414,7 @@ def _build_bundle_transcript(
             },
             {
                 "stage": "release",
-                "summary": "Released only the raw-derived reconstruction and verified mask to the radiologist boundary.",
+                "summary": "Passed only the raw-derived reconstruction and verified mask through the verification layer to the PACS/workstation boundary.",
                 "details": {
                     "release_status": state["release_status"],
                     "workstation_payload_hash": hash_canonical_json(state["workstation_payload"]),
