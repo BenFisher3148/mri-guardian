@@ -131,8 +131,10 @@ Flat compatibility aliases may still appear during the transition, but future no
 
 - `required_series_ids` is the only authoritative merged-release gating set.
 - `primary_series_id` must appear exactly once in `required_series_ids`.
+- `supporting_series_ids` must not include `primary_series_id`.
 - For this milestone, every `supporting_series_id` is required and every payload series outside `required_series_ids` is auxiliary.
 - Duplicate payload `series_id` values are a structural study-shape failure and stop meaningful cross-series evaluation.
+- Policy `series_id` references must be non-empty strings.
 - `supporting_series_ids` must be non-empty in `multi_series_v2`; this is a hard validation error rather than an automatic downgrade to single-series.
 - `required_series_ids` and `supporting_series_ids` are canonicalized into outer study order. Caller order is not proof-significant.
 - Geometry equality is exact equality over canonicalized voxel spacing plus exact voxel shape.

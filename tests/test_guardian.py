@@ -1377,6 +1377,20 @@ class MriGuardianHarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "supporting_series_ids"):
             build_multi_series_case_verification_report(state)
 
+    def test_multi_series_primary_cannot_appear_in_supporting_series_ids(self) -> None:
+        state = build_multi_series_demo_case()
+        state["cross_series_policy"]["supporting_series_ids"] = [
+            "t1-primary",
+            "t2-supporting",
+        ]
+        state["cross_series_policy"]["required_series_ids"] = [
+            "t1-primary",
+            "t2-supporting",
+        ]
+
+        with self.assertRaisesRegex(ValueError, "must not include primary_series_id"):
+            build_multi_series_case_verification_report(state)
+
     def test_multi_series_demo_case_releases_and_records_study_manifest(self) -> None:
         state, result = self._release_multi_series_demo_case()
         manifest = result.after_state["verified_manifest"]
@@ -1429,6 +1443,25 @@ class MriGuardianHarnessTests(unittest.TestCase):
             ["missing-support"],
         )
 
+    def test_multi_series_required_supporting_series_proof_failure_blocks_release(self) -> None:
+        state = build_multi_series_demo_case()
+        supporting = self._series_entry(state, "t2-supporting")
+        supporting["tumor_mask"][1][1][1] = 1
+        voxel_spacing = np.asarray(supporting["voxel_spacing_mm"], dtype=np.float64)
+        supporting["tumor_volume_mm3"] = round(
+            float(np.sum(supporting["tumor_mask"]) * np.prod(voxel_spacing)),
+            9,
+        )
+
+        report = build_multi_series_case_verification_report(state)
+
+        self.assertFalse(report["release_eligible"])
+        self.assertEqual(
+            report["decision_summary"]["block_category"],
+            "required_series_not_release_eligible",
+        )
+        self.assertIn("t2-supporting", report["failure_reasons"][0]["details"]["series_ids"])
+
     def test_multi_series_primary_positive_requires_at_least_one_supporting_overlap(self) -> None:
         state = build_multi_series_demo_case()
 
@@ -1439,6 +1472,27 @@ class MriGuardianHarnessTests(unittest.TestCase):
         overlap_map = {item["series_id"]: item["intersection_voxel_count"] for item in supporting}
         self.assertGreater(overlap_map["t2-supporting"], 0)
         self.assertEqual(overlap_map["flair-supporting"], 0)
+
+    def test_multi_series_primary_positive_without_any_supporting_overlap_blocks_release(self) -> None:
+        state = build_multi_series_demo_case()
+        support_shape = np.asarray(self._series_entry(state, "t2-supporting")["ai_reconstruction"]).shape
+        t2_reconstruction = np.zeros(support_shape, dtype=np.float64)
+        flair_reconstruction = np.zeros(support_shape, dtype=np.float64)
+        t2_reconstruction[1][1][1] = 4.0
+        flair_reconstruction[1][0][0] = 4.0
+        self._rewrite_series_for_profile(state, "t2-supporting", t2_reconstruction)
+        self._rewrite_series_for_profile(state, "flair-supporting", flair_reconstruction)
+
+        report = build_multi_series_case_verification_report(state)
+
+        self.assertFalse(report["release_eligible"])
+        self.assertEqual(
+            report["decision_summary"]["block_category"],
+            "positive_lesion_corroboration_failed",
+        )
+        supporting = report["analysis"]["lesion_corroboration"]["supporting_series"]
+        self.assertTrue(report["analysis"]["lesion_corroboration"]["evaluated"])
+        self.assertTrue(all(item["intersection_voxel_count"] == 0 for item in supporting))
 
     def test_multi_series_supporting_only_lesion_blocks_release(self) -> None:
         state = build_multi_series_demo_case()
@@ -1510,6 +1564,28 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
         self.assertEqual(auxiliary_report["resolved_role"], "auxiliary")
         self.assertTrue(auxiliary_report["series_release_eligible"])
+
+    def test_multi_series_viewer_preserves_ordered_role_annotations(self) -> None:
+        state = build_multi_series_demo_case()
+
+        view_model = build_side_by_side_view_model(state)
+        html = render_side_by_side_report_html(
+            state,
+            report_title="Multi-Series Study Verification",
+        )
+
+        self.assertEqual(view_model["case_kind"], MULTI_SERIES_CASE_KIND)
+        self.assertEqual(
+            [item["series_id"] for item in view_model["series"]],
+            ["t1-primary", "t2-supporting", "flair-supporting", "derived-auxiliary"],
+        )
+        self.assertEqual(
+            [item["resolved_role"] for item in view_model["series"]],
+            ["primary", "supporting", "supporting", "auxiliary"],
+        )
+        self.assertIn("Study Gate", html)
+        self.assertIn("derived-auxiliary", html)
+        self.assertIn("supporting", html)
 
     def test_view_model_reports_clean_baseline_case(self) -> None:
         view_model = build_side_by_side_view_model(build_demo_case())
@@ -2021,6 +2097,50 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(verify_run.returncode, 0, verify_run.stderr)
         verification = json.loads(verify_run.stdout)
         self.assertTrue(verification["verified"])
+
+    def test_python_module_cli_demo_and_verify_commands_work_for_multi_series(self) -> None:
+        demo_root = self.runtime_root / "cli_demo_multi_series"
+        demo_command = [
+            sys.executable,
+            "-m",
+            "mri_guardian",
+            "demo",
+            "--output-dir",
+            str(demo_root),
+            "--case-kind",
+            MULTI_SERIES_CASE_KIND,
+        ]
+        verify_command = [
+            sys.executable,
+            "-m",
+            "mri_guardian",
+            "verify",
+            str(demo_root),
+            "--format",
+            "json",
+        ]
+
+        demo_run = subprocess.run(
+            demo_command,
+            cwd=Path.cwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        verify_run = subprocess.run(
+            verify_command,
+            cwd=Path.cwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(demo_run.returncode, 0, demo_run.stderr)
+        self.assertEqual(verify_run.returncode, 0, verify_run.stderr)
+        verification = json.loads(verify_run.stdout)
+        report = json.loads((demo_root / "verification_report.json").read_text(encoding="utf-8"))
+        self.assertTrue(verification["verified"])
+        self.assertEqual(report["case_kind"], MULTI_SERIES_CASE_KIND)
 
     def test_python_module_cli_demo_rejects_unknown_profile(self) -> None:
         demo_root = self.runtime_root / "cli_demo_invalid"

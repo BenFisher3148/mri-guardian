@@ -34,11 +34,13 @@ single-series flow.
   per-series proof pipeline.
 - `required_series_ids` is the only authoritative merged-release gating set.
 - `primary_series_id` must appear exactly once in `required_series_ids`.
+- `supporting_series_ids` must not include `primary_series_id`.
 - For this milestone, every `supporting_series_id` is required. Payload series
   outside `required_series_ids` are auxiliary and non-gating.
 - `supporting_series_ids` must be non-empty in `multi_series_v2`. Invalid
   callers fail validation; the implementation does not auto-downgrade to the
   single-series path.
+- Policy `series_id` references must be explicit non-empty strings.
 - Duplicate payload `series_id` values are an early structural study-shape
   failure because identity resolution would otherwise be ambiguous before any
   meaningful cross-series evaluation can occur.

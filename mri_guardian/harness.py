@@ -53,7 +53,9 @@ RELEASE_STATUS_PENDING = "pending_verification"
 RELEASE_STATUS_RELEASED = "released_to_radiologist"
 MULTI_SERIES_CASE_KIND = "multi_series_v2"
 MULTI_SERIES_GEOMETRY_RULE = "same_voxel_grid_required"
-MULTI_SERIES_CORROBORATION_RULE = "positive_primary_lesion_requires_supporting_exact_overlap"
+MULTI_SERIES_CORROBORATION_RULE = (
+    "positive_lesion_requires_primary_supporting_exact_overlap"
+)
 _AUTHORITY_REQUIREMENT_MAP = build_authority_requirement_map()
 
 
@@ -461,13 +463,29 @@ def _build_multi_series_context(state: Mapping[str, Any]) -> dict[str, Any]:
     required_series_ids = policy.get("required_series_ids")
     if not isinstance(required_series_ids, list) or not required_series_ids:
         raise ValueError("cross_series_policy.required_series_ids must be a non-empty list.")
-    declared_supporting = tuple(str(value).strip() for value in supporting_series_ids)
-    declared_required = tuple(str(value).strip() for value in required_series_ids)
+    if any(
+        not isinstance(value, str) or not value.strip() for value in supporting_series_ids
+    ):
+        raise ValueError(
+            "cross_series_policy.supporting_series_ids entries must be non-empty strings."
+        )
+    if any(
+        not isinstance(value, str) or not value.strip() for value in required_series_ids
+    ):
+        raise ValueError(
+            "cross_series_policy.required_series_ids entries must be non-empty strings."
+        )
+    declared_supporting = tuple(value.strip() for value in supporting_series_ids)
+    declared_required = tuple(value.strip() for value in required_series_ids)
     if len(set(declared_supporting)) != len(declared_supporting):
         raise ValueError("cross_series_policy.supporting_series_ids must be unique.")
     if len(set(declared_required)) != len(declared_required):
         raise ValueError("cross_series_policy.required_series_ids must be unique.")
     primary_series_id = str(primary_series_id).strip()
+    if primary_series_id in set(declared_supporting):
+        raise ValueError(
+            "cross_series_policy.supporting_series_ids must not include primary_series_id."
+        )
     if declared_required.count(primary_series_id) != 1:
         raise ValueError(
             "cross_series_policy.primary_series_id must appear exactly once in required_series_ids."
