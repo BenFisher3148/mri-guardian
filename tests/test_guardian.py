@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import json
 import shutil
 import unittest
+from zipfile import ZipFile, ZipInfo
 from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
 
+from mri_guardian.bundle import (
+    MRI_GUARD_BUNDLE_EXTENSION,
+    verify_portable_evidence_bundle,
+    write_portable_evidence_bundle,
+)
+from icsd.core.serialise import canonical_json_dumps
 from icsd.core.errors import InvariantViolationError
 from icsd.core.evidence import validate_evidence_payload
 
@@ -57,6 +65,83 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(
             result.after_state["verified_manifest"]["verification_tiers"]["level_2"]["status"],
             "passed",
+        )
+
+    def test_portable_bundle_round_trips_and_verifies_offline(self) -> None:
+        state = build_demo_case()
+        harness = self._build_harness()
+        result = harness.release_case(
+            state=state,
+            actor="guardian:test",
+            authority_sources=build_demo_authority_sources(case_id=state["case_id"]),
+            timestamp="2026-03-26T00:00:00Z",
+        )
+        bundle_path = self.runtime_root / f"{state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        verification = verify_portable_evidence_bundle(bundle_path)
+
+        self.assertTrue(verification["verified"])
+        with ZipFile(bundle_path, mode="r") as archive:
+            manifest = self._read_bundle_json(archive, "manifest.json")
+            transcript = self._read_bundle_json(archive, "transcript.json")
+            signatures = self._read_bundle_json(archive, "signatures.json")
+
+        self.assertEqual(manifest["verdict"], "This scan is verifiably correct.")
+        self.assertEqual(
+            manifest["hashes"]["raw_kspace_hash"],
+            result.after_state["verified_manifest"]["raw_hash"],
+        )
+        self.assertEqual(
+            manifest["hashes"]["reconstruction_hash"],
+            result.after_state["workstation_payload"]["reconstruction_hash"],
+        )
+        self.assertEqual(
+            manifest["hashes"]["verified_mask_hash"],
+            result.after_state["workstation_payload"]["verified_mask_hash"],
+        )
+        self.assertEqual(transcript["statement"], "This scan is verifiably correct.")
+        self.assertEqual(
+            signatures["members"][0]["algorithm"],
+            "sha256",
+        )
+
+    def test_portable_bundle_detects_transcript_tampering(self) -> None:
+        state = build_demo_case()
+        harness = self._build_harness()
+        result = harness.release_case(
+            state=state,
+            actor="guardian:test",
+            authority_sources=build_demo_authority_sources(case_id=state["case_id"]),
+            timestamp="2026-03-26T00:00:00Z",
+        )
+        bundle_path = self.runtime_root / f"{state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
+        tampered_path = self.runtime_root / f"{state['case_id']}-tampered{MRI_GUARD_BUNDLE_EXTENSION}"
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        with ZipFile(bundle_path, mode="r") as archive:
+            transcript = self._read_bundle_json(archive, "transcript.json")
+        transcript["statement"] = "This scan is verifiably correct, trust me."
+        self._rewrite_bundle_member(
+            source=bundle_path,
+            destination=tampered_path,
+            member_name="transcript.json",
+            payload=self._json_bytes(transcript),
+        )
+
+        verification = verify_portable_evidence_bundle(tampered_path)
+
+        self.assertFalse(verification["verified"])
+        self.assertTrue(
+            any("transcript.json" in failure or "signatures.json" in failure for failure in verification["failures"])
         )
 
     def test_rejects_ai_mask_with_fake_tumour_voxel(self) -> None:
@@ -252,6 +337,29 @@ class MriGuardianHarnessTests(unittest.TestCase):
         return MriGuardianHarness(
             transparency_log_path=self.runtime_root / "transparency-log.jsonl",
         )
+
+    def _read_bundle_json(self, archive: ZipFile, member_name: str) -> dict[str, object]:
+        return json.loads(archive.read(member_name).decode("utf-8"))
+
+    def _rewrite_bundle_member(
+        self,
+        *,
+        source: Path,
+        destination: Path,
+        member_name: str,
+        payload: bytes,
+    ) -> None:
+        with ZipFile(source, mode="r") as src, ZipFile(destination, mode="w") as dst:
+            for info in src.infolist():
+                member_payload = payload if info.filename == member_name else src.read(info.filename)
+                clone = ZipInfo(filename=info.filename, date_time=info.date_time)
+                clone.compress_type = info.compress_type
+                clone.create_system = info.create_system
+                clone.external_attr = info.external_attr
+                dst.writestr(clone, member_payload)
+
+    def _json_bytes(self, payload: dict[str, object]) -> bytes:
+        return f"{canonical_json_dumps(payload)}\n".encode("utf-8")
 
     def _build_advisory_warning_case(self) -> dict[str, object]:
         state = build_demo_case()

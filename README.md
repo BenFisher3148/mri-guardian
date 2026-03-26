@@ -19,6 +19,7 @@ The ICSD layer makes the release state invariant-closed. A case is either `pendi
 
 ## Structure
 
+- [mri_guardian/bundle.py](mri_guardian/bundle.py) builds and verifies portable `.mri-guard-bundle` proof artifacts.
 - [mri_guardian/harness.py](mri_guardian/harness.py) defines the policy profile, invariants, deterministic reconstruction checks, and release transition.
 - [mri_guardian/tamper.py](mri_guardian/tamper.py) builds deterministic fake-tumour, shifted-mask, and intensity-manipulation scenarios.
 - [mri_guardian/transparency.py](mri_guardian/transparency.py) implements a file-backed append-only hash chain for ICSD transparency receipts.
@@ -39,6 +40,11 @@ Verify the emitted ICSD evidence envelope:
 ```powershell
 .\.venv\Scripts\icsd-dpa verify demo_artifacts\evidence.json
 ```
+
+Inspect the portable proof artifact:
+
+- `demo_artifacts/mri-case-0001.mri-guard-bundle`
+- `demo_artifacts/bundle_verification.json`
 
 Open the visual comparison outputs:
 
@@ -67,6 +73,17 @@ This prototype does that by making the workstation payload a deterministic funct
 - the active ICSD policy profile
 
 The AI can suggest a reconstruction, but it cannot inject a different pixel raster into the released state. The released view is always harness-reconstructed from raw data, hashed into ICSD evidence, and appended to a transparency log with a verifiable receipt.
+
+The portable bundle pushes that one step further. Each accepted case now emits a shareable `.mri-guard-bundle` archive containing:
+
+- the ICSD evidence envelope
+- the released state and workstation payload
+- a deterministic verification transcript
+- the transparency-log snapshot that anchored the release
+- portable integrity signatures over the bundle members
+- top-level hashes for raw k-space, reconstruction, and mask state
+
+That means a reviewer can carry the artifact elsewhere, verify it offline, and still check that the scan remained anchored to the same measured data and release proof.
 
 The added viewer makes that boundary human-visible. It renders:
 

@@ -7,6 +7,11 @@ from pathlib import Path
 
 from icsd.core.serialise import canonical_json_dumps
 
+from .bundle import (
+    MRI_GUARD_BUNDLE_EXTENSION,
+    verify_portable_evidence_bundle,
+    write_portable_evidence_bundle,
+)
 from .harness import (
     MriGuardianHarness,
     build_demo_authority_sources,
@@ -44,6 +49,20 @@ def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
     released_state = canonical_json_dumps(result.after_state)
     (output_path / "released_state.json").write_text(
         f"{released_state}\n",
+        encoding="utf-8",
+    )
+    bundle_path = output_path / f"{case_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
+    write_portable_evidence_bundle(
+        result=result,
+        transparency_log_path=output_path / "transparency-log.jsonl",
+        output_path=bundle_path,
+    )
+    bundle_verification = verify_portable_evidence_bundle(bundle_path)
+    if not bundle_verification["verified"]:
+        msg = f"Portable bundle verification failed: {bundle_verification['failures']!r}"
+        raise ValueError(msg)
+    (output_path / "bundle_verification.json").write_text(
+        f"{canonical_json_dumps(bundle_verification)}\n",
         encoding="utf-8",
     )
     (output_path / "comparison.html").write_text(
