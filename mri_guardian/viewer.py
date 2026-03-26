@@ -18,6 +18,7 @@ from .harness import (
     build_case_verification_report,
     _round_float,
 )
+from .integration import build_guardian_integration_narrative
 from .timing import build_timing_overlay_snapshot
 
 _MAX_DIFFERENCE_ROWS = 64
@@ -411,6 +412,34 @@ def render_side_by_side_report_html(
       min-width: 42px;
       font-size: 1.3rem;
       color: #526170;
+    }}
+
+    .integration-story-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin: 0 0 18px;
+    }}
+
+    .integration-story-card {{
+      padding: 16px 18px;
+      border-radius: 20px;
+      background: rgba(255, 248, 239, 0.94);
+      border: 1px solid rgba(16, 24, 32, 0.08);
+      box-shadow: 0 14px 30px rgba(15, 23, 33, 0.08);
+    }}
+
+    .integration-story-card h2 {{
+      margin: 0 0 10px;
+      font-size: 1rem;
+      color: #101820;
+    }}
+
+    .integration-story-card p {{
+      margin: 0;
+      color: #334150;
+      line-height: 1.5;
+      font-size: 0.92rem;
     }}
 
     .metric-grid {{
@@ -957,6 +986,21 @@ def render_side_by_side_report_html(
           <p>{escape(view_model["integration"]["egress_detail"])}</p>
         </article>
       </div>
+      <div class="integration-story-grid">
+        <article class="integration-story-card">
+          <h2>{escape(view_model["integration"]["dicom_heading"])}</h2>
+          <p>{escape(view_model["integration"]["dicom_detail"])}</p>
+        </article>
+        <article class="integration-story-card">
+          <h2>{escape(view_model["integration"]["placement_heading"])}</h2>
+          <p>{escape(view_model["integration"]["placement_detail"])}</p>
+        </article>
+        <article class="integration-story-card">
+          <h2>{escape(view_model["integration"]["failure_mode_heading"])}</h2>
+          <p><strong>{escape(view_model["integration"]["failure_mode_label"])}</strong>. {escape(view_model["integration"]["failure_mode_detail"])}</p>
+          <p class="footnote">{escape(view_model["integration"]["service_outage_detail"])}</p>
+        </article>
+      </div>
       <div class="metric-grid">
         <article class="metric-card">
           <span class="metric-label">Mask Delta</span>
@@ -1409,6 +1453,10 @@ def _build_integration_summary(
     release_eligible: bool,
     primary_reason: str,
 ) -> dict[str, str]:
+    decision = "released" if release_eligible else "blocked"
+    narrative = build_guardian_integration_narrative(
+        current_guardian_decision=decision,
+    )
     egress_label = "Mock PACS Output" if release_eligible else "PACS Output Blocked"
     egress_detail = (
         "Verified reconstruction, verified segmentation, and evidence records are ready for downstream PACS/workstation handoff."
@@ -1426,6 +1474,14 @@ def _build_integration_summary(
         ),
         "egress_label": egress_label,
         "egress_detail": egress_detail,
+        "dicom_heading": "DICOM Compliance",
+        "dicom_detail": narrative["dicom_compliance_story"]["story"],
+        "placement_heading": "Hospital Placement",
+        "placement_detail": narrative["hospital_placement"]["story"],
+        "failure_mode_heading": "Failure Behaviour",
+        "failure_mode_label": "Fail-closed verification handoff",
+        "failure_mode_detail": narrative["failure_mode"]["on_verification_failure"],
+        "service_outage_detail": narrative["failure_mode"]["on_service_unavailable"],
     }
 
 

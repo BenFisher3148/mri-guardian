@@ -42,6 +42,9 @@ def build_mock_dicom_input(
     analysis = report["analysis"]
     contracts = report["contracts"]
     claim_envelope = contracts["ai_claim_envelope"]
+    integration_narrative = build_guardian_integration_narrative(
+        current_guardian_decision="pending_verification",
+    )
     return {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_dicom_input",
@@ -89,6 +92,7 @@ def build_mock_dicom_input(
             },
         ],
         "ai_claim_envelope": claim_envelope,
+        "integration_narrative": integration_narrative,
         "guardian_case": {field: deepcopy(state[field]) for field in _STATE_FIELDS},
     }
 
@@ -125,6 +129,9 @@ def build_mock_pacs_submission(
     workstation_payload = state["workstation_payload"]
     evidence_hash = hash_canonical_json(result.evidence.as_dict())
     manifest_hash = hash_canonical_json(state["verified_manifest"])
+    integration_narrative = build_guardian_integration_narrative(
+        current_guardian_decision="released",
+    )
     return {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_pacs_submission",
@@ -180,6 +187,7 @@ def build_mock_pacs_submission(
             "bundle_reference": bundle_reference,
             "evidence_hash": evidence_hash,
         },
+        "integration_narrative": integration_narrative,
         "proof_contracts": {
             "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
             "mask_derivation_policy": contracts["mask_derivation_policy"],
@@ -200,6 +208,9 @@ def build_mock_pacs_block_notice(
     if report["release_eligible"]:
         raise ValueError("Mock PACS block notice requires a rejected case.")
     analysis = report["analysis"]
+    integration_narrative = build_guardian_integration_narrative(
+        current_guardian_decision="blocked",
+    )
     return {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_pacs_block_notice",
@@ -222,6 +233,7 @@ def build_mock_pacs_block_notice(
             "tier_statuses": _tier_statuses(report),
             "verified_tumor_volume_mm3": analysis["computed_tumor_volume_mm3"],
         },
+        "integration_narrative": integration_narrative,
         "proof_contracts": {
             "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
             "mask_derivation_policy": contracts["mask_derivation_policy"],
@@ -259,10 +271,14 @@ def build_mock_integration_trace(
     if pacs_kind not in {"mock_pacs_submission", "mock_pacs_block_notice"}:
         raise ValueError("Unsupported PACS output envelope.")
     egress_objects = pacs_output.get("series") or pacs_output.get("withheld_series") or []
+    integration_narrative = build_guardian_integration_narrative(
+        current_guardian_decision=str(pacs_output["submission_status"]),
+    )
     return {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_integration_trace",
         "case_id": state["case_id"],
+        "integration_narrative": integration_narrative,
         "pipeline": [
             {
                 "stage": "dicom_ingress",
@@ -297,6 +313,72 @@ def build_mock_integration_trace(
         "hashes": {
             "dicom_input_hash": hash_canonical_json(dicom_input),
             "pacs_output_hash": hash_canonical_json(pacs_output),
+        },
+    }
+
+
+def build_guardian_integration_narrative(
+    *,
+    current_guardian_decision: str,
+) -> dict[str, Any]:
+    """Return a deterministic hospital-integration narrative for the Guardian Layer."""
+    return {
+        "interface_type": "GuardianIntegrationNarrative",
+        "interface_version": _INTEGRATION_SCHEMA_VERSION,
+        "guardian_role": "verification_proxy",
+        "dicom_compliance_story": {
+            "ingress_transport": "dicom-c-store",
+            "ingress_objects": [
+                "MR Raw Data Storage (mock)",
+                "MR Image Storage (mock)",
+                "Segmentation Storage (mock)",
+                "Comprehensive SR Storage (mock)",
+            ],
+            "egress_transport": "dicom-c-store",
+            "egress_objects": [
+                "MR Image Storage (mock)",
+                "Segmentation Storage (mock)",
+                "Comprehensive SR Storage (mock)",
+                "Encapsulated JSON Storage (mock)",
+            ],
+            "story": (
+                "The Guardian Layer receives DICOM-wrapped MRI evidence and AI candidate "
+                "objects, preserves study and patient context, and emits only verified "
+                "derived series back onto the hospital imaging network."
+            ),
+        },
+        "hospital_placement": {
+            "position": "between_reconstruction_ai_and_pacs",
+            "upstream_systems": [
+                "MRI scanner",
+                "Raw MRI reconstruction AI",
+            ],
+            "guardian_layer": "verification proxy AE on the imaging network",
+            "downstream_systems": [
+                "PACS or VNA",
+                "radiologist workstation",
+            ],
+            "story": (
+                "This sits after the reconstruction AI and before PACS/workstation import, "
+                "so it behaves like a non-invasive gateway rather than a new clinical system."
+            ),
+        },
+        "failure_mode": {
+            "mode": "fail_closed",
+            "decision_scope": "guardian_verified_handoff",
+            "current_guardian_decision": current_guardian_decision,
+            "release_rule": (
+                "Verified series are released only when the blocking Guardian Layer proof "
+                "passes."
+            ),
+            "on_verification_failure": (
+                "No verified reconstruction, segmentation, manifest, or evidence series are "
+                "forwarded to PACS/workstation from the Guardian path."
+            ),
+            "on_service_unavailable": (
+                "The Guardian path does not auto-pass AI output through. Cases remain pending "
+                "or require an explicit external fallback workflow outside this proxy."
+            ),
         },
     }
 

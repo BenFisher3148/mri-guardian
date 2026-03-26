@@ -20,6 +20,7 @@ from .harness import (
     render_release_bundle_json,
 )
 from .integration import (
+    build_guardian_integration_narrative,
     build_mock_dicom_input,
     build_mock_integration_trace,
     build_mock_pacs_block_notice,
@@ -40,6 +41,10 @@ def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
     dicom_input = build_mock_dicom_input(case_state)
     (output_path / "dicom_input.json").write_text(
         f"{canonical_json_dumps(dicom_input)}\n",
+        encoding="utf-8",
+    )
+    (output_path / "integration_narrative.json").write_text(
+        f"{canonical_json_dumps(build_guardian_integration_narrative(current_guardian_decision='released'))}\n",
         encoding="utf-8",
     )
     harness = MriGuardianHarness(

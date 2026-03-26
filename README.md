@@ -55,6 +55,7 @@ Inspect the portable proof artifact:
 Inspect the mocked integration artifacts:
 
 - `demo_artifacts/dicom_input.json`
+- `demo_artifacts/integration_narrative.json`
 - `demo_artifacts/pacs_submission.json`
 - `demo_artifacts/integration_trace.json`
 - `demo_artifacts/tamper_fake_tumour_pacs_block.json`
@@ -158,6 +159,12 @@ The fake integration layer answers the operational question directly. The demo n
 - mocked DICOM ingress carrying raw k-space plus the AI claim
 - the Guardian Layer acting as a verification proxy rather than a replacement system
 - mocked PACS egress that either emits verified series or records a blocked handoff with the exact failure reason
+
+The PACS integration narrative is now explicit rather than conceptual:
+
+- the DICOM compliance story states that the Guardian Layer receives DICOM-wrapped MRI evidence and AI candidate objects, preserves study and patient context, and emits only verified derived series back onto the hospital imaging network
+- the hospital-placement story states that it sits after the reconstruction AI and before PACS/workstation import, behaving like a gateway or sidecar rather than a new clinical system
+- the failure behaviour is fail-closed for the Guardian-verified handoff: if proof fails or the proxy is unavailable, no verified reconstruction, segmentation, manifest, or evidence series are auto-forwarded from the Guardian path
 
 This segmentation rule is intentionally simple for the prototype: the verified mask is derived by a deterministic threshold over the raw-derived reconstruction. The point of the verification layer is not clinical segmentation quality; it is proving that the workstation view and volume estimate are mathematically anchored to measured data and that tampering is detectable.
 

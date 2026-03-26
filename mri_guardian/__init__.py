@@ -27,6 +27,7 @@ from .harness import (
     build_demo_case,
 )
 from .integration import (
+    build_guardian_integration_narrative,
     build_mock_dicom_input,
     build_mock_integration_trace,
     build_mock_pacs_block_notice,
@@ -58,6 +59,7 @@ __all__ = [
     "build_case_verification_report",
     "build_demo_authority_sources",
     "build_demo_case",
+    "build_guardian_integration_narrative",
     "build_mock_dicom_input",
     "build_mock_integration_trace",
     "build_mock_pacs_block_notice",

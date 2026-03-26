@@ -26,6 +26,7 @@ from mri_guardian.harness import (
     build_demo_case,
 )
 from mri_guardian.integration import (
+    build_guardian_integration_narrative,
     build_mock_dicom_input,
     build_mock_integration_trace,
     build_mock_pacs_block_notice,
@@ -314,6 +315,14 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(dicom_input["endpoint"]["destination_ae_title"], "MRI-GUARDIAN-LAYER")
         self.assertEqual(dicom_input["objects"][0]["role"], "raw_kspace")
         self.assertEqual(dicom_input["ai_claim_envelope"]["interface_type"], "AIClaimEnvelope")
+        self.assertEqual(
+            dicom_input["integration_narrative"]["interface_type"],
+            "GuardianIntegrationNarrative",
+        )
+        self.assertEqual(
+            dicom_input["integration_narrative"]["hospital_placement"]["position"],
+            "between_reconstruction_ai_and_pacs",
+        )
 
     def test_mock_pacs_submission_exposes_verified_handoff_contract(self) -> None:
         state = build_demo_case()
@@ -351,8 +360,24 @@ class MriGuardianHarnessTests(unittest.TestCase):
             ],
             "VerifiedReconstructionTrace",
         )
+        self.assertEqual(
+            pacs_submission["integration_narrative"]["failure_mode"]["mode"],
+            "fail_closed",
+        )
+        self.assertEqual(
+            pacs_submission["integration_narrative"]["failure_mode"][
+                "current_guardian_decision"
+            ],
+            "released",
+        )
         self.assertEqual(integration_trace["pipeline"][0]["label"], "DICOM Input")
         self.assertEqual(integration_trace["pipeline"][2]["label"], "PACS Output")
+        self.assertEqual(
+            integration_trace["integration_narrative"]["dicom_compliance_story"][
+                "egress_transport"
+            ],
+            "dicom-c-store",
+        )
 
     def test_mock_pacs_block_notice_withholds_tampered_case(self) -> None:
         state = build_tamper_scenarios()[0]["state"]
@@ -379,6 +404,14 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 "interface_type"
             ],
             "VerificationTolerancePolicy",
+        )
+        self.assertEqual(
+            pacs_block["integration_narrative"]["failure_mode"]["current_guardian_decision"],
+            "blocked",
+        )
+        self.assertIn(
+            "does not auto-pass AI output",
+            pacs_block["integration_narrative"]["failure_mode"]["on_service_unavailable"],
         )
         self.assertEqual(integration_trace["pipeline"][1]["decision"], "blocked")
         self.assertEqual(integration_trace["pipeline"][2]["label"], "PACS Output Blocked")
@@ -414,6 +447,9 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertIn("...", view_model["clinical_summary"]["audit_id"])
         self.assertEqual(view_model["integration"]["ingress_label"], "Mock DICOM Input")
         self.assertEqual(view_model["integration"]["egress_label"], "Mock PACS Output")
+        self.assertEqual(view_model["integration"]["dicom_heading"], "DICOM Compliance")
+        self.assertEqual(view_model["integration"]["placement_heading"], "Hospital Placement")
+        self.assertEqual(view_model["integration"]["failure_mode_label"], "Fail-closed verification handoff")
         self.assertEqual(view_model["differences"]["rows"], [])
 
     def test_view_model_flags_rejected_mask_region_for_fake_tumour_voxel(self) -> None:
@@ -462,6 +498,9 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertIn("AI Reconstruction + Proposed Tumour Mask", html)
         self.assertIn("Guardian Layer Reconstruction + Verified Mask", html)
         self.assertIn("PACS Output Blocked", html)
+        self.assertIn("DICOM Compliance", html)
+        self.assertIn("Hospital Placement", html)
+        self.assertIn("Fail-closed", html)
         self.assertIn("Difference Register", html)
         self.assertIn("Rejected Region", html)
         self.assertIn("Verification FAILED", html)
@@ -580,6 +619,22 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
         self.assertEqual(len(snapshot["streaming_strategy"]["stages"]), 4)
         self.assertIn("NumPy FFT core", snapshot["backend"])
+
+    def test_guardian_integration_narrative_is_fail_closed_and_gateway_positioned(self) -> None:
+        narrative = build_guardian_integration_narrative(
+            current_guardian_decision="blocked",
+        )
+
+        self.assertEqual(narrative["guardian_role"], "verification_proxy")
+        self.assertEqual(narrative["failure_mode"]["mode"], "fail_closed")
+        self.assertEqual(
+            narrative["hospital_placement"]["position"],
+            "between_reconstruction_ai_and_pacs",
+        )
+        self.assertEqual(
+            narrative["dicom_compliance_story"]["ingress_transport"],
+            "dicom-c-store",
+        )
 
     def _build_harness(self) -> MriGuardianHarness:
         return MriGuardianHarness(
