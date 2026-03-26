@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=80", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mri-guardian-layer"
+version = "0.1.0"
+description = "ICSD-based verification proxy for raw MRI reconstruction AI handoff."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Benza Fisher" },
+]
+keywords = ["MRI", "verification", "ICSD", "DICOM", "PACS"]
+dependencies = [
+  "dpa-icsd==1.1.0",
+  "numpy==2.4.3",
+]
+
+[project.optional-dependencies]
+speed = [
+  "numba==0.64.0",
+  "cython==3.2.4",
+]
+dev = [
+  "numba==0.64.0",
+  "cython==3.2.4",
+]
+
+[tool.setuptools.packages.find]
+include = ["mri_guardian*"]

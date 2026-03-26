@@ -16,6 +16,41 @@ This document is the developer-facing operating guide for the MRI Guardian Layer
 
 ## Local Workflow
 
+## Bootstrap From A Fresh Clone
+
+The repository is now bootstrapped by:
+
+- [`../pyproject.toml`](../pyproject.toml) for package metadata
+- [`../requirements.txt`](../requirements.txt) for a pinned review environment
+
+Recommended first-run path:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Optional local package install:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
+Optional local package install with the speed extra:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[speed]"
+```
+
+Pinned review stack:
+
+- `dpa-icsd==1.1.0`
+- `numpy==2.4.3`
+- `numba==0.64.0`
+- `cython==3.2.4`
+
 Run the deterministic demo:
 
 ```powershell

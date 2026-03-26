@@ -44,6 +44,35 @@ The ICSD verification layer makes the release state invariant-closed. A case is 
 - [docs/adr/README.md](docs/adr/README.md)
 - [CITATION.cff](CITATION.cff)
 
+## Fresh Setup
+
+For a cold-start reviewer, the repository now has both package metadata and a pinned bootstrap file:
+
+- [pyproject.toml](pyproject.toml) defines install metadata for the local package
+- [requirements.txt](requirements.txt) pins the reviewed dependency stack:
+  `dpa-icsd==1.1.0`, `numpy==2.4.3`, `numba==0.64.0`, and `cython==3.2.4`
+
+Recommended clone -> install -> test path:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+If you want local package metadata installed as well, use:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
+Optional speed dependencies are also exposed through package extras:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[speed]"
+```
+
 ## Run
 
 Run the deterministic demo:
