@@ -13,6 +13,7 @@ from .contracts import (
     VerifiedReconstructionTrace,
     build_ai_claim_envelope,
     build_mask_derivation_policy,
+    build_verification_profile_contract,
     build_verification_tolerance_policy,
     build_verified_reconstruction_trace,
 )
@@ -34,6 +35,15 @@ from .integration import (
     build_mock_pacs_submission,
     restore_case_state_from_dicom_input,
 )
+from .profiles import (
+    DEFAULT_PROFILE_NAME,
+    VerificationProfileDescriptor,
+    build_verification_profile_descriptor,
+    canonicalise_verification_profile_descriptor,
+    get_verification_profile,
+    list_verification_profiles,
+    verification_profile_descriptor_from_dict,
+)
 from .tamper import build_tamper_mode_base_case, build_tamper_scenarios
 from .timing import build_guardian_performance_profile, build_timing_overlay_snapshot
 from .viewer import build_side_by_side_view_model, render_side_by_side_report_html
@@ -42,6 +52,7 @@ __all__ = [
     "MRI_GUARD_BUNDLE_EXTENSION",
     "MRI_GUARDIAN_POLICY_NAME",
     "MRI_GUARDIAN_POLICY_VERSION",
+    "DEFAULT_PROFILE_NAME",
     "RELEASE_STATUS_PENDING",
     "RELEASE_STATUS_RELEASED",
     "MriGuardianHarness",
@@ -54,8 +65,15 @@ __all__ = [
     "VerifiedReconstructionTrace",
     "build_ai_claim_envelope",
     "build_mask_derivation_policy",
+    "build_verification_profile_contract",
     "build_verification_tolerance_policy",
     "build_verified_reconstruction_trace",
+    "VerificationProfileDescriptor",
+    "build_verification_profile_descriptor",
+    "canonicalise_verification_profile_descriptor",
+    "verification_profile_descriptor_from_dict",
+    "get_verification_profile",
+    "list_verification_profiles",
     "build_case_verification_report",
     "build_demo_authority_sources",
     "build_demo_case",

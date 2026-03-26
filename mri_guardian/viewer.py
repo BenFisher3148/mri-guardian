@@ -10,10 +10,6 @@ import numpy as np
 from icsd.core.serialise import hash_canonical_json
 
 from .harness import (
-    MRI_GUARDIAN_POLICY_NAME,
-    MRI_GUARDIAN_POLICY_VERSION,
-    _RECONSTRUCTION_TOLERANCE,
-    _VOLUME_TOLERANCE,
     _extract_arrays,
     build_case_verification_report,
     _round_float,
@@ -24,22 +20,28 @@ from .timing import build_timing_overlay_snapshot
 _MAX_DIFFERENCE_ROWS = 64
 
 
-def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
+def build_side_by_side_view_model(
+    state: dict[str, Any],
+    *,
+    profile_name: str | None = None,
+) -> dict[str, Any]:
     """Return a deterministic model for side-by-side AI versus verified review."""
     arrays, failure = _extract_arrays(state)
     if failure is not None:
         raise ValueError(failure.message)
-    report = build_case_verification_report(state)
+    report = build_case_verification_report(state, profile_name=profile_name)
     analysis = report["analysis"]
     manifest = report["manifest"]
     reasons = report["failure_reasons"]
     tiers = report["verification_tiers"]
+    decision_summary = report["decision_summary"]
     ai_reconstruction = np.asarray(arrays["ai_reconstruction"], dtype=np.float64)
     ai_mask = np.asarray(analysis["ai_mask"], dtype=np.int64)
     verified_reconstruction = np.asarray(analysis["derived_reconstruction"], dtype=np.float64)
     verified_mask = np.asarray(analysis["verified_mask"], dtype=np.int64)
     intensity_mismatch_mask = (
-        np.abs(ai_reconstruction - verified_reconstruction) > _RECONSTRUCTION_TOLERANCE
+        np.abs(ai_reconstruction - verified_reconstruction)
+        > float(manifest["ai_reconstruction_match"]["max_abs_tolerance"])
     )
     rejected_mask = ((ai_mask == 1) & (verified_mask == 0)).astype(np.int64)
     missing_mask = ((ai_mask == 0) & (verified_mask == 1)).astype(np.int64)
@@ -86,12 +88,14 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
         missing_mask=missing_mask,
     )
     verification = _build_verification_summary(
+        report=report,
         reasons=reasons,
         tiers=tiers,
         release_eligible=bool(report["release_eligible"]),
     )
-    timing = build_timing_overlay_snapshot()
+    timing = build_timing_overlay_snapshot(manifest["profile_name"])
     findings = _build_findings(
+        decision_summary=decision_summary,
         reasons=reasons,
         tiers=tiers,
         mask_delta=mask_delta,
@@ -99,14 +103,11 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
         intensity_mismatch_count=intensity_mismatch_count,
         claimed_volume=_round_float(float(state["tumor_volume_mm3"])),
         computed_volume=analysis["computed_tumor_volume_mm3"],
-        volume_verified=abs(
-            _round_float(float(state["tumor_volume_mm3"]))
-            - analysis["computed_tumor_volume_mm3"]
-        )
-        <= _VOLUME_TOLERANCE,
+        volume_verified=bool(manifest["tumor_volume_proof"]["verified"]),
     )
     integration = _build_integration_summary(
         release_eligible=bool(report["release_eligible"]),
+        decision_class=decision_summary["decision_class"],
         primary_reason=verification["primary_reason_summary"],
     )
     clinical_summary = _build_clinical_summary(
@@ -114,16 +115,22 @@ def build_side_by_side_view_model(state: dict[str, Any]) -> dict[str, Any]:
         analysis=analysis,
         verification=verification,
         release_eligible=bool(report["release_eligible"]),
+        decision_class=decision_summary["decision_class"],
+        operator_review_required=decision_summary["operator_review_required"],
         clinical_status=tiers["level_3"]["status"],
     )
     return {
         "title": "MRI Guardian Layer",
         "subtitle": "Verification proxy between the reconstruction AI and the PACS/workstation boundary.",
-        "policy_name": MRI_GUARDIAN_POLICY_NAME,
-        "policy_version": MRI_GUARDIAN_POLICY_VERSION,
+        "profile_name": report["profile"]["profile_name"],
+        "profile_revision": report["profile"]["profile_revision"],
+        "profile_digest": report["profile"]["profile_digest"],
+        "icsd_policy_id": report["profile"]["icsd_policy_id"],
+        "icsd_policy_version": report["profile"]["icsd_policy_version"],
         "ai_label": "AI Reconstruction + Proposed Tumour Mask",
         "verified_label": "Guardian Layer Reconstruction + Verified Mask",
         "release_eligible": bool(report["release_eligible"]),
+        "decision_summary": decision_summary,
         "verification": verification,
         "timing": timing,
         "findings": findings,
@@ -156,9 +163,10 @@ def render_side_by_side_report_html(
     state: dict[str, Any],
     *,
     report_title: str | None = None,
+    profile_name: str | None = None,
 ) -> str:
     """Render a self-contained HTML report for human review."""
-    view_model = build_side_by_side_view_model(state)
+    view_model = build_side_by_side_view_model(state, profile_name=profile_name)
     title = report_title if report_title is not None else view_model["title"]
     summary = view_model["summary"]
     verification = view_model["verification"]
@@ -882,7 +890,7 @@ def render_side_by_side_report_html(
         <span class="status-pill {'status-pass' if view_model['release_eligible'] else 'status-fail'}">
           {escape(verification["headline"])}
         </span>
-        <span class="status-pill">Policy {escape(view_model["policy_name"])} v{escape(view_model["policy_version"])}</span>
+        <span class="status-pill">Profile {escape(view_model["profile_name"])} r{escape(view_model["profile_revision"])}</span>
       </div>
       <div class="clinical-grid">
         <article class="clinical-card">
@@ -1005,7 +1013,7 @@ def render_side_by_side_report_html(
         <article class="metric-card">
           <span class="metric-label">Mask Delta</span>
           <div class="metric-value">{summary["mask_voxel_delta"]}</div>
-          <div class="metric-note">Voxel delta between the AI mask and the policy-verified mask.</div>
+          <div class="metric-note">Voxel delta between the AI mask and the profile-verified mask.</div>
         </article>
         <article class="metric-card">
           <span class="metric-label">Rejected Regions</span>
@@ -1074,7 +1082,7 @@ def render_side_by_side_report_html(
           </section>
           <section class="panel">
             <h3>${{comparisonData.verified_label}}</h3>
-            <p>Guardian-layer reconstruction from raw k-space with the policy-verified tumour mask.</p>
+            <p>Guardian-layer reconstruction from raw k-space with the profile-verified tumour mask.</p>
             <canvas data-side="verified"></canvas>
           </section>
         </div>
@@ -1271,15 +1279,51 @@ def _difference_rows(
 
 def _build_verification_summary(
     *,
+    report: dict[str, Any],
     reasons: list[dict[str, Any]],
     tiers: dict[str, Any],
     release_eligible: bool,
 ) -> dict[str, Any]:
     ordered_tiers = _ordered_tiers(tiers)
     tier_view_models = [_tier_view_model(tier) for tier in ordered_tiers]
+    decision_summary = report["decision_summary"]
+    if decision_summary["proof_status"] == "failed":
+        primary_reason = reasons[0] if reasons else {
+            "summary": "verification_blocked_by_structural_or_physical_gate",
+            "message": "Blocking proof verification failed.",
+        }
+        return {
+            "headline": "Verification FAILED",
+            "primary_reason_summary": primary_reason["summary"],
+            "reasons": [
+                {"code": reason["code"], "message": reason["message"]}
+                for reason in reasons
+            ],
+            "tiers": tier_view_models,
+        }
+    if decision_summary["decision_class"] == "triage_only":
+        return {
+            "headline": "TRIAGE ONLY",
+            "primary_reason_summary": "proof_passed_but_profile_is_triage_only",
+            "reasons": [
+                {
+                    "code": "proof_passed",
+                    "message": (
+                        "The deterministic proof path passed for this study under the selected runtime profile."
+                    ),
+                },
+                {
+                    "code": "non_final_profile_selected",
+                    "message": (
+                        "The active runtime profile is triage-only, so no final release or portable bundle is allowed."
+                    ),
+                }
+            ],
+            "tiers": tier_view_models,
+        }
     if release_eligible:
         level_3 = tiers["level_3"]
-        if level_3["status"] == "warning":
+        if decision_summary["operator_review_required"]:
             return {
                 "headline": "Verification PASSED",
                 "primary_reason_summary": (
@@ -1308,7 +1352,7 @@ def _build_verification_summary(
                     "code": "all_verification_checks_passed",
                     "message": (
                         "The AI reconstruction, mask, and tumour volume all match the "
-                        "deterministic policy verification path."
+                        "deterministic runtime-profile verification path."
                     ),
                 }
             ],
@@ -1317,7 +1361,7 @@ def _build_verification_summary(
     if reasons:
         primary_reason = reasons[0]
         return {
-            "headline": "Verification FAILED",
+            "headline": "Profile Policy BLOCKED",
             "primary_reason_summary": primary_reason["summary"],
             "reasons": [
                 {"code": reason["code"], "message": reason["message"]}
@@ -1325,24 +1369,13 @@ def _build_verification_summary(
             ],
             "tiers": tier_view_models,
         }
-    failing_tier = next(
-        (
-            tier
-            for tier in ordered_tiers
-            if tier["blocking"] and tier["status"] != "passed"
-        ),
-        None,
-    )
-    primary_reason_summary = "verification_blocked_by_structural_or_physical_gate"
-    if failing_tier is not None:
-        primary_reason_summary = failing_tier["summary"]
     return {
-        "headline": "Verification FAILED",
-        "primary_reason_summary": primary_reason_summary,
+        "headline": "Profile Policy BLOCKED",
+        "primary_reason_summary": "profile_policy_blocked",
         "reasons": [
             {
-                "code": "verification_blocked_by_structural_or_physical_gate",
-                "message": primary_reason_summary,
+                "code": "profile_policy_blocked",
+                "message": "The selected runtime profile blocked downstream release.",
             }
         ],
         "tiers": tier_view_models,
@@ -1351,6 +1384,7 @@ def _build_verification_summary(
 
 def _build_findings(
     *,
+    decision_summary: dict[str, Any],
     reasons: list[dict[str, Any]],
     tiers: dict[str, Any],
     mask_delta: int,
@@ -1361,13 +1395,18 @@ def _build_findings(
     volume_verified: bool,
 ) -> list[str]:
     clinical_tier = tiers["level_3"]
+    if decision_summary["decision_class"] == "triage_only":
+        return [
+            "Deterministic proof passed, but the selected runtime profile is explicitly triage-only.",
+            "No final PACS/workstation release is allowed under this profile.",
+        ]
     if not reasons:
         findings = [
             "Blocking verification passed. Level 1 structural validity and Level 2 physical consistency both held.",
-            "No mask drift was detected between the AI overlay and the policy-derived verified mask.",
+            "No mask drift was detected between the AI overlay and the profile-derived verified mask.",
             "No intensity manipulation was detected in the AI reconstruction.",
         ]
-        if clinical_tier["status"] == "warning":
+        if clinical_tier["status"] in {"warning", "advisory"}:
             findings.append(
                 "Clinical plausibility raised advisory review flags even though the blocking verification gate passed."
             )
@@ -1393,7 +1432,7 @@ def _build_findings(
         findings.append(
             f"Volume verification failed: claimed {claimed_volume} mm3, verified {computed_volume} mm3."
         )
-    if clinical_tier["status"] == "warning":
+    if clinical_tier["status"] in {"warning", "advisory"}:
         findings.append(
             "Clinical plausibility heuristics also raised advisory review flags on the verified anatomy."
         )
@@ -1406,16 +1445,25 @@ def _build_clinical_summary(
     analysis: dict[str, Any],
     verification: dict[str, Any],
     release_eligible: bool,
+    decision_class: str,
+    operator_review_required: bool,
     clinical_status: str,
 ) -> dict[str, str]:
     verified_volume_mm3 = analysis["computed_tumor_volume_mm3"]
-    status_label = "VERIFIED" if release_eligible else "NOT VERIFIED"
-    status_note = (
-        "Accepted for downstream PACS/workstation release."
-        if release_eligible
-        else f"Blocked before downstream handoff. Reason: {verification['primary_reason_summary']}."
-    )
-    if release_eligible and clinical_status == "warning":
+    if decision_class == "triage_only":
+        status_label = "TRIAGE ONLY"
+        status_note = "Proof passed, but this runtime profile is non-final and cannot release downstream."
+    else:
+        status_label = "VERIFIED" if release_eligible else "NOT VERIFIED"
+        status_note = (
+            "Accepted for downstream PACS/workstation release."
+            if release_eligible
+            else f"Blocked before downstream handoff. Reason: {verification['primary_reason_summary']}."
+        )
+    if decision_class == "triage_only":
+        confidence_label = "Derived from raw data (triage only)"
+        confidence_note = "The measured-data proof path passed, but the profile is limited to pre-screening."
+    elif release_eligible and operator_review_required:
         confidence_label = "Derived from raw data (not AI)"
         confidence_note = (
             "Not AI-authored. Level 1 and Level 2 passed; Level 3 advisory review is still recommended."
@@ -1436,7 +1484,11 @@ def _build_clinical_summary(
         }
     ).upper()
     return {
-        "status_state": "verified" if release_eligible else "blocked",
+        "status_state": (
+            "triage"
+            if decision_class == "triage_only"
+            else "verified" if release_eligible else "blocked"
+        ),
         "status_label": status_label,
         "status_note": status_note,
         "tumor_volume_cm3": _format_volume_cm3(verified_volume_mm3),
@@ -1451,18 +1503,26 @@ def _build_clinical_summary(
 def _build_integration_summary(
     *,
     release_eligible: bool,
+    decision_class: str,
     primary_reason: str,
 ) -> dict[str, str]:
-    decision = "released" if release_eligible else "blocked"
+    if decision_class == "triage_only":
+        decision = "blocked"
+    else:
+        decision = "released" if release_eligible else "blocked"
     narrative = build_guardian_integration_narrative(
         current_guardian_decision=decision,
     )
-    egress_label = "Mock PACS Output" if release_eligible else "PACS Output Blocked"
-    egress_detail = (
-        "Verified reconstruction, verified segmentation, and evidence records are ready for downstream PACS/workstation handoff."
-        if release_eligible
-        else f"No downstream series are released. Block reason: {primary_reason}."
-    )
+    if decision_class == "triage_only":
+        egress_label = "No Final PACS Output"
+        egress_detail = "This profile is triage-only, so no final downstream series are released."
+    else:
+        egress_label = "Mock PACS Output" if release_eligible else "PACS Output Blocked"
+        egress_detail = (
+            "Verified reconstruction, verified segmentation, and evidence records are ready for downstream PACS/workstation handoff."
+            if release_eligible
+            else f"No downstream series are released. Block reason: {primary_reason}."
+        )
     return {
         "ingress_label": "Mock DICOM Input",
         "ingress_detail": (
@@ -1507,12 +1567,14 @@ def _tier_view_model(tier: dict[str, Any]) -> dict[str, Any]:
     status_label_map = {
         "passed": "PASS" if tier["blocking"] else "ADVISORY PASS",
         "failed": "FAIL",
+        "advisory": "ADVISORY NOTE",
         "warning": "ADVISORY WARN",
         "not_evaluated": "NOT EVALUATED",
     }
     status_class_map = {
         "passed": "tier-status-pass",
         "failed": "tier-status-fail",
+        "advisory": "tier-status-warn",
         "warning": "tier-status-warn",
         "not_evaluated": "tier-status-warn",
     }

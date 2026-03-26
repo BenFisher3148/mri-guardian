@@ -28,15 +28,27 @@ The Guardian Layer is intentionally non-invasive. It does not replace the MRI sc
 
 - The PACS/workstation path never receives AI-authored pixels directly from the Guardian path.
 - The released reconstruction is always recomputed from raw k-space inside the verification layer.
-- The verified mask is always derived from the raw-derived reconstruction by a deterministic mask policy.
+- The verified mask is always derived from the raw-derived reconstruction by a deterministic runtime-profile mask rule.
 - Release is fail-closed for the Guardian handoff. If blocking proof fails, nothing verified is forwarded downstream.
 - Identical inputs must produce identical released state, evidence, bundle members, and replay hashes.
+- The replay path must bind to the embedded runtime profile descriptor by `profile_name`, `profile_revision`, and `profile_digest`, not the process default.
+
+## Profile Registry
+
+The architecture separates three identities:
+
+- Guardian runtime profile identity: `profile_name`, `profile_revision`, `profile_digest`
+- ICSD invariant policy identity: `icsd_policy_id`, `icsd_policy_version`
+- Descriptive metadata: `sequence_family`, `clinical_mode`
+
+The canonical `VerificationProfileDescriptor` is a first-class artifact. It is serialized with stable field ordering, hashed with SHA-256 over an explicit digest scope, and embedded in reports, released manifests, replay descriptors, and portable bundles.
 
 ## Major Components
 
 | Module | Responsibility |
 | --- | --- |
-| [`mri_guardian/harness.py`](../mri_guardian/harness.py) | Core verification transition, invariant profile, deterministic reconstruction, release gate, and manifest generation. |
+| [`mri_guardian/harness.py`](../mri_guardian/harness.py) | Core verification transition, deterministic reconstruction, release gate, and manifest generation. |
+| [`mri_guardian/profiles.py`](../mri_guardian/profiles.py) | Runtime profile registry, canonical descriptor hashing, and mapping to ICSD invariant policy identities. |
 | [`mri_guardian/contracts.py`](../mri_guardian/contracts.py) | Explicit claim-to-proof interfaces: `AIClaimEnvelope`, `MaskDerivationPolicy`, `VerificationTolerancePolicy`, and `VerifiedReconstructionTrace`. |
 | [`mri_guardian/integration.py`](../mri_guardian/integration.py) | Mocked DICOM ingress, PACS egress, and hospital integration narrative. |
 | [`mri_guardian/bundle.py`](../mri_guardian/bundle.py) | Portable `.mri-guard-bundle` writer and deterministic replay verifier. |
@@ -52,15 +64,15 @@ The Guardian Layer is intentionally non-invasive. It does not replace the MRI sc
 3. Reconstruct the image from raw k-space with an inverse FFT.
 4. Reproject that reconstruction into frequency space and compare it with the supplied measurements.
 5. Compare the AI reconstruction with the raw-derived reconstruction using explicit per-voxel and global-norm tolerances.
-6. Derive the verified mask using the deterministic mask policy and compare it with the AI mask.
+6. Derive the verified mask using the selected runtime profile and compare it with the AI mask.
 7. Recompute tumour volume from verified voxels and voxel spacing.
-8. If Level 1 and Level 2 pass, emit:
+8. If deterministic proof passes and the selected profile permits final release, emit:
    - `verified_manifest`
    - `workstation_payload`
    - ICSD evidence
    - transparency receipt
    - portable bundle
-9. If Level 1 or Level 2 fails, block the Guardian handoff and emit explicit failure reasons.
+9. If proof fails, a blocking heuristic fails, or the profile is non-final, block the Guardian handoff and emit explicit failure reasons with separate `proof_failure`, `heuristic_block`, or `profile_policy_block` categories.
 
 ## Explainability Layers
 
@@ -68,7 +80,7 @@ The Guardian Layer is intentionally non-invasive. It does not replace the MRI sc
 | --- | --- | --- |
 | Level 1 | Structural validity for ICSD and state-shape correctness | Yes |
 | Level 2 | Physical consistency from raw k-space to reconstruction, mask, and volume | Yes |
-| Level 3 | Optional clinical plausibility heuristics | No |
+| Level 3 | Profile-scoped clinical plausibility heuristics | Profile-dependent |
 
 ## State Model
 
@@ -85,7 +97,7 @@ The Guardian Layer emits several artifact classes:
 
 - state artifacts: `released_state.json`, `workstation_payload.json`
 - proof artifacts: `evidence.json`, `bundle_verification.json`, `.mri-guard-bundle`
-- contract artifacts: `ai_claim_envelope.json`, `verified_reconstruction_trace.json`, `mask_derivation_policy.json`, `verification_tolerance_policy.json`
+- contract artifacts: `verification_profile_descriptor.json`, `ai_claim_envelope.json`, `verified_reconstruction_trace.json`, `mask_derivation_policy.json`, `verification_tolerance_policy.json`
 - integration artifacts: `dicom_input.json`, `integration_narrative.json`, `pacs_submission.json`, `integration_trace.json`
 - performance artifacts: `performance_profile.json`
 

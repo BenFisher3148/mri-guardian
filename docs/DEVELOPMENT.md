@@ -64,7 +64,7 @@ Pinned review stack in `requirements-review.txt`:
 After `pip install -e .`, the installed CLI exposes the repo’s primary flows:
 
 ```powershell
-mri-guardian demo --output-dir demo_artifacts --tamper-mode
+mri-guardian demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode
 mri-guardian verify demo_artifacts
 mri-guardian test
 ```
@@ -72,7 +72,7 @@ mri-guardian test
 Equivalent module entrypoint:
 
 ```powershell
-python -m mri_guardian demo --output-dir demo_artifacts --tamper-mode
+python -m mri_guardian demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode
 python -m mri_guardian verify demo_artifacts
 python -m mri_guardian test
 ```
@@ -80,8 +80,16 @@ python -m mri_guardian test
 Run the deterministic demo:
 
 ```powershell
-.\.venv\Scripts\mri-guardian.exe demo --output-dir demo_artifacts --tamper-mode
+.\.venv\Scripts\mri-guardian.exe demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode
 ```
+
+For non-final triage output:
+
+```powershell
+.\.venv\Scripts\mri-guardian.exe demo --output-dir demo_artifacts --profile fast_triage_mode
+```
+
+That path emits only the report, profile descriptor, performance profile, and HTML view.
 
 Run tests:
 
@@ -162,6 +170,7 @@ Date: YYYY-MM-DD
 Take extra care when touching:
 
 - canonical hashes and serialised outputs
+- runtime profile descriptor identity and digesting
 - tolerance policy and verification semantics
 - released state shape
 - bundle member ordering and replayability

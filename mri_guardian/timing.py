@@ -9,7 +9,8 @@ from typing import Any
 
 import numpy as np
 
-from .harness import _RECONSTRUCTION_TOLERANCE, _VERIFIED_MASK_THRESHOLD, _round_float
+from .harness import _round_float
+from .profiles import DEFAULT_PROFILE_NAME, get_verification_profile
 from .tamper import build_tamper_mode_base_case
 
 _TIMING_PROBE_SPECS = (
@@ -40,15 +41,19 @@ _BOUND_SAFETY_MARGIN_FRACTION = 0.25
 _STREAMING_SLAB_DEPTH_SLICES = 4
 
 
-@lru_cache(maxsize=1)
-def build_guardian_performance_profile() -> dict[str, Any]:
+@lru_cache(maxsize=8)
+def build_guardian_performance_profile(
+    profile_name: str = DEFAULT_PROFILE_NAME,
+) -> dict[str, Any]:
     """Return a cached benchmark ladder and performance envelope for the demo."""
+    descriptor = get_verification_profile(profile_name)
     benchmarks = [
         _benchmark_probe(
             label=label,
             tile_z=tile_z,
             tile_xy=tile_xy,
             purpose=purpose,
+            descriptor=descriptor,
         )
         for label, tile_z, tile_xy, purpose in _TIMING_PROBE_SPECS
     ]
@@ -63,7 +68,19 @@ def build_guardian_performance_profile() -> dict[str, Any]:
         if benchmark["label"] == _WORST_CASE_BENCHMARK_LABEL
     )
     worst_case_bound = _build_worst_case_bound(worst_case_benchmark)
+    budget_assessment = _build_budget_assessment(
+        descriptor=descriptor,
+        representative=representative,
+        worst_case_bound=worst_case_bound,
+    )
     return {
+        "profile_name": descriptor.profile_name,
+        "profile_revision": descriptor.profile_revision,
+        "profile_digest": descriptor.profile_digest(),
+        "icsd_policy_id": descriptor.icsd_policy_id,
+        "icsd_policy_version": descriptor.icsd_policy_version,
+        "verification_profile_descriptor": descriptor.to_dict(),
+        "performance_expectations": descriptor.to_dict()["performance_expectations"],
         "reconstruction_ms": representative["reconstruction_ms"],
         "verification_ms": representative["verification_ms"],
         "total_pipeline_ms": representative["total_pipeline_ms"],
@@ -76,16 +93,24 @@ def build_guardian_performance_profile() -> dict[str, Any]:
         "benchmarks": benchmarks,
         "worst_case_bound": worst_case_bound,
         "streaming_strategy": _build_streaming_strategy(),
+        "budget_assessment": budget_assessment,
     }
 
 
-def build_timing_overlay_snapshot() -> dict[str, Any]:
+def build_timing_overlay_snapshot(
+    profile_name: str = DEFAULT_PROFILE_NAME,
+) -> dict[str, Any]:
     """Return the cached performance profile used by the HTML timing overlay."""
-    return build_guardian_performance_profile()
+    return build_guardian_performance_profile(profile_name)
 
 
-def _build_timing_probe(*, tile_z: int, tile_xy: int) -> dict[str, np.ndarray]:
-    base_state = build_tamper_mode_base_case()
+def _build_timing_probe(
+    *,
+    tile_z: int,
+    tile_xy: int,
+    profile_name: str,
+) -> dict[str, np.ndarray]:
+    base_state = build_tamper_mode_base_case(profile_name=profile_name)
     return {
         "raw_real": np.tile(
             np.asarray(base_state["raw_real"], dtype=np.float64),
@@ -107,10 +132,10 @@ def _build_timing_probe(*, tile_z: int, tile_xy: int) -> dict[str, np.ndarray]:
     }
 
 
-def _warm_up_probe(probe: dict[str, np.ndarray]) -> None:
+def _warm_up_probe(probe: dict[str, np.ndarray], *, descriptor: Any) -> None:
     for _ in range(_TIMING_WARMUP_RUNS):
         derived_reconstruction = _run_reconstruction_stage(probe)
-        _run_verification_stage(probe, derived_reconstruction)
+        _run_verification_stage(probe, derived_reconstruction, descriptor=descriptor)
 
 
 def _run_reconstruction_stage(probe: dict[str, np.ndarray]) -> np.ndarray:
@@ -121,13 +146,16 @@ def _run_reconstruction_stage(probe: dict[str, np.ndarray]) -> np.ndarray:
 def _run_verification_stage(
     probe: dict[str, np.ndarray],
     derived_reconstruction: np.ndarray,
+    *,
+    descriptor: Any,
 ) -> None:
     ai_reconstruction = probe["ai_reconstruction"]
     ai_mask = probe["ai_mask"]
     intensity_mismatch_mask = (
-        np.abs(ai_reconstruction - derived_reconstruction) > _RECONSTRUCTION_TOLERANCE
+        np.abs(ai_reconstruction - derived_reconstruction)
+        > descriptor.tolerance("spatial_per_voxel_abs_error")
     )
-    verified_mask = (derived_reconstruction >= _VERIFIED_MASK_THRESHOLD).astype(np.int64)
+    verified_mask = (derived_reconstruction >= descriptor.mask_threshold).astype(np.int64)
     rejected_mask = (ai_mask == 1) & (verified_mask == 0)
     missing_mask = (ai_mask == 0) & (verified_mask == 1)
     voxel_volume_mm3 = float(np.prod(probe["voxel_spacing_mm"]))
@@ -144,9 +172,14 @@ def _benchmark_probe(
     tile_z: int,
     tile_xy: int,
     purpose: str,
+    descriptor: Any,
 ) -> dict[str, Any]:
-    probe = _build_timing_probe(tile_z=tile_z, tile_xy=tile_xy)
-    _warm_up_probe(probe)
+    probe = _build_timing_probe(
+        tile_z=tile_z,
+        tile_xy=tile_xy,
+        profile_name=descriptor.profile_name,
+    )
+    _warm_up_probe(probe, descriptor=descriptor)
     reconstruction_samples_ms: list[float] = []
     verification_samples_ms: list[float] = []
     total_samples_ms: list[float] = []
@@ -154,7 +187,7 @@ def _benchmark_probe(
         reconstruction_start = perf_counter_ns()
         derived_reconstruction = _run_reconstruction_stage(probe)
         reconstruction_end = perf_counter_ns()
-        _run_verification_stage(probe, derived_reconstruction)
+        _run_verification_stage(probe, derived_reconstruction, descriptor=descriptor)
         verification_end = perf_counter_ns()
         reconstruction_ms = (reconstruction_end - reconstruction_start) / 1_000_000
         verification_ms = (verification_end - reconstruction_end) / 1_000_000
@@ -181,6 +214,30 @@ def _benchmark_probe(
         "max_reconstruction_ms": _round_float(max(reconstruction_samples_ms)),
         "max_verification_ms": _round_float(max(verification_samples_ms)),
         "max_total_pipeline_ms": _round_float(max(total_samples_ms)),
+    }
+
+
+def _build_budget_assessment(
+    *,
+    descriptor: Any,
+    representative: dict[str, Any],
+    worst_case_bound: dict[str, Any],
+) -> dict[str, Any]:
+    expectations = descriptor.to_dict()["performance_expectations"]
+    representative_budget = float(expectations["representative_total_ms_budget"])
+    worst_case_budget = float(expectations["worst_case_total_ms_budget"])
+    return {
+        "normative": False,
+        "representative_total_ms": {
+            "budget": representative_budget,
+            "observed": representative["total_pipeline_ms"],
+            "within_budget": representative["total_pipeline_ms"] <= representative_budget,
+        },
+        "worst_case_total_ms": {
+            "budget": worst_case_budget,
+            "observed": worst_case_bound["total_pipeline_ms"],
+            "within_budget": worst_case_bound["total_pipeline_ms"] <= worst_case_budget,
+        },
     }
 
 

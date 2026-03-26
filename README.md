@@ -16,7 +16,7 @@ It is intentionally non-invasive. The reconstruction AI and the PACS/workstation
 If you are short on time, the fastest way to understand the repo is:
 
 1. Install the general environment from [requirements.txt](requirements.txt) or the exact reviewed stack from [requirements-review.txt](requirements-review.txt), then install the local package with `pip install -e .`.
-2. Run the deterministic demo with `mri-guardian demo --output-dir demo_artifacts --tamper-mode`.
+2. Run the deterministic demo with `mri-guardian demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode`.
 3. Open `demo_artifacts/comparison.html` and one of the `tamper_*.html` reports.
 4. If you want the deeper model, then read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/INTEROPERABILITY.md](docs/INTEROPERABILITY.md), and [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
@@ -25,7 +25,7 @@ If you are short on time, the fastest way to understand the repo is:
 After `pip install -e .`, the repository exposes a single CLI:
 
 ```powershell
-mri-guardian demo --output-dir demo_artifacts --tamper-mode
+mri-guardian demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode
 mri-guardian verify demo_artifacts
 mri-guardian test
 ```
@@ -33,7 +33,7 @@ mri-guardian test
 The same commands also work as a module entrypoint:
 
 ```powershell
-python -m mri_guardian demo --output-dir demo_artifacts --tamper-mode
+python -m mri_guardian demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode
 python -m mri_guardian verify demo_artifacts
 python -m mri_guardian test
 ```
@@ -43,16 +43,35 @@ python -m mri_guardian test
 The core rule is simple: the downstream PACS/workstation never receives AI-supplied pixels directly. The layer treats the AI reconstruction as a claim, recomputes the displayed reconstruction from raw k-space itself, and only releases a workstation payload when all of the following are true:
 
 - the reconstructed voxel grid is mathematically consistent with the raw sensor data
-- the AI reconstruction matches the harness-derived reconstruction under an explicit tolerance policy:
+- the AI reconstruction matches the harness-derived reconstruction under an explicit tolerance profile:
   spatial per-voxel max-abs error plus a global relative L2 bound
-- the AI tumour mask exactly matches a deterministic policy mask derived from the raw-derived reconstruction
+- the AI tumour mask exactly matches a deterministic profile mask derived from the raw-derived reconstruction
 - the tumour volume exactly equals `verified_mask_voxel_count * voxel_spacing`
 
 The verification envelope is now split into three explainability tiers:
 
 - Level 1: Structural validity. ICSD-facing checks over identifiers, numeric tensors, voxel geometry, and release-state shape.
 - Level 2: Physical consistency. Raw k-space reprojection, deterministic reconstruction parity, mask parity, and tumour-volume proof.
-- Level 3: Clinical plausibility. Advisory-only heuristics over the verified anatomy, intended to prompt review without blocking release.
+- Level 3: Clinical plausibility. Profile-scoped heuristics over the verified anatomy, with centrally defined `disabled`, `advisory`, `warning`, and `blocking` semantics.
+
+## Runtime Profiles
+
+The Guardian Layer now has a runtime profile registry rather than a single verification family.
+
+- `profile_name` selects the Guardian runtime profile.
+- `profile_revision` is scoped to `profile_name` and must change whenever that named profile's canonical descriptor body changes.
+- `profile_digest` is a canonical SHA-256 digest over the resolved `VerificationProfileDescriptor` with stable field ordering and an explicit digest scope.
+- `icsd_policy_id` and `icsd_policy_version` identify the underlying ICSD invariant policy separately from the runtime profile.
+
+Built-in profiles:
+
+- `brain_t1_baseline`
+- `brain_t2_baseline`
+- `contrast_enhanced_review`
+- `strict_research_mode`
+- `fast_triage_mode`
+
+`fast_triage_mode` is intentionally non-final. It can produce a deterministic proof result for pre-screening, but it cannot release a final Guardian state or portable evidence bundle.
 
 The ICSD verification layer makes the release state invariant-closed. A case is either `pending_verification` with no released payload, or `released_to_radiologist` with a `verified_manifest` and `workstation_payload` that exactly match the expected mathematical trace. If the AI invents pixels or misstates the volume, the released state becomes unrepresentable and the transition fails.
 
@@ -60,8 +79,9 @@ The ICSD verification layer makes the release state invariant-closed. A case is 
 
 - [mri_guardian/bundle.py](mri_guardian/bundle.py) builds and verifies portable `.mri-guard-bundle` proof artifacts.
 - [mri_guardian/contracts.py](mri_guardian/contracts.py) defines the reusable `AIClaimEnvelope`, `VerifiedReconstructionTrace`, and `MaskDerivationPolicy` interfaces.
-- [mri_guardian/harness.py](mri_guardian/harness.py) defines the policy profile, invariants, deterministic reconstruction checks, and release transition.
+- [mri_guardian/harness.py](mri_guardian/harness.py) defines the release transition, invariants, deterministic reconstruction checks, and manifest generation.
 - [mri_guardian/integration.py](mri_guardian/integration.py) mocks the DICOM ingress and PACS egress contracts around the verification proxy.
+- [mri_guardian/profiles.py](mri_guardian/profiles.py) defines the runtime profile registry, canonical descriptor hashing, and the mapping from runtime profiles to ICSD policy identities.
 - [mri_guardian/tamper.py](mri_guardian/tamper.py) builds deterministic fake-tumour, shifted-mask, and intensity-manipulation scenarios.
 - [mri_guardian/timing.py](mri_guardian/timing.py) profiles benchmark ladders, worst-case bounds, and the streaming-validation strategy for the verification path.
 - [mri_guardian/transparency.py](mri_guardian/transparency.py) implements a file-backed append-only hash chain for ICSD transparency receipts.
@@ -116,7 +136,7 @@ Optional extra acceleration dependencies are exposed through the package extras:
 Run the deterministic demo:
 
 ```powershell
-mri-guardian demo --output-dir demo_artifacts --tamper-mode
+mri-guardian demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode
 ```
 
 Verify the emitted evidence and bundle artifacts:
@@ -143,6 +163,7 @@ Inspect the mocked integration artifacts:
 Inspect the explicit claim-to-proof interfaces:
 
 - `demo_artifacts/ai_claim_envelope.json`
+- `demo_artifacts/verification_profile_descriptor.json`
 - `demo_artifacts/verified_reconstruction_trace.json`
 - `demo_artifacts/mask_derivation_policy.json`
 - `demo_artifacts/verification_tolerance_policy.json`
@@ -150,6 +171,14 @@ Inspect the explicit claim-to-proof interfaces:
 Inspect the performance evidence:
 
 - `demo_artifacts/performance_profile.json`
+
+For a non-final triage run:
+
+```powershell
+mri-guardian demo --output-dir demo_artifacts --profile fast_triage_mode
+```
+
+That path emits the report, profile descriptor, performance profile, and HTML view only. It does not emit a released state, evidence payload, transparency log, or portable bundle.
 
 Verify the archive or an extracted `bundle.json` replay package in Python:
 
@@ -181,9 +210,9 @@ This prototype does that by making the Guardian Layer handoff payload a determin
 
 - raw k-space
 - voxel spacing
-- a policy-defined verified mask derived from the raw-derived reconstruction
+- a profile-defined verified mask derived from the raw-derived reconstruction
 - the AI mask and volume claim
-- the active ICSD policy profile
+- the active Guardian runtime profile plus its underlying ICSD invariant policy identity
 
 The AI can suggest a reconstruction, but it cannot inject a different pixel raster into the released state. The released view is always recomputed inside the verification layer from raw data, hashed into ICSD evidence, and appended to a transparency log with a verifiable receipt.
 
@@ -192,6 +221,7 @@ That interface is now explicit rather than implied. The harness emits:
 - `AIClaimEnvelope`: the AI-side reconstruction, mask, and volume claim anchored to the raw-input hash
 - `MaskDerivationPolicy`: the deterministic rule that turns a raw-derived reconstruction into the admissible mask
 - `VerificationTolerancePolicy`: the attack-aware tolerance contract that states which metrics are per-voxel, global-norm, and frequency-domain
+- `VerificationProfileDescriptor`: the canonical runtime profile contract with `profile_name`, `profile_revision`, `profile_digest`, release semantics, authority requirements, heuristics, and performance expectations
 - `VerifiedReconstructionTrace`: the proof object that links the raw measurements, derived reconstruction, mask policy, and verified volume back to the original claim
 
 Tolerance handling is also explicit rather than hand-wavy. The verifier now defines:
@@ -214,6 +244,8 @@ The portable bundle pushes that one step further. Each accepted case now emits a
 That means a reviewer can carry the artifact elsewhere, verify it offline, and still check that the scan remained anchored to the same measured data and Guardian Layer release proof.
 
 The replay layer makes the bundle regulator-friendly: `verify_bundle(...)` does not just check static integrity. It replays the release from the bundled `input_state.json`, `replay.json`, and transparency-log prefix, then confirms that the regenerated released state, evidence payload, and bundle members are identical.
+
+Replay identity now includes the embedded runtime profile descriptor. A verifier can therefore prove not just "the profile name was `brain_t1_baseline`" but "the exact canonical descriptor body used at runtime had this digest."
 
 The added viewer makes that boundary human-visible. It renders the verification proxy exactly as a reviewer would experience it:
 
@@ -254,7 +286,7 @@ The performance story is now explicit rather than anecdotal. The timing layer us
 - a representative review volume for the headline timing cards
 - a larger high-load probe used to derive a guarded worst-case latency bound
 
-The emitted `performance_profile.json` records the benchmark ladder, the profiled worst-case bound, and the active NumPy/Numba backend.
+The emitted `performance_profile.json` records the benchmark ladder, the profiled worst-case bound, the active profile descriptor, and budget-versus-observed comparisons. Those budgets are monitoring surfaces, not proof gates.
 
 The worst-case bound is intentionally shape-scoped rather than hand-wavy. It is computed from the largest profiled volume, using the observed max across warmed runs plus a deterministic safety margin, so reviewers can see exactly what latency claim is being made and for which volume size.
 

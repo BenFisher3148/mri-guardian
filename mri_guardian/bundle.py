@@ -23,9 +23,13 @@ from .harness import (
     _check_released_state_matches_trace,
     build_case_verification_report,
 )
+from .profiles import (
+    get_verification_profile,
+    verification_profile_descriptor_from_dict,
+)
 
 MRI_GUARD_BUNDLE_EXTENSION = ".mri-guard-bundle"
-_BUNDLE_SCHEMA_VERSION = "0.2"
+_BUNDLE_SCHEMA_VERSION = "0.3"
 _BUNDLE_MEDIA_TYPE = "application/vnd.mri-guard.bundle+zip"
 _FIXED_ZIP_TIMESTAMP = (2026, 3, 26, 0, 0, 0)
 _BUNDLE_MANIFEST_NAME = "bundle.json"
@@ -35,6 +39,7 @@ _INPUT_STATE_NAME = "input_state.json"
 _RELEASED_STATE_NAME = "released_state.json"
 _WORKSTATION_PAYLOAD_NAME = "workstation_payload.json"
 _VERIFICATION_REPORT_NAME = "verification_report.json"
+_PROFILE_DESCRIPTOR_NAME = "verification_profile_descriptor.json"
 _TRANSCRIPT_NAME = "transcript.json"
 _REPLAY_DESCRIPTOR_NAME = "replay.json"
 _TRANSPARENCY_LOG_NAME = "transparency-log.jsonl"
@@ -46,6 +51,7 @@ _REQUIRED_BUNDLE_MEMBERS = (
     _RELEASED_STATE_NAME,
     _WORKSTATION_PAYLOAD_NAME,
     _VERIFICATION_REPORT_NAME,
+    _PROFILE_DESCRIPTOR_NAME,
     _TRANSCRIPT_NAME,
     _REPLAY_DESCRIPTOR_NAME,
     _TRANSPARENCY_LOG_NAME,
@@ -71,6 +77,10 @@ def write_portable_evidence_bundle(
     report = build_case_verification_report(state)
     if not report["release_eligible"]:
         raise ValueError("Portable bundles can only be written for release-eligible cases.")
+    if not report["profile"]["release_semantics"]["portable_bundle_allowed"]:
+        raise ValueError(
+            "Portable bundles are not allowed for the selected runtime profile."
+        )
 
     log_snapshot = _read_transparency_log_snapshot(transparency_log_path)
     receipt_entry = _resolve_receipt_entry(
@@ -111,6 +121,7 @@ def write_portable_evidence_bundle(
         _RELEASED_STATE_NAME: _json_bytes(state),
         _WORKSTATION_PAYLOAD_NAME: _json_bytes(state["workstation_payload"]),
         _VERIFICATION_REPORT_NAME: _json_bytes(report),
+        _PROFILE_DESCRIPTOR_NAME: _json_bytes(report["contracts"]["verification_profile_descriptor"]),
         _TRANSCRIPT_NAME: _json_bytes(transcript),
         _REPLAY_DESCRIPTOR_NAME: _json_bytes(replay_descriptor),
         _TRANSPARENCY_LOG_NAME: log_snapshot["bytes"],
@@ -159,10 +170,15 @@ def verify_portable_evidence_bundle(bundle_path: Path | str) -> dict[str, Any]:
         input_state = payloads[_INPUT_STATE_NAME]
         state = payloads[_RELEASED_STATE_NAME]
         report = payloads[_VERIFICATION_REPORT_NAME]
+        profile_descriptor = payloads[_PROFILE_DESCRIPTOR_NAME]
         transcript = payloads[_TRANSCRIPT_NAME]
         replay_descriptor = payloads[_REPLAY_DESCRIPTOR_NAME]
         signatures = payloads[_SIGNATURES_NAME]
         anchored_evidence_payload = _transparency_log_payload_from_mapping(evidence_payload)
+        try:
+            verification_profile_descriptor_from_dict(profile_descriptor)
+        except ValueError as exc:
+            failures.append(f"verification_profile_descriptor.json is invalid: {exc}")
 
         evidence_failures = validate_evidence_payload(evidence_payload)
         if evidence_failures:
@@ -176,6 +192,10 @@ def verify_portable_evidence_bundle(bundle_path: Path | str) -> dict[str, Any]:
         expected_report = build_case_verification_report(state)
         if report != expected_report:
             failures.append("verification_report.json does not match the released state's math trace.")
+        if profile_descriptor != expected_report["contracts"]["verification_profile_descriptor"]:
+            failures.append(
+                "verification_profile_descriptor.json does not match the released state's runtime profile."
+            )
         if not expected_report["release_eligible"]:
             failures.append("released_state.json is not release-eligible.")
 
@@ -236,6 +256,7 @@ def verify_portable_evidence_bundle(bundle_path: Path | str) -> dict[str, Any]:
                 expected_state=state,
                 expected_report=expected_report,
                 expected_evidence_payload=evidence_payload,
+                expected_profile_descriptor=profile_descriptor,
                 expected_member_bytes=member_bytes,
                 expected_bundle_bytes=bundle_bytes,
                 replay_descriptor=replay_descriptor,
@@ -307,8 +328,16 @@ def _build_bundle_manifest(
         "entity_id": evidence_payload["entity_id"],
         "generated_at": evidence_payload["timestamp"],
         "actor": evidence_payload["actor"],
+        "profile_name": report["profile"]["profile_name"],
+        "profile_revision": report["profile"]["profile_revision"],
+        "profile_digest": report["profile"]["profile_digest"],
+        "icsd_policy_id": report["profile"]["icsd_policy_id"],
+        "icsd_policy_version": report["profile"]["icsd_policy_version"],
         "verdict": "This scan is verifiably correct.",
         "hashes": {
+            "verification_profile_descriptor_hash": hash_canonical_json(
+                contracts["verification_profile_descriptor"]
+            ),
             "raw_kspace_hash": analysis["raw_hash"],
             "ai_claim_envelope_hash": hash_canonical_json(contracts["ai_claim_envelope"]),
             "mask_derivation_policy_hash": hash_canonical_json(
@@ -338,6 +367,7 @@ def _build_bundle_manifest(
         },
         "verification": {
             "release_eligible": bool(report["release_eligible"]),
+            "decision_summary": report["decision_summary"],
             "failure_reasons": report["failure_reasons"],
             "tiers": {
                 key: value["status"] for key, value in report["verification_tiers"].items()
@@ -348,6 +378,7 @@ def _build_bundle_manifest(
             "mode": replay_descriptor["replay_mode"],
             "input_member": _INPUT_STATE_NAME,
             "replay_member": _REPLAY_DESCRIPTOR_NAME,
+            "profile_descriptor_member": _PROFILE_DESCRIPTOR_NAME,
             "transition_id": replay_descriptor["transition_id"],
         },
         "transparency": {
@@ -382,6 +413,17 @@ def _build_bundle_transcript(
         "actor": evidence_payload["actor"],
         "statement": "This scan is verifiably correct.",
         "events": [
+            {
+                "stage": "profile",
+                "summary": "Resolved the Guardian runtime profile and fixed its canonical digest.",
+                "details": {
+                    "profile_name": report["profile"]["profile_name"],
+                    "profile_revision": report["profile"]["profile_revision"],
+                    "profile_digest": report["profile"]["profile_digest"],
+                    "icsd_policy_id": report["profile"]["icsd_policy_id"],
+                    "icsd_policy_version": report["profile"]["icsd_policy_version"],
+                },
+            },
             {
                 "stage": "capture",
                 "summary": "Captured the raw MRI measurements and fixed their canonical hash.",
@@ -469,6 +511,11 @@ def _build_replay_descriptor(
         "actor": evidence_payload["actor"],
         "timestamp": evidence_payload["timestamp"],
         "transition_id": evidence_payload["transition_id"],
+        "profile_name": report["profile"]["profile_name"],
+        "profile_revision": report["profile"]["profile_revision"],
+        "profile_digest": report["profile"]["profile_digest"],
+        "icsd_policy_id": report["profile"]["icsd_policy_id"],
+        "icsd_policy_version": report["profile"]["icsd_policy_version"],
         "authority_sources": evidence_payload["authority_sources"],
         "transparency_prefix_entry_count": receipt_entry["index"],
         "expected_hashes": {
@@ -476,6 +523,7 @@ def _build_replay_descriptor(
             "released_state_hash": hash_canonical_json(state),
             "workstation_payload_hash": hash_canonical_json(state["workstation_payload"]),
             "verified_manifest_hash": hash_canonical_json(state["verified_manifest"]),
+            "verification_profile_descriptor_hash": hash_canonical_json(report["profile"]),
             "evidence_hash": hash_canonical_json(evidence_payload),
             "anchored_evidence_hash": hash_canonical_json(anchored_evidence_payload),
             "verification_report_hash": hash_canonical_json(report),
@@ -558,6 +606,7 @@ def _verify_deterministic_replay(
     expected_state: Mapping[str, Any],
     expected_report: Mapping[str, Any],
     expected_evidence_payload: Mapping[str, Any],
+    expected_profile_descriptor: Mapping[str, Any],
     expected_member_bytes: Mapping[str, bytes],
     expected_bundle_bytes: bytes | None,
     replay_descriptor: Mapping[str, Any],
@@ -572,6 +621,7 @@ def _verify_deterministic_replay(
         "released_state_hash": hash_canonical_json(expected_state),
         "workstation_payload_hash": hash_canonical_json(expected_state["workstation_payload"]),
         "verified_manifest_hash": hash_canonical_json(expected_state["verified_manifest"]),
+        "verification_profile_descriptor_hash": hash_canonical_json(expected_profile_descriptor),
         "evidence_hash": hash_canonical_json(expected_evidence_payload),
         "anchored_evidence_hash": hash_canonical_json(
             _transparency_log_payload_from_mapping(expected_evidence_payload)
@@ -605,13 +655,50 @@ def _verify_deterministic_replay(
         shutil.rmtree(temp_root, ignore_errors=True)
     temp_root.mkdir(parents=True, exist_ok=True)
     try:
+        runtime_profile = get_verification_profile(str(replay_descriptor["profile_name"]))
+        runtime_profile_payload = runtime_profile.to_dict()
+        if runtime_profile.profile_revision != replay_descriptor["profile_revision"]:
+            failures.append(
+                "embedded_profile_revision_mismatch: replay descriptor profile_revision "
+                "does not match the runtime registry."
+            )
+        if runtime_profile.profile_digest() != replay_descriptor["profile_digest"]:
+            failures.append(
+                "embedded_profile_digest_mismatch: replay descriptor digest does not "
+                "match the runtime registry."
+            )
+        if runtime_profile.icsd_policy_id != replay_descriptor["icsd_policy_id"]:
+            failures.append(
+                "embedded_profile_policy_id_mismatch: replay descriptor ICSD policy id "
+                "does not match the runtime registry."
+            )
+        if runtime_profile.icsd_policy_version != replay_descriptor["icsd_policy_version"]:
+            failures.append(
+                "embedded_profile_policy_version_mismatch: replay descriptor ICSD policy version "
+                "does not match the runtime registry."
+            )
+        if runtime_profile_payload != expected_profile_descriptor:
+            failures.append(
+                "embedded_profile_descriptor_mismatch: bundled profile descriptor does not "
+                "match the runtime registry."
+            )
+        if failures:
+            return {
+                "verified": False,
+                "failures": failures,
+                "details": {"replayed_bundle_sha256": replay_bundle_sha256},
+            }
         temp_log_path = temp_root / _TRANSPARENCY_LOG_NAME
         temp_log_path.write_bytes(prefix_bytes)
-        harness = MriGuardianHarness(transparency_log_path=temp_log_path)
+        harness = MriGuardianHarness(
+            transparency_log_path=temp_log_path,
+            default_profile_name=str(replay_descriptor["profile_name"]),
+        )
         replay_result = harness.release_case(
             state=input_state,
             actor=str(replay_descriptor["actor"]),
             authority_sources=replay_descriptor["authority_sources"],
+            profile_name=str(replay_descriptor["profile_name"]),
             timestamp=str(replay_descriptor["timestamp"]),
             transition_id=str(replay_descriptor["transition_id"]),
         )
@@ -626,6 +713,11 @@ def _verify_deterministic_replay(
         if replay_report != expected_report:
             failures.append(
                 "Deterministic replay did not reproduce the verification_report.json payload."
+            )
+        replay_profile_descriptor = replay_report["contracts"]["verification_profile_descriptor"]
+        if replay_profile_descriptor != expected_profile_descriptor:
+            failures.append(
+                "Deterministic replay did not reproduce the verification_profile_descriptor.json payload."
             )
 
         replay_bundle_path = temp_root / f"{expected_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"

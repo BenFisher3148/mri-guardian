@@ -14,6 +14,7 @@ from icsd.core.serialise import canonical_json_dumps
 
 from .bundle import MRI_GUARD_BUNDLE_EXTENSION, verify_bundle
 from .demo import run_demo
+from .profiles import DEFAULT_PROFILE_NAME
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -32,6 +33,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--output-dir",
         default="demo_artifacts",
         help="Directory where demo artifacts will be written.",
+    )
+    demo_parser.add_argument(
+        "--profile",
+        default=DEFAULT_PROFILE_NAME,
+        help="Guardian runtime profile to use for the demo artifacts.",
     )
     demo_parser.add_argument(
         "--tamper-mode",
@@ -161,7 +167,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_cli_parser()
     args = parser.parse_args(argv)
     if args.command == "demo":
-        run_demo(output_dir=args.output_dir, tamper_mode=args.tamper_mode)
+        run_demo(
+            output_dir=args.output_dir,
+            profile_name=args.profile,
+            tamper_mode=args.tamper_mode,
+        )
         print(f"Demo artifacts written to {Path(args.output_dir)}")
         return 0
     if args.command == "verify":

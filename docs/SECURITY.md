@@ -19,18 +19,20 @@ The trust boundary sits at the Guardian Layer:
 | Threat | Current control | Residual gap |
 | --- | --- | --- |
 | Invented pixels in the AI reconstruction | Deterministic reconstruction from raw k-space plus explicit parity checks | No production-grade DICOM transport hardening is implemented yet. |
-| Fake tumour mask regions | Deterministic mask derivation and exact voxel match policy | Current segmentation policy is intentionally simple and not clinically rich. |
-| Boundary-hugging numeric attacks | Explicit `VerificationTolerancePolicy` with per-voxel, per-frequency, and global relative L2 checks | Tolerances are static and not scanner-specific yet. |
+| Fake tumour mask regions | Deterministic profile-scoped mask derivation and exact voxel match policy | Current segmentation policy is intentionally simple and not clinically rich. |
+| Boundary-hugging numeric attacks | Explicit `VerificationTolerancePolicy` with per-voxel, per-frequency, and global relative L2 checks | Tolerances are profile-scoped but still static rather than scanner-calibrated. |
 | Bundle tampering | Canonical hashes, signatures catalog, transparency anchoring, deterministic replay | Signatures are integrity hashes, not asymmetric institutional signatures. |
 | Silent PACS bypass from the Guardian path | Fail-closed Guardian handoff behaviour | External fallback workflows are not governed by this prototype. |
-| Replay drift | Deterministic replay using bundled input state and transparency prefix | No external time-stamping authority is used. |
+| Replay drift | Deterministic replay using bundled input state, transparency prefix, and canonical profile digest | No external time-stamping authority is used. |
 
 ## Security Controls Present Today
 
 - Deterministic reconstruction from raw k-space.
 - Deterministic verified mask derivation.
+- Canonical runtime profile descriptors with embedded digest identity.
 - Explicit claim-to-proof interfaces with stable hashes.
 - Fail-closed Guardian release gate for blocking proof failures.
+- Distinct `proof_failure`, `heuristic_block`, and `profile_policy_block` outcomes in reports and bundles.
 - Transparency log anchoring for evidence receipts.
 - Portable bundle integrity catalog.
 - Deterministic replay that verifies released state, evidence payload, and bundle members.
@@ -41,6 +43,7 @@ The trust boundary sits at the Guardian Layer:
 The Guardian Layer is fail-closed for the verified handoff:
 
 - If Level 1 or Level 2 verification fails, no verified reconstruction, verified mask, manifest, or evidence series are released from the Guardian path.
+- If a runtime profile is non-final, proof may still pass, but no final released state or portable bundle is produced from the Guardian path.
 - If the Guardian service is unavailable, the Guardian path does not automatically pass AI outputs through.
 - Any operational fail-open workflow would need to be an explicit external process outside this repository's Guardian model.
 

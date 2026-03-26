@@ -7,6 +7,8 @@ from typing import Any
 
 from icsd.core.serialise import hash_canonical_json
 
+from .profiles import build_verification_profile_descriptor
+
 
 @dataclass(frozen=True)
 class AIClaimEnvelope:
@@ -47,15 +49,22 @@ class AIClaimEnvelope:
 class MaskDerivationPolicy:
     """Deterministic policy that maps a verified reconstruction to a mask."""
 
-    policy_name: str
-    policy_version: str
+    profile_name: str
+    profile_revision: str
+    profile_digest: str
+    icsd_policy_id: str
+    icsd_policy_version: str
     threshold: float
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "interface_type": "MaskDerivationPolicy",
-            "interface_version": self.policy_version,
-            "policy_name": self.policy_name,
+            "interface_version": self.icsd_policy_version,
+            "profile_name": self.profile_name,
+            "profile_revision": self.profile_revision,
+            "profile_digest": self.profile_digest,
+            "icsd_policy_id": self.icsd_policy_id,
+            "icsd_policy_version": self.icsd_policy_version,
             "policy_scope": "verified_mask_from_raw_derived_reconstruction",
             "algorithm": "threshold_on_raw_derived_reconstruction",
             "deterministic": True,
@@ -72,8 +81,11 @@ class MaskDerivationPolicy:
 class VerificationTolerancePolicy:
     """Explicit tolerance contract for local and global verification metrics."""
 
-    policy_name: str
-    policy_version: str
+    profile_name: str
+    profile_revision: str
+    profile_digest: str
+    icsd_policy_id: str
+    icsd_policy_version: str
     guard_band_fraction: float
     spatial_per_voxel_abs_error: float
     spatial_global_relative_l2_error: float
@@ -85,8 +97,12 @@ class VerificationTolerancePolicy:
     def to_dict(self) -> dict[str, Any]:
         return {
             "interface_type": "VerificationTolerancePolicy",
-            "interface_version": self.policy_version,
-            "policy_name": self.policy_name,
+            "interface_version": self.icsd_policy_version,
+            "profile_name": self.profile_name,
+            "profile_revision": self.profile_revision,
+            "profile_digest": self.profile_digest,
+            "icsd_policy_id": self.icsd_policy_id,
+            "icsd_policy_version": self.icsd_policy_version,
             "policy_scope": "attack_aware_numeric_tolerances",
             "guard_band_fraction": self.guard_band_fraction,
             "rules": {
@@ -164,6 +180,11 @@ class VerifiedReconstructionTrace:
     """Proof trace from raw sensor data to the verified reconstruction outputs."""
 
     case_id: str
+    profile_name: str
+    profile_revision: str
+    profile_digest: str
+    icsd_policy_id: str
+    icsd_policy_version: str
     raw_kspace_hash: str
     derived_reconstruction_hash: str
     forward_projection_hash: str
@@ -185,6 +206,11 @@ class VerifiedReconstructionTrace:
             "interface_version": "2026.03",
             "trace_scope": "raw_kspace_to_verified_reconstruction_mask_volume",
             "case_id": self.case_id,
+            "profile_name": self.profile_name,
+            "profile_revision": self.profile_revision,
+            "profile_digest": self.profile_digest,
+            "icsd_policy_id": self.icsd_policy_id,
+            "icsd_policy_version": self.icsd_policy_version,
             "claim_envelope_hash": self.claim_envelope_hash,
             "mask_derivation_policy_hash": self.mask_derivation_policy_hash,
             "tolerance_policy_hash": self.tolerance_policy_hash,
@@ -230,21 +256,30 @@ def build_ai_claim_envelope(
 
 def build_mask_derivation_policy(
     *,
-    policy_name: str,
-    policy_version: str,
+    profile_name: str,
+    profile_revision: str,
+    profile_digest: str,
+    icsd_policy_id: str,
+    icsd_policy_version: str,
     threshold: float,
 ) -> dict[str, Any]:
     return MaskDerivationPolicy(
-        policy_name=policy_name,
-        policy_version=policy_version,
+        profile_name=profile_name,
+        profile_revision=profile_revision,
+        profile_digest=profile_digest,
+        icsd_policy_id=icsd_policy_id,
+        icsd_policy_version=icsd_policy_version,
         threshold=float(threshold),
     ).to_dict()
 
 
 def build_verification_tolerance_policy(
     *,
-    policy_name: str,
-    policy_version: str,
+    profile_name: str,
+    profile_revision: str,
+    profile_digest: str,
+    icsd_policy_id: str,
+    icsd_policy_version: str,
     guard_band_fraction: float,
     spatial_per_voxel_abs_error: float,
     spatial_global_relative_l2_error: float,
@@ -254,8 +289,11 @@ def build_verification_tolerance_policy(
     volume_absolute_error: float,
 ) -> dict[str, Any]:
     return VerificationTolerancePolicy(
-        policy_name=policy_name,
-        policy_version=policy_version,
+        profile_name=profile_name,
+        profile_revision=profile_revision,
+        profile_digest=profile_digest,
+        icsd_policy_id=icsd_policy_id,
+        icsd_policy_version=icsd_policy_version,
         guard_band_fraction=float(guard_band_fraction),
         spatial_per_voxel_abs_error=float(spatial_per_voxel_abs_error),
         spatial_global_relative_l2_error=float(spatial_global_relative_l2_error),
@@ -269,6 +307,11 @@ def build_verification_tolerance_policy(
 def build_verified_reconstruction_trace(
     *,
     case_id: str,
+    profile_name: str,
+    profile_revision: str,
+    profile_digest: str,
+    icsd_policy_id: str,
+    icsd_policy_version: str,
     raw_kspace_hash: str,
     derived_reconstruction_hash: str,
     forward_projection_hash: str,
@@ -286,6 +329,11 @@ def build_verified_reconstruction_trace(
 ) -> dict[str, Any]:
     return VerifiedReconstructionTrace(
         case_id=case_id,
+        profile_name=profile_name,
+        profile_revision=profile_revision,
+        profile_digest=profile_digest,
+        icsd_policy_id=icsd_policy_id,
+        icsd_policy_version=icsd_policy_version,
         raw_kspace_hash=raw_kspace_hash,
         derived_reconstruction_hash=derived_reconstruction_hash,
         forward_projection_hash=forward_projection_hash,
@@ -301,3 +349,8 @@ def build_verified_reconstruction_trace(
         relative_ai_l2_error=float(relative_ai_l2_error),
         mask_voxel_delta=int(mask_voxel_delta),
     ).to_dict()
+
+
+def build_verification_profile_contract(profile_name: str) -> dict[str, Any]:
+    """Return the canonical public descriptor for the active runtime profile."""
+    return build_verification_profile_descriptor(profile_name)

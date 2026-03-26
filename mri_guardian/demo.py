@@ -26,6 +26,7 @@ from .integration import (
     build_mock_pacs_block_notice,
     build_mock_pacs_submission,
 )
+from .profiles import DEFAULT_PROFILE_NAME, get_verification_profile
 from .tamper import build_tamper_mode_base_case, build_tamper_scenarios
 from .timing import build_guardian_performance_profile
 from .viewer import render_side_by_side_report_html
@@ -33,11 +34,46 @@ from .viewer import render_side_by_side_report_html
 DEMO_TIMESTAMP = "2026-03-26T00:00:00Z"
 
 
-def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
+def run_demo(
+    *,
+    output_dir: Path | str,
+    profile_name: str = DEFAULT_PROFILE_NAME,
+    tamper_mode: bool = False,
+) -> None:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     (output_path / "comparison_rejected_candidate.html").unlink(missing_ok=True)
-    case_state = build_demo_case()
+    descriptor = get_verification_profile(profile_name)
+    case_state = build_demo_case(profile_name=descriptor.profile_name)
+    pending_report = build_case_verification_report(
+        case_state,
+        profile_name=descriptor.profile_name,
+    )
+    (output_path / "verification_profile_descriptor.json").write_text(
+        f"{canonical_json_dumps(pending_report['profile'])}\n",
+        encoding="utf-8",
+    )
+    (output_path / "verification_report.json").write_text(
+        f"{canonical_json_dumps(pending_report)}\n",
+        encoding="utf-8",
+    )
+    (output_path / "performance_profile.json").write_text(
+        f"{canonical_json_dumps(build_guardian_performance_profile(descriptor.profile_name))}\n",
+        encoding="utf-8",
+    )
+    (output_path / "comparison.html").write_text(
+        render_side_by_side_report_html(
+            case_state,
+            report_title="Accepted Case: Guardian Layer Verification",
+            profile_name=descriptor.profile_name,
+        ),
+        encoding="utf-8",
+    )
+    if not descriptor.release_semantics["final_release_allowed"]:
+        if tamper_mode:
+            _write_tamper_mode_reports(output_path)
+        return
+
     dicom_input = build_mock_dicom_input(case_state)
     (output_path / "dicom_input.json").write_text(
         f"{canonical_json_dumps(dicom_input)}\n",
@@ -49,11 +85,16 @@ def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
     )
     harness = MriGuardianHarness(
         transparency_log_path=output_path / "transparency-log.jsonl",
+        default_profile_name=descriptor.profile_name,
     )
     result = harness.release_case(
         state=case_state,
         actor="guardian:demo",
-        authority_sources=build_demo_authority_sources(case_id=case_state["case_id"]),
+        authority_sources=build_demo_authority_sources(
+            case_id=case_state["case_id"],
+            profile_name=descriptor.profile_name,
+        ),
+        profile_name=descriptor.profile_name,
         timestamp=DEMO_TIMESTAMP,
     )
     (output_path / "evidence.json").write_text(
@@ -74,6 +115,14 @@ def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
         f"{canonical_json_dumps(report['contracts']['ai_claim_envelope'])}\n",
         encoding="utf-8",
     )
+    (output_path / "verification_profile_descriptor.json").write_text(
+        f"{canonical_json_dumps(report['contracts']['verification_profile_descriptor'])}\n",
+        encoding="utf-8",
+    )
+    (output_path / "verification_report.json").write_text(
+        f"{canonical_json_dumps(report)}\n",
+        encoding="utf-8",
+    )
     (output_path / "verified_reconstruction_trace.json").write_text(
         f"{canonical_json_dumps(report['contracts']['verified_reconstruction_trace'])}\n",
         encoding="utf-8",
@@ -84,10 +133,6 @@ def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
     )
     (output_path / "verification_tolerance_policy.json").write_text(
         f"{canonical_json_dumps(report['contracts']['verification_tolerance_policy'])}\n",
-        encoding="utf-8",
-    )
-    (output_path / "performance_profile.json").write_text(
-        f"{canonical_json_dumps(build_guardian_performance_profile())}\n",
         encoding="utf-8",
     )
     bundle_path = output_path / f"{case_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
@@ -120,13 +165,6 @@ def run_demo(*, output_dir: Path | str, tamper_mode: bool = False) -> None:
         f"{canonical_json_dumps(bundle_verification)}\n",
         encoding="utf-8",
     )
-    (output_path / "comparison.html").write_text(
-        render_side_by_side_report_html(
-            case_state,
-            report_title="Accepted Case: Guardian Layer Verification",
-        ),
-        encoding="utf-8",
-    )
     if tamper_mode:
         _write_tamper_mode_reports(output_path)
 
@@ -139,12 +177,21 @@ def main() -> int:
         help="Directory where evidence and workstation payload files will be written.",
     )
     parser.add_argument(
+        "--profile",
+        default=DEFAULT_PROFILE_NAME,
+        help="Guardian runtime profile to use for the demo artifacts.",
+    )
+    parser.add_argument(
         "--tamper-mode",
         action="store_true",
         help="Write deterministic tamper-mode reports that demonstrate live failure detection.",
     )
     args = parser.parse_args()
-    run_demo(output_dir=args.output_dir, tamper_mode=args.tamper_mode)
+    run_demo(
+        output_dir=args.output_dir,
+        profile_name=args.profile,
+        tamper_mode=args.tamper_mode,
+    )
     return 0
 
 

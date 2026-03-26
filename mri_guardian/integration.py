@@ -26,6 +26,7 @@ _STATE_FIELDS = (
     "tumor_mask",
     "voxel_spacing_mm",
     "tumor_volume_mm3",
+    "verification_profile_descriptor",
     "verified_manifest",
     "workstation_payload",
 )
@@ -92,6 +93,7 @@ def build_mock_dicom_input(
             },
         ],
         "ai_claim_envelope": claim_envelope,
+        "verification_profile_descriptor": report["profile"],
         "integration_narrative": integration_narrative,
         "guardian_case": {field: deepcopy(state[field]) for field in _STATE_FIELDS},
     }
@@ -179,16 +181,22 @@ def build_mock_pacs_submission(
         "verification_summary": {
             "guardian_mode": "verification_proxy",
             "decision": "released",
+            "decision_class": report["decision_summary"]["decision_class"],
             "primary_reason": _primary_reason_summary(report),
             "tier_statuses": _tier_statuses(report),
+            "proof_status": report["decision_summary"]["proof_status"],
+            "profile_policy_status": report["decision_summary"]["profile_policy_status"],
             "pixel_source": workstation_payload["pixel_source"],
             "overlay_mode": workstation_payload["overlay_mode"],
             "verified_tumor_volume_mm3": workstation_payload["tumor_volume_mm3"],
             "bundle_reference": bundle_reference,
             "evidence_hash": evidence_hash,
+            "profile_name": report["manifest"]["profile_name"],
+            "profile_digest": report["manifest"]["profile_digest"],
         },
         "integration_narrative": integration_narrative,
         "proof_contracts": {
+            "verification_profile_descriptor": contracts["verification_profile_descriptor"],
             "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
             "mask_derivation_policy": contracts["mask_derivation_policy"],
             "verification_tolerance_policy": contracts["verification_tolerance_policy"],
@@ -230,11 +238,17 @@ def build_mock_pacs_block_notice(
         "verification_summary": {
             "guardian_mode": "verification_proxy",
             "decision": "blocked",
+            "decision_class": report["decision_summary"]["decision_class"],
             "tier_statuses": _tier_statuses(report),
+            "proof_status": report["decision_summary"]["proof_status"],
+            "profile_policy_status": report["decision_summary"]["profile_policy_status"],
             "verified_tumor_volume_mm3": analysis["computed_tumor_volume_mm3"],
+            "profile_name": report["manifest"]["profile_name"],
+            "profile_digest": report["manifest"]["profile_digest"],
         },
         "integration_narrative": integration_narrative,
         "proof_contracts": {
+            "verification_profile_descriptor": contracts["verification_profile_descriptor"],
             "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
             "mask_derivation_policy": contracts["mask_derivation_policy"],
             "verification_tolerance_policy": contracts["verification_tolerance_policy"],
@@ -294,6 +308,7 @@ def build_mock_integration_trace(
                 "label": "MRI Guardian Layer",
                 "mode": "verification_proxy",
                 "decision": pacs_output["submission_status"],
+                "decision_class": report["decision_summary"]["decision_class"],
                 "primary_reason": _primary_reason_summary(report),
                 "tier_statuses": _tier_statuses(report),
             },
@@ -369,7 +384,7 @@ def build_guardian_integration_narrative(
             "current_guardian_decision": current_guardian_decision,
             "release_rule": (
                 "Verified series are released only when the blocking Guardian Layer proof "
-                "passes."
+                "passes and the selected runtime profile allows final release."
             ),
             "on_verification_failure": (
                 "No verified reconstruction, segmentation, manifest, or evidence series are "
@@ -391,6 +406,8 @@ def _primary_reason_summary(report: dict[str, Any]) -> str:
     reasons = report["failure_reasons"]
     if reasons:
         return reasons[0]["summary"]
-    if report["verification_tiers"]["level_3"]["status"] == "warning":
+    if report["decision_summary"]["decision_class"] == "triage_only":
+        return "proof_passed_but_profile_is_triage_only"
+    if report["decision_summary"]["operator_review_required"]:
         return "all_blocking_checks_passed; clinical_plausibility_review_recommended"
     return "all_blocking_checks_passed"

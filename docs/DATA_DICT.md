@@ -22,6 +22,7 @@ The base case state is the canonical input to the verification harness.
 | `tumor_mask` | `list[list[list[int]]]` | AI-proposed binary tumour mask. |
 | `voxel_spacing_mm` | `list[float]` | Physical voxel spacing in millimetres. |
 | `tumor_volume_mm3` | `float` | Claimed tumour volume. |
+| `verification_profile_descriptor` | `dict` | Canonical runtime profile descriptor embedded with the case state and replayed on verification. |
 | `verified_manifest` | `dict | None` | Deterministic proof manifest, populated only on release. |
 | `workstation_payload` | `dict | None` | Verified downstream payload, populated only on release. |
 
@@ -37,6 +38,9 @@ Current top-level keys from [`../demo_artifacts/workstation_payload.json`](../de
 | `scanner_id` | `str` | Scanner identifier. |
 | `sequence_id` | `str` | Acquisition or protocol identifier. |
 | `patient_pseudonym` | `str` | Pseudonymised patient identifier. |
+| `profile_name` | `str` | Guardian runtime profile used to derive the payload. |
+| `profile_revision` | `str` | Revision scoped to the selected `profile_name`. |
+| `profile_digest` | `str` | Canonical digest of the resolved runtime profile descriptor. |
 | `pixel_source` | `str` | Source semantics for the released reconstruction. |
 | `overlay_mode` | `str` | Source semantics for the released mask. |
 | `reconstruction_hash` | `str` | Canonical hash of the released reconstruction. |
@@ -69,10 +73,11 @@ Defined in [`../mri_guardian/contracts.py`](../mri_guardian/contracts.py).
 
 | Interface | Purpose | Key fields |
 | --- | --- | --- |
+| `VerificationProfileDescriptor` | Canonical runtime profile contract | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, release semantics, heuristics, performance expectations |
 | `AIClaimEnvelope` | AI-side claim over reconstruction, mask, and volume | case identity, `raw_kspace_hash`, AI output hashes, claimed volume |
-| `MaskDerivationPolicy` | Deterministic mapping from raw-derived reconstruction to verified mask | policy name/version, threshold rule |
-| `VerificationTolerancePolicy` | Explicit numeric tolerance contract | per-voxel, per-frequency, global-norm, imaginary leakage, and volume tolerances |
-| `VerifiedReconstructionTrace` | Proof trace from raw k-space to verified reconstruction, mask, and volume | raw hash, derived hash, forward projection hash, verified mask hash, measurement metrics, claim comparison metrics |
+| `MaskDerivationPolicy` | Deterministic mapping from raw-derived reconstruction to verified mask | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, threshold rule |
+| `VerificationTolerancePolicy` | Explicit numeric tolerance contract | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, per-voxel, per-frequency, global-norm, imaginary leakage, and volume tolerances |
+| `VerifiedReconstructionTrace` | Proof trace from raw k-space to verified reconstruction, mask, and volume | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, raw hash, derived hash, verified mask hash, measurement metrics, claim comparison metrics |
 | `GuardianIntegrationNarrative` | Hospital-facing integration narrative | DICOM compliance story, hospital placement, fail-closed behaviour |
 
 ## Integration Artifacts
@@ -96,6 +101,7 @@ The portable bundle written by [`../mri_guardian/bundle.py`](../mri_guardian/bun
 - `released_state.json`
 - `workstation_payload.json`
 - `verification_report.json`
+- `verification_profile_descriptor.json`
 - `transcript.json`
 - `replay.json`
 - `transparency-log.jsonl`

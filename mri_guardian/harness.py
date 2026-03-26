@@ -12,44 +12,60 @@ import numpy as np
 from icsd.adapters.numba_invariants import NumbaBatchFieldInvariant
 from icsd.core.errors import InvariantFailure
 from icsd.core.evidence import AuthoritySource, EvidenceBundle
-from icsd.core.invariants import Invariant, InvariantProfile, InvariantProfileRegistry, InvariantSet
+from icsd.core.invariants import Invariant, InvariantSet
 from icsd.core.serialise import canonical_json_dumps, hash_canonical_json
 from icsd.core.transition import Transition, TransitionResult
 
 from .contracts import (
     build_ai_claim_envelope,
     build_mask_derivation_policy,
+    build_verification_profile_contract,
     build_verification_tolerance_policy,
     build_verified_reconstruction_trace,
 )
+from .profiles import (
+    DECISION_CLASS_TRIAGE_ONLY,
+    DEFAULT_PROFILE_NAME,
+    HEURISTIC_BLOCKING,
+    build_authority_requirement_map,
+    build_profile_registry,
+    default_icsd_policy_version,
+    get_verification_profile,
+    resolve_profile_name,
+)
 from .transparency import JsonlHashChainTransparencyLog
 
-MRI_GUARDIAN_POLICY_NAME = "mri_guardian_release"
-MRI_GUARDIAN_POLICY = "policy/mri-guardian"
-MRI_GUARDIAN_POLICY_VERSION = "2026.03"
+MRI_GUARDIAN_POLICY_NAME = DEFAULT_PROFILE_NAME
+MRI_GUARDIAN_POLICY_VERSION = default_icsd_policy_version()
 RELEASE_STATUS_PENDING = "pending_verification"
 RELEASE_STATUS_RELEASED = "released_to_radiologist"
-_RECONSTRUCTION_TOLERANCE = 1e-9
-_IMAGINARY_LEAK_TOLERANCE = 1e-9
-_FREQUENCY_RELATIVE_L2_TOLERANCE = 1e-12
-_AI_RELATIVE_L2_TOLERANCE = 1e-12
-_VOLUME_TOLERANCE = 1e-9
-_TOLERANCE_GUARD_BAND_FRACTION = 0.8
-_VERIFIED_MASK_THRESHOLD = 2.5
-_CLINICAL_PLAUSIBILITY_MAX_MASK_FRACTION = 0.35
-_CLINICAL_PLAUSIBILITY_MIN_CONTRAST_DELTA = 0.75
-_CLINICAL_PLAUSIBILITY_MIN_SLICE_SPAN = 2
-_REQUIRED_AUTHORITY_SOURCE_TYPES = frozenset(
-    {"scanner_manifest", "voxel_geometry", "model_manifest"}
+_DEFAULT_PROFILE = get_verification_profile(DEFAULT_PROFILE_NAME)
+_RECONSTRUCTION_TOLERANCE = _DEFAULT_PROFILE.tolerance("spatial_per_voxel_abs_error")
+_IMAGINARY_LEAK_TOLERANCE = _DEFAULT_PROFILE.tolerance("imaginary_leakage_abs_error")
+_FREQUENCY_RELATIVE_L2_TOLERANCE = _DEFAULT_PROFILE.tolerance(
+    "frequency_global_relative_l2_error"
 )
+_AI_RELATIVE_L2_TOLERANCE = _DEFAULT_PROFILE.tolerance("spatial_global_relative_l2_error")
+_VOLUME_TOLERANCE = _DEFAULT_PROFILE.tolerance("volume_absolute_error")
+_TOLERANCE_GUARD_BAND_FRACTION = _DEFAULT_PROFILE.guard_band_fraction
+_VERIFIED_MASK_THRESHOLD = _DEFAULT_PROFILE.mask_threshold
+_REQUIRED_AUTHORITY_SOURCE_TYPES = frozenset(_DEFAULT_PROFILE.required_authority_source_types)
+_AUTHORITY_REQUIREMENT_MAP = build_authority_requirement_map()
 
 
 class MriGuardianHarness:
     """Verify MRI AI outputs before forwarding them downstream."""
 
-    def __init__(self, *, transparency_log_path: Path | str) -> None:
+    def __init__(
+        self,
+        *,
+        transparency_log_path: Path | str,
+        default_profile_name: str = DEFAULT_PROFILE_NAME,
+    ) -> None:
+        self._default_profile_name = get_verification_profile(default_profile_name).profile_name
         self._transition = _build_release_transition(
             transparency_log_path=Path(transparency_log_path),
+            default_profile_name=self._default_profile_name,
         )
 
     def release_case(
@@ -58,17 +74,28 @@ class MriGuardianHarness:
         state: Mapping[str, Any],
         actor: str,
         authority_sources: Iterable[AuthoritySource | Mapping[str, Any]],
+        profile_name: str | None = None,
         timestamp: str | None = None,
         transition_id: str | UUID | None = None,
     ) -> TransitionResult:
+        resolved_profile_name = resolve_profile_name(profile_name=profile_name, state=dict(state))
+        descriptor = get_verification_profile(resolved_profile_name)
+        if not descriptor.release_semantics["final_release_allowed"]:
+            raise ValueError(
+                f"Runtime profile {descriptor.profile_name!r} is non-final and cannot release a case."
+            )
+        working_state = dict(state)
+        working_state["verification_profile_descriptor"] = build_verification_profile_contract(
+            descriptor.profile_name
+        )
         return self._transition.apply(
-            state=state,
+            state=working_state,
             entity_type="mri_case",
-            entity_id=str(state["case_id"]),
+            entity_id=str(working_state["case_id"]),
             actor=actor,
             authority_sources=authority_sources,
-            profile=MRI_GUARDIAN_POLICY_NAME,
-            policy_version=MRI_GUARDIAN_POLICY_VERSION,
+            profile=descriptor.profile_name,
+            policy_version=descriptor.icsd_policy_version,
             timestamp=timestamp,
             transition_id=transition_id,
         )
@@ -79,28 +106,36 @@ class MriGuardianHarness:
     ) -> bool:
         return self._transition.verify_transparency(evidence).verified
 
-
-def build_case_verification_report(state: Mapping[str, Any]) -> dict[str, Any]:
+def build_case_verification_report(
+    state: Mapping[str, Any],
+    *,
+    profile_name: str | None = None,
+) -> dict[str, Any]:
     """Return the deterministic verification envelope for one MRI case."""
-    analysis = _analyse_case(state)
-    contracts = _build_claim_to_proof_contracts(state, analysis)
-    manifest = _build_verified_manifest(state, analysis, contracts)
+    resolved_profile_name = resolve_profile_name(profile_name=profile_name, state=dict(state))
+    descriptor = get_verification_profile(resolved_profile_name)
+    profile_contract = build_verification_profile_contract(descriptor.profile_name)
+    analysis = _analyse_case(state, descriptor)
+    contracts = _build_claim_to_proof_contracts(state, analysis, descriptor)
+    manifest = _build_verified_manifest(state, analysis, contracts, descriptor)
     reasons = _build_failure_reasons(state, analysis, manifest)
     tiers = manifest["verification_tiers"]
+    decision_summary = manifest["decision_summary"]
     return {
+        "profile": profile_contract,
         "analysis": analysis,
         "contracts": contracts,
         "manifest": manifest,
         "verification_tiers": tiers,
         "failure_reasons": reasons,
-        "release_eligible": not reasons
-        and tiers["level_1"]["status"] == "passed"
-        and tiers["level_2"]["status"] == "passed",
+        "decision_summary": decision_summary,
+        "release_eligible": bool(decision_summary["final_release_allowed"]),
     }
 
 
-def build_demo_case() -> dict[str, Any]:
+def build_demo_case(*, profile_name: str = DEFAULT_PROFILE_NAME) -> dict[str, Any]:
     """Return a deterministic happy-path MRI case."""
+    descriptor = get_verification_profile(profile_name)
     reconstruction = np.asarray(
         [
             [[0.0, 1.0], [0.0, 4.0]],
@@ -108,13 +143,7 @@ def build_demo_case() -> dict[str, Any]:
         ],
         dtype=np.float64,
     )
-    tumor_mask = np.asarray(
-        [
-            [[0, 0], [0, 1]],
-            [[0, 1], [0, 0]],
-        ],
-        dtype=np.int64,
-    )
+    tumor_mask = (reconstruction >= descriptor.mask_threshold).astype(np.int64)
     voxel_spacing_mm = np.asarray([0.8, 0.8, 2.5], dtype=np.float64)
     raw_kspace = np.fft.fft2(reconstruction, axes=(-2, -1))
     tumor_volume_mm3 = _round_float(int(tumor_mask.sum()) * float(np.prod(voxel_spacing_mm)))
@@ -124,7 +153,7 @@ def build_demo_case() -> dict[str, Any]:
         "study_uid": "study-0001",
         "series_uid": "series-0001",
         "scanner_id": "scanner-7t-alpha",
-        "sequence_id": "t1-post-contrast",
+        "sequence_id": _demo_sequence_id(descriptor.profile_name),
         "ai_model_id": "raw-mri-ai-v4",
         "release_status": RELEASE_STATUS_PENDING,
         "raw_real": _float_array_to_list(raw_kspace.real),
@@ -133,14 +162,22 @@ def build_demo_case() -> dict[str, Any]:
         "tumor_mask": tumor_mask.tolist(),
         "voxel_spacing_mm": _float_array_to_list(voxel_spacing_mm),
         "tumor_volume_mm3": tumor_volume_mm3,
+        "verification_profile_descriptor": build_verification_profile_contract(
+            descriptor.profile_name
+        ),
         "verified_manifest": None,
         "workstation_payload": None,
     }
 
 
-def build_demo_authority_sources(*, case_id: str) -> tuple[AuthoritySource, ...]:
-    """Return authority anchors required by the demo policy profile."""
-    return (
+def build_demo_authority_sources(
+    *,
+    case_id: str,
+    profile_name: str = DEFAULT_PROFILE_NAME,
+) -> tuple[AuthoritySource, ...]:
+    """Return authority anchors required by the selected runtime profile."""
+    descriptor = get_verification_profile(profile_name)
+    sources = [
         AuthoritySource(
             source_type="scanner_manifest",
             source_id="scanner-7t-alpha",
@@ -159,10 +196,57 @@ def build_demo_authority_sources(*, case_id: str) -> tuple[AuthoritySource, ...]
             reference="model://raw-mri-ai-v4/reconstruction-segmentation",
             details={"task": "reconstruction-and-volume-estimation"},
         ),
-    )
+    ]
+    if "sequence_manifest" in descriptor.required_authority_source_types:
+        sources.append(
+            AuthoritySource(
+                source_type="sequence_manifest",
+                source_id=f"{case_id}-sequence",
+                reference=f"sequence://{case_id}/{descriptor.sequence_family}",
+                details={
+                    "sequence_family": descriptor.sequence_family,
+                    "clinical_mode": descriptor.clinical_mode,
+                },
+            )
+        )
+    if "contrast_protocol" in descriptor.required_authority_source_types:
+        sources.append(
+            AuthoritySource(
+                source_type="contrast_protocol",
+                source_id=f"{case_id}-contrast",
+                reference=f"contrast://{case_id}/protocol",
+                details={"agent": "gadobutrol", "phase": "post_contrast"},
+            )
+        )
+    if "research_protocol" in descriptor.required_authority_source_types:
+        sources.append(
+            AuthoritySource(
+                source_type="research_protocol",
+                source_id=f"{case_id}-research",
+                reference=f"research://{case_id}/strict-protocol",
+                details={"study_arm": "strict_reproducibility"},
+            )
+        )
+    return tuple(sources)
 
 
-def _build_release_transition(*, transparency_log_path: Path) -> Transition:
+def _demo_sequence_id(profile_name: str) -> str:
+    if profile_name == "brain_t1_baseline":
+        return "t1-pre-contrast"
+    if profile_name == "brain_t2_baseline":
+        return "t2-weighted"
+    if profile_name == "contrast_enhanced_review":
+        return "t1-post-contrast"
+    if profile_name == "strict_research_mode":
+        return "research-brain-mri"
+    return "triage-brain-mri"
+
+
+def _build_release_transition(
+    *,
+    transparency_log_path: Path,
+    default_profile_name: str,
+) -> Transition:
     invariants = InvariantSet(
         (
             Invariant(
@@ -233,17 +317,11 @@ def _build_release_transition(*, transparency_log_path: Path) -> Transition:
             ),
         )
     )
-    profile = InvariantProfile(
-        name=MRI_GUARDIAN_POLICY_NAME,
-        policy=MRI_GUARDIAN_POLICY,
-        policy_version=MRI_GUARDIAN_POLICY_VERSION,
-        invariants=invariants,
-    )
     return Transition(
         name="release_verified_mri_estimate",
         mutate=_release_to_radiologist,
-        profile_registry=InvariantProfileRegistry((profile,)),
-        default_profile=MRI_GUARDIAN_POLICY_NAME,
+        profile_registry=build_profile_registry(invariants),
+        default_profile=default_profile_name,
         authority_validator=_validate_authority_sources,
         transparency_log=JsonlHashChainTransparencyLog(transparency_log_path),
         verify_transparency_after_append=True,
@@ -251,10 +329,16 @@ def _build_release_transition(*, transparency_log_path: Path) -> Transition:
 
 
 def _release_to_radiologist(state: dict[str, Any]) -> None:
-    analysis = _analyse_case(state)
-    contracts = _build_claim_to_proof_contracts(state, analysis)
-    state["verified_manifest"] = _build_verified_manifest(state, analysis, contracts)
-    state["workstation_payload"] = _build_workstation_payload(state, analysis)
+    descriptor = get_verification_profile(
+        resolve_profile_name(profile_name=None, state=state)
+    )
+    state["verification_profile_descriptor"] = build_verification_profile_contract(
+        descriptor.profile_name
+    )
+    analysis = _analyse_case(state, descriptor)
+    contracts = _build_claim_to_proof_contracts(state, analysis, descriptor)
+    state["verified_manifest"] = _build_verified_manifest(state, analysis, contracts, descriptor)
+    state["workstation_payload"] = _build_workstation_payload(state, analysis, descriptor)
     state["release_status"] = RELEASE_STATUS_RELEASED
 
 
@@ -263,7 +347,8 @@ def _validate_authority_sources(
     authority_sources: tuple[AuthoritySource, ...],
 ) -> None:
     seen_types = {source.source_type for source in authority_sources}
-    missing_types = sorted(_REQUIRED_AUTHORITY_SOURCE_TYPES - seen_types)
+    required_types = frozenset(_AUTHORITY_REQUIREMENT_MAP.get(authority, ()))
+    missing_types = sorted(required_types - seen_types)
     if missing_types:
         missing = ", ".join(missing_types)
         msg = (
@@ -436,7 +521,10 @@ def _check_released_state_matches_trace(
                 )
             )
     workstation_payload = state.get("workstation_payload")
-    expected_workstation_payload = _build_workstation_payload(state, analysis)
+    descriptor = get_verification_profile(
+        resolve_profile_name(profile_name=None, state=dict(state))
+    )
+    expected_workstation_payload = _build_workstation_payload(state, analysis, descriptor)
     if workstation_payload != expected_workstation_payload:
         failures.append(
             InvariantFailure(
@@ -455,7 +543,10 @@ def _check_released_state_matches_trace(
     return tuple(failures) or None
 
 
-def _analyse_case(state: Mapping[str, Any]) -> dict[str, Any]:
+def _analyse_case(
+    state: Mapping[str, Any],
+    descriptor: Any,
+) -> dict[str, Any]:
     arrays, failure = _extract_arrays(state)
     if failure is not None:
         raise ValueError(failure.message)
@@ -471,9 +562,10 @@ def _analyse_case(state: Mapping[str, Any]) -> dict[str, Any]:
     measurement_residual = reprojection - raw_kspace
     ai_residual = ai_reconstruction - derived_reconstruction
     reconstruction_mismatch_mask = (
-        np.abs(ai_reconstruction - derived_reconstruction) > _RECONSTRUCTION_TOLERANCE
+        np.abs(ai_reconstruction - derived_reconstruction)
+        > descriptor.tolerance("spatial_per_voxel_abs_error")
     )
-    verified_mask = _derive_verified_mask(derived_reconstruction)
+    verified_mask = _derive_verified_mask(derived_reconstruction, descriptor)
     mask_false_positive = (ai_mask == 1) & (verified_mask == 0)
     mask_false_negative = (ai_mask == 0) & (verified_mask == 1)
     mask_mismatch_mask = mask_false_positive | mask_false_negative
@@ -498,6 +590,11 @@ def _analyse_case(state: Mapping[str, Any]) -> dict[str, Any]:
     ai_mask_hash = hash_canonical_json(ai_mask_list)
     verified_mask_hash = hash_canonical_json(verified_mask_list)
     return {
+        "profile_name": descriptor.profile_name,
+        "profile_revision": descriptor.profile_revision,
+        "profile_digest": descriptor.profile_digest(),
+        "icsd_policy_id": descriptor.icsd_policy_id,
+        "icsd_policy_version": descriptor.icsd_policy_version,
         "raw_hash": raw_hash,
         "ai_reconstruction_hash": ai_reconstruction_hash,
         "derived_reconstruction": derived_reconstruction_list,
@@ -528,6 +625,7 @@ def _build_verified_manifest(
     state: Mapping[str, Any],
     analysis: Mapping[str, Any],
     contracts: Mapping[str, Any],
+    descriptor: Any,
 ) -> dict[str, Any]:
     claimed_volume = _round_float(float(state["tumor_volume_mm3"]))
     measurement_metrics = {
@@ -536,21 +634,24 @@ def _build_verified_manifest(
             domain="frequency_domain",
             scope="per_frequency",
             observed=analysis["max_measurement_abs_error"],
-            threshold=_RECONSTRUCTION_TOLERANCE,
+            threshold=descriptor.tolerance("frequency_per_coefficient_abs_error"),
+            guard_band_fraction=descriptor.guard_band_fraction,
         ),
         "global_relative_l2_error": _tolerance_metric(
             metric="global_relative_l2_error",
             domain="frequency_domain",
             scope="global_norm",
             observed=analysis["relative_measurement_l2_error"],
-            threshold=_FREQUENCY_RELATIVE_L2_TOLERANCE,
+            threshold=descriptor.tolerance("frequency_global_relative_l2_error"),
+            guard_band_fraction=descriptor.guard_band_fraction,
         ),
         "spatial_imaginary_leakage": _tolerance_metric(
             metric="spatial_imaginary_leakage_max",
             domain="spatial_image_domain",
             scope="per_voxel",
             observed=analysis["max_imaginary_leakage"],
-            threshold=_IMAGINARY_LEAK_TOLERANCE,
+            threshold=descriptor.tolerance("imaginary_leakage_abs_error"),
+            guard_band_fraction=descriptor.guard_band_fraction,
         ),
     }
     ai_match_metrics = {
@@ -559,14 +660,16 @@ def _build_verified_manifest(
             domain="spatial_image_domain",
             scope="per_voxel",
             observed=analysis["max_ai_abs_error"],
-            threshold=_RECONSTRUCTION_TOLERANCE,
+            threshold=descriptor.tolerance("spatial_per_voxel_abs_error"),
+            guard_band_fraction=descriptor.guard_band_fraction,
         ),
         "global_relative_l2_error": _tolerance_metric(
             metric="global_relative_l2_error",
             domain="spatial_image_domain",
             scope="global_norm",
             observed=analysis["relative_ai_l2_error"],
-            threshold=_AI_RELATIVE_L2_TOLERANCE,
+            threshold=descriptor.tolerance("spatial_global_relative_l2_error"),
+            guard_band_fraction=descriptor.guard_band_fraction,
         ),
     }
     volume_metric = _tolerance_metric(
@@ -574,7 +677,8 @@ def _build_verified_manifest(
         domain="scalar_volume",
         scope="global_scalar",
         observed=abs(claimed_volume - analysis["computed_tumor_volume_mm3"]),
-        threshold=_VOLUME_TOLERANCE,
+        threshold=descriptor.tolerance("volume_absolute_error"),
+        guard_band_fraction=descriptor.guard_band_fraction,
     )
     consistency_verified = all(
         metric["within_tolerance"] for metric in measurement_metrics.values()
@@ -582,11 +686,48 @@ def _build_verified_manifest(
     ai_match_verified = all(metric["within_tolerance"] for metric in ai_match_metrics.values())
     mask_verified = analysis["mask_voxel_delta"] == 0
     volume_verified = volume_metric["within_tolerance"]
-    clinical_plausibility = _build_clinical_plausibility_manifest(analysis)
+    clinical_plausibility = _build_clinical_plausibility_manifest(analysis, descriptor)
+    heuristic_blocked = bool(clinical_plausibility["blocking_failures"])
+    profile_policy_blocked = not descriptor.release_semantics["final_release_allowed"]
+    proof_status = (
+        "passed"
+        if consistency_verified and ai_match_verified and mask_verified and volume_verified
+        else "failed"
+    )
+    profile_policy_status = (
+        "blocked" if heuristic_blocked or profile_policy_blocked else "passed"
+    )
+    block_category = "none"
+    if proof_status != "passed":
+        block_category = "proof_failure"
+    elif heuristic_blocked:
+        block_category = "heuristic_block"
+    elif profile_policy_blocked:
+        block_category = "profile_policy_block"
+    final_release_allowed = (
+        proof_status == "passed"
+        and not heuristic_blocked
+        and bool(descriptor.release_semantics["final_release_allowed"])
+    )
+    decision_class = "blocked"
+    if proof_status == "passed" and not heuristic_blocked:
+        decision_class = str(descriptor.release_semantics["success_decision_class"])
+    decision_summary = {
+        "proof_status": proof_status,
+        "profile_policy_status": profile_policy_status,
+        "decision_class": decision_class,
+        "block_category": block_category,
+        "final_release_allowed": final_release_allowed,
+        "operator_review_required": clinical_plausibility["operator_review_required"],
+    }
     manifest = {
-        "policy_name": MRI_GUARDIAN_POLICY_NAME,
-        "policy_version": MRI_GUARDIAN_POLICY_VERSION,
+        "profile_name": descriptor.profile_name,
+        "profile_revision": descriptor.profile_revision,
+        "profile_digest": descriptor.profile_digest(),
+        "icsd_policy_id": descriptor.icsd_policy_id,
+        "icsd_policy_version": descriptor.icsd_policy_version,
         "raw_hash": analysis["raw_hash"],
+        "verification_profile_descriptor": contracts["verification_profile_descriptor"],
         "ai_claim_envelope": contracts["ai_claim_envelope"],
         "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
         "mask_derivation_policy": contracts["mask_derivation_policy"],
@@ -595,6 +736,9 @@ def _build_verified_manifest(
         "ai_mask_hash": analysis["ai_mask_hash"],
         "verified_mask_hash": analysis["verified_mask_hash"],
         "reconstruction_algorithm": "numpy.ifft2_per_slice.real",
+        "performance_expectations": contracts["verification_profile_descriptor"][
+            "performance_expectations"
+        ],
         "mask_verification": {
             "verified": mask_verified,
             "algorithm": contracts["mask_derivation_policy"]["algorithm"],
@@ -615,10 +759,14 @@ def _build_verified_manifest(
             "max_abs_error": analysis["max_measurement_abs_error"],
             "relative_l2_error": analysis["relative_measurement_l2_error"],
             "max_imaginary_leakage": analysis["max_imaginary_leakage"],
-            "max_abs_tolerance": _RECONSTRUCTION_TOLERANCE,
-            "relative_l2_tolerance": _FREQUENCY_RELATIVE_L2_TOLERANCE,
-            "imaginary_leakage_tolerance": _IMAGINARY_LEAK_TOLERANCE,
-            "guard_band_fraction": _TOLERANCE_GUARD_BAND_FRACTION,
+            "max_abs_tolerance": descriptor.tolerance("frequency_per_coefficient_abs_error"),
+            "relative_l2_tolerance": descriptor.tolerance(
+                "frequency_global_relative_l2_error"
+            ),
+            "imaginary_leakage_tolerance": descriptor.tolerance(
+                "imaginary_leakage_abs_error"
+            ),
+            "guard_band_fraction": descriptor.guard_band_fraction,
             "metrics": measurement_metrics,
             "forward_projection_hash": analysis["forward_projection_hash"],
         },
@@ -631,9 +779,11 @@ def _build_verified_manifest(
             ),
             "max_abs_error": analysis["max_ai_abs_error"],
             "relative_l2_error": analysis["relative_ai_l2_error"],
-            "max_abs_tolerance": _RECONSTRUCTION_TOLERANCE,
-            "relative_l2_tolerance": _AI_RELATIVE_L2_TOLERANCE,
-            "guard_band_fraction": _TOLERANCE_GUARD_BAND_FRACTION,
+            "max_abs_tolerance": descriptor.tolerance("spatial_per_voxel_abs_error"),
+            "relative_l2_tolerance": descriptor.tolerance(
+                "spatial_global_relative_l2_error"
+            ),
+            "guard_band_fraction": descriptor.guard_band_fraction,
             "metrics": ai_match_metrics,
         },
         "tumor_volume_proof": {
@@ -650,13 +800,15 @@ def _build_verified_manifest(
             "ai_render_passthrough_allowed": False,
         },
         "clinical_plausibility": clinical_plausibility,
+        "decision_summary": decision_summary,
     }
-    manifest["verification_tiers"] = _build_verification_tiers(state, manifest)
+    manifest["verification_tiers"] = _build_verification_tiers(state, manifest, descriptor)
     return manifest
 
 
 def _build_clinical_plausibility_manifest(
     analysis: Mapping[str, Any],
+    descriptor: Any,
 ) -> dict[str, Any]:
     derived_reconstruction = np.asarray(analysis["derived_reconstruction"], dtype=np.float64)
     verified_mask = np.asarray(analysis["verified_mask"], dtype=np.int64)
@@ -665,26 +817,20 @@ def _build_clinical_plausibility_manifest(
     mask_fraction = 0.0
     if total_voxels:
         mask_fraction = verified_voxels / total_voxels
+    mask_rule = descriptor.heuristic("mask_fraction_guardrail")
     heuristics = [
-        _heuristic_entry(
+        _evaluate_heuristic_rule(
             code="mask_fraction_guardrail",
-            label="Verified occupancy fraction",
-            status=(
-                "warning"
-                if mask_fraction > _CLINICAL_PLAUSIBILITY_MAX_MASK_FRACTION
-                else "passed"
-            ),
-            message=(
+            rule=mask_rule,
+            observed=mask_fraction,
+            fail_message=(
                 "The verified mask occupies an unusually large share of the voxel grid "
-                f"({mask_fraction:.1%} vs advisory cap {_CLINICAL_PLAUSIBILITY_MAX_MASK_FRACTION:.0%})."
-                if mask_fraction > _CLINICAL_PLAUSIBILITY_MAX_MASK_FRACTION
-                else (
-                    "The verified mask occupies a bounded share of the voxel grid "
-                    f"({mask_fraction:.1%})."
-                )
+                f"({mask_fraction:.1%} vs configured ceiling {mask_rule['threshold']:.0%})."
             ),
-            observed=_round_float(mask_fraction),
-            threshold=_round_float(_CLINICAL_PLAUSIBILITY_MAX_MASK_FRACTION),
+            pass_message=(
+                "The verified mask occupies a bounded share of the voxel grid "
+                f"({mask_fraction:.1%})."
+            ),
         ),
     ]
 
@@ -692,34 +838,30 @@ def _build_clinical_plausibility_manifest(
         inside_mean = float(np.mean(derived_reconstruction[verified_mask == 1]))
         outside_mean = float(np.mean(derived_reconstruction[verified_mask == 0]))
         contrast_delta = inside_mean - outside_mean
+        contrast_rule = descriptor.heuristic("inside_outside_contrast")
         heuristics.append(
-            _heuristic_entry(
+            _evaluate_heuristic_rule(
                 code="inside_outside_contrast",
-                label="Inside/outside contrast delta",
-                status=(
-                    "warning"
-                    if contrast_delta < _CLINICAL_PLAUSIBILITY_MIN_CONTRAST_DELTA
-                    else "passed"
-                ),
-                message=(
+                rule=contrast_rule,
+                observed=contrast_delta,
+                fail_message=(
                     "The verified lesion is not meaningfully brighter than the surrounding "
-                    f"background ({_round_float(contrast_delta)} vs advisory floor "
-                    f"{_round_float(_CLINICAL_PLAUSIBILITY_MIN_CONTRAST_DELTA)})."
-                    if contrast_delta < _CLINICAL_PLAUSIBILITY_MIN_CONTRAST_DELTA
-                    else (
-                        "The verified lesion remains visually separable from the "
-                        f"surrounding background (delta = {_round_float(contrast_delta)})."
-                    )
+                    f"background ({_round_float(contrast_delta)} vs configured floor "
+                    f"{_round_float(float(contrast_rule['threshold']))})."
                 ),
-                observed=_round_float(contrast_delta),
-                threshold=_round_float(_CLINICAL_PLAUSIBILITY_MIN_CONTRAST_DELTA),
+                pass_message=(
+                    "The verified lesion remains visually separable from the surrounding "
+                    f"background (delta = {_round_float(contrast_delta)})."
+                ),
             )
         )
     else:
+        contrast_rule = descriptor.heuristic("inside_outside_contrast")
         heuristics.append(
             _heuristic_entry(
                 code="inside_outside_contrast",
                 label="Inside/outside contrast delta",
+                severity=contrast_rule["severity"],
                 status="not_evaluated",
                 message=(
                     "Contrast heuristics were not evaluated because the verified mask "
@@ -729,24 +871,18 @@ def _build_clinical_plausibility_manifest(
         )
 
     slice_span = int(np.count_nonzero(np.any(verified_mask == 1, axis=(1, 2))))
+    slice_rule = descriptor.heuristic("slice_span")
     heuristics.append(
-        _heuristic_entry(
+        _evaluate_heuristic_rule(
             code="slice_span",
-            label="Slice span",
-            status=(
-                "warning"
-                if verified_voxels and slice_span < _CLINICAL_PLAUSIBILITY_MIN_SLICE_SPAN
-                else "passed"
-            ),
-            message=(
+            rule=slice_rule,
+            observed=float(slice_span),
+            fail_message=(
                 "The verified lesion only appears on "
-                f"{slice_span} slice(s), below the advisory floor of "
-                f"{_CLINICAL_PLAUSIBILITY_MIN_SLICE_SPAN}."
-                if verified_voxels and slice_span < _CLINICAL_PLAUSIBILITY_MIN_SLICE_SPAN
-                else f"The verified lesion spans {slice_span} slice(s)."
+                f"{slice_span} slice(s), below the configured floor of "
+                f"{_round_float(float(slice_rule['threshold']))}."
             ),
-            observed=slice_span,
-            threshold=_CLINICAL_PLAUSIBILITY_MIN_SLICE_SPAN,
+            pass_message=f"The verified lesion spans {slice_span} slice(s).",
         )
     )
 
@@ -759,17 +895,50 @@ def _build_clinical_plausibility_manifest(
         for entry in heuristics
         if entry["status"] == "warning"
     ]
-    status = "warning" if warnings else "passed"
+    advisories = [
+        {
+            "code": entry["code"],
+            "label": entry["label"],
+            "message": entry["message"],
+        }
+        for entry in heuristics
+        if entry["status"] == "advisory"
+    ]
+    blocking_failures = [
+        {
+            "code": entry["code"],
+            "label": entry["label"],
+            "message": entry["message"],
+        }
+        for entry in heuristics
+        if entry["status"] == "failed"
+    ]
+    status = "passed"
+    if blocking_failures:
+        status = "failed"
+    elif warnings:
+        status = "warning"
+    elif advisories:
+        status = "advisory"
     return {
-        "advisory_only": True,
+        "blocking_configured": any(
+            rule["severity"] == HEURISTIC_BLOCKING
+            for rule in descriptor.heuristic_rules.values()
+        ),
         "status": status,
-        "summary": (
-            f"{len(warnings)} advisory clinical plausibility warning(s) detected."
-            if warnings
-            else "No advisory clinical plausibility warnings were detected."
+        "summary": _clinical_plausibility_summary(
+            warnings=warnings,
+            advisories=advisories,
+            blocking_failures=blocking_failures,
         ),
         "warning_count": len(warnings),
+        "advisory_count": len(advisories),
+        "blocking_failure_count": len(blocking_failures),
+        "operator_review_required": bool(warnings)
+        and bool(descriptor.release_semantics["requires_operator_review_on_warning"]),
         "warnings": warnings,
+        "advisories": advisories,
+        "blocking_failures": blocking_failures,
         "heuristics": heuristics,
     }
 
@@ -777,6 +946,7 @@ def _build_clinical_plausibility_manifest(
 def _build_verification_tiers(
     state: Mapping[str, Any],
     manifest: Mapping[str, Any],
+    descriptor: Any,
 ) -> dict[str, Any]:
     structural_checks = _build_structural_validity_checks(state)
     structural_status = _tier_status_from_checks(structural_checks)
@@ -824,8 +994,8 @@ def _build_verification_tiers(
         "level_3": {
             "level": 3,
             "title": "Level 3: Clinical Plausibility",
-            "subtitle": "Optional heuristics",
-            "blocking": False,
+            "subtitle": "Runtime profile heuristics",
+            "blocking": clinical_section["blocking_configured"],
             "status": clinical_section["status"],
             "summary": clinical_section["summary"],
             "checks": clinical_checks,
@@ -1061,6 +1231,7 @@ def _heuristic_entry(
     *,
     code: str,
     label: str,
+    severity: str,
     status: str,
     message: str,
     observed: float | int | None = None,
@@ -1069,6 +1240,7 @@ def _heuristic_entry(
     entry = {
         "code": code,
         "label": label,
+        "severity": severity,
         "status": status,
         "message": message,
     }
@@ -1079,9 +1251,82 @@ def _heuristic_entry(
     return entry
 
 
+def _evaluate_heuristic_rule(
+    *,
+    code: str,
+    rule: Mapping[str, Any],
+    observed: float,
+    fail_message: str,
+    pass_message: str,
+) -> dict[str, Any]:
+    label = str(rule["label"])
+    severity = str(rule["severity"])
+    threshold = float(rule["threshold"])
+    if not bool(rule.get("enabled", True)) or severity == "disabled":
+        return _heuristic_entry(
+            code=code,
+            label=label,
+            severity=severity,
+            status="not_evaluated",
+            message="This heuristic is disabled for the active runtime profile.",
+        )
+    comparison = str(rule["comparison"])
+    passed = _heuristic_comparison_passed(
+        comparison=comparison,
+        observed=float(observed),
+        threshold=threshold,
+    )
+    if passed:
+        status = "passed"
+    elif severity == "blocking":
+        status = "failed"
+    elif severity == "warning":
+        status = "warning"
+    else:
+        status = "advisory"
+    return _heuristic_entry(
+        code=code,
+        label=label,
+        severity=severity,
+        status=status,
+        message=pass_message if passed else fail_message,
+        observed=_round_float(float(observed)),
+        threshold=_round_float(threshold),
+    )
+
+
+def _heuristic_comparison_passed(
+    *,
+    comparison: str,
+    observed: float,
+    threshold: float,
+) -> bool:
+    if comparison == "less_than_or_equal":
+        return observed <= threshold
+    if comparison == "greater_than_or_equal":
+        return observed >= threshold
+    raise ValueError(f"Unsupported heuristic comparison {comparison!r}.")
+
+
+def _clinical_plausibility_summary(
+    *,
+    warnings: list[dict[str, Any]],
+    advisories: list[dict[str, Any]],
+    blocking_failures: list[dict[str, Any]],
+) -> str:
+    if blocking_failures:
+        return f"{len(blocking_failures)} blocking clinical heuristic failure(s) detected."
+    if warnings:
+        return f"{len(warnings)} warning-level clinical heuristic finding(s) detected."
+    if advisories:
+        return f"{len(advisories)} advisory clinical heuristic finding(s) detected."
+    return "No clinical heuristic findings were detected."
+
+
 def _build_workstation_payload(
     state: Mapping[str, Any],
     analysis: Mapping[str, Any],
+    descriptor: Any,
 ) -> dict[str, Any]:
     return {
         "case_id": state["case_id"],
@@ -1090,8 +1335,11 @@ def _build_workstation_payload(
         "scanner_id": state["scanner_id"],
         "sequence_id": state["sequence_id"],
         "patient_pseudonym": state["patient_pseudonym"],
+        "profile_name": descriptor.profile_name,
+        "profile_revision": descriptor.profile_revision,
+        "profile_digest": descriptor.profile_digest(),
         "pixel_source": "harness_reconstructed_from_raw_kspace",
-        "overlay_mode": "policy_verified_mask_on_measured_grid",
+        "overlay_mode": "profile_verified_mask_on_measured_grid",
         "reconstruction_hash": analysis["derived_reconstruction_hash"],
         "verified_mask_hash": analysis["verified_mask_hash"],
         "tumor_volume_mm3": analysis["computed_tumor_volume_mm3"],
@@ -1145,10 +1393,11 @@ def _build_failure_reasons(
         reasons.append(
             {
                 "code": "mask_voxel_mismatch",
+                "category": "proof_failure",
                 "summary": f"mask_voxel_mismatch (delta = {mask_delta} voxels)",
                 "delta": mask_delta,
                 "message": (
-                    "The AI tumour mask does not match the policy-derived verified mask "
+                    "The AI tumour mask does not match the profile-derived verified mask "
                     "computed from the raw-derived reconstruction."
                 ),
                 "details": {
@@ -1174,12 +1423,13 @@ def _build_failure_reasons(
         reasons.append(
             {
                 "code": "intensity_manipulation_detected",
+                "category": "proof_failure",
                 "summary": summary,
                 "delta": intensity_delta,
                 "message": (
                     "The AI reconstruction no longer matches the deterministic reconstruction "
                     "recomputed from raw k-space under the explicit per-voxel and global-norm "
-                    "tolerance policy."
+                    "tolerance contract."
                 ),
                 "details": {
                     "max_abs_error": analysis["max_ai_abs_error"],
@@ -1194,6 +1444,7 @@ def _build_failure_reasons(
         reasons.append(
             {
                 "code": "tumor_volume_mismatch",
+                "category": "proof_failure",
                 "summary": (
                     "tumor_volume_mismatch "
                     f"(claimed = {claimed_volume} mm3; verified = {verified_volume} mm3)"
@@ -1210,6 +1461,7 @@ def _build_failure_reasons(
         reasons.append(
             {
                 "code": "raw_measurement_inconsistency",
+                "category": "proof_failure",
                 "summary": (
                     "raw_measurement_inconsistency "
                     f"(max |Δ| = {_format_metric_for_summary(analysis['max_measurement_abs_error'])}; "
@@ -1228,12 +1480,48 @@ def _build_failure_reasons(
                 },
             }
         )
+    for entry in manifest["clinical_plausibility"]["blocking_failures"]:
+        reasons.append(
+            {
+                "code": entry["code"],
+                "category": "heuristic_block",
+                "summary": f"{entry['code']} (blocking heuristic)",
+                "delta": None,
+                "message": entry["message"],
+                "details": {"source": "clinical_plausibility"},
+            }
+        )
+    if not manifest["decision_summary"]["final_release_allowed"] and manifest["decision_summary"][
+        "decision_class"
+    ] == DECISION_CLASS_TRIAGE_ONLY:
+        reasons.append(
+            {
+                "code": "non_final_profile_selected",
+                "category": "profile_policy_block",
+                "summary": (
+                    "non_final_profile_selected "
+                    f"(decision_class = {manifest['decision_summary']['decision_class']})"
+                ),
+                "delta": None,
+                "message": (
+                    "The selected runtime profile is triage-only and cannot produce a final "
+                    "released state or portable evidence bundle."
+                ),
+                "details": {
+                    "profile_name": manifest["profile_name"],
+                    "decision_class": manifest["decision_summary"]["decision_class"],
+                },
+            }
+        )
     return reasons
 
 
-def _derive_verified_mask(derived_reconstruction: np.ndarray) -> np.ndarray:
+def _derive_verified_mask(
+    derived_reconstruction: np.ndarray,
+    descriptor: Any,
+) -> np.ndarray:
     reconstruction = np.asarray(derived_reconstruction, dtype=np.float64)
-    return (reconstruction >= _VERIFIED_MASK_THRESHOLD).astype(np.int64)
+    return (reconstruction >= descriptor.mask_threshold).astype(np.int64)
 
 
 def _tolerance_metric(
@@ -1243,11 +1531,12 @@ def _tolerance_metric(
     scope: str,
     observed: float,
     threshold: float,
+    guard_band_fraction: float,
 ) -> dict[str, Any]:
     observed_value = _round_metric_float(float(observed))
     threshold_value = _round_metric_float(float(threshold))
     guard_band_threshold = _round_metric_float(
-        threshold_value * _TOLERANCE_GUARD_BAND_FRACTION
+        threshold_value * float(guard_band_fraction)
     )
     if observed_value > threshold_value:
         boundary_status = "exceeded"
@@ -1261,7 +1550,7 @@ def _tolerance_metric(
         "scope": scope,
         "observed": observed_value,
         "threshold": threshold_value,
-        "guard_band_fraction": _TOLERANCE_GUARD_BAND_FRACTION,
+        "guard_band_fraction": _round_metric_float(float(guard_band_fraction)),
         "guard_band_threshold": guard_band_threshold,
         "within_tolerance": observed_value <= threshold_value,
         "boundary_status": boundary_status,
@@ -1272,6 +1561,7 @@ def _tolerance_metric(
 def _build_claim_to_proof_contracts(
     state: Mapping[str, Any],
     analysis: Mapping[str, Any],
+    descriptor: Any,
 ) -> dict[str, Any]:
     ai_claim_envelope = build_ai_claim_envelope(
         state=dict(state),
@@ -1280,24 +1570,44 @@ def _build_claim_to_proof_contracts(
         ai_mask_hash=analysis["ai_mask_hash"],
         claimed_tumor_volume_mm3=_round_float(float(state["tumor_volume_mm3"])),
     )
+    verification_profile_descriptor = build_verification_profile_contract(
+        descriptor.profile_name
+    )
     mask_derivation_policy = build_mask_derivation_policy(
-        policy_name=MRI_GUARDIAN_POLICY_NAME,
-        policy_version=MRI_GUARDIAN_POLICY_VERSION,
-        threshold=_VERIFIED_MASK_THRESHOLD,
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        icsd_policy_id=descriptor.icsd_policy_id,
+        icsd_policy_version=descriptor.icsd_policy_version,
+        threshold=descriptor.mask_threshold,
     )
     verification_tolerance_policy = build_verification_tolerance_policy(
-        policy_name=MRI_GUARDIAN_POLICY_NAME,
-        policy_version=MRI_GUARDIAN_POLICY_VERSION,
-        guard_band_fraction=_TOLERANCE_GUARD_BAND_FRACTION,
-        spatial_per_voxel_abs_error=_RECONSTRUCTION_TOLERANCE,
-        spatial_global_relative_l2_error=_AI_RELATIVE_L2_TOLERANCE,
-        frequency_per_coefficient_abs_error=_RECONSTRUCTION_TOLERANCE,
-        frequency_global_relative_l2_error=_FREQUENCY_RELATIVE_L2_TOLERANCE,
-        imaginary_leakage_abs_error=_IMAGINARY_LEAK_TOLERANCE,
-        volume_absolute_error=_VOLUME_TOLERANCE,
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        icsd_policy_id=descriptor.icsd_policy_id,
+        icsd_policy_version=descriptor.icsd_policy_version,
+        guard_band_fraction=descriptor.guard_band_fraction,
+        spatial_per_voxel_abs_error=descriptor.tolerance("spatial_per_voxel_abs_error"),
+        spatial_global_relative_l2_error=descriptor.tolerance(
+            "spatial_global_relative_l2_error"
+        ),
+        frequency_per_coefficient_abs_error=descriptor.tolerance(
+            "frequency_per_coefficient_abs_error"
+        ),
+        frequency_global_relative_l2_error=descriptor.tolerance(
+            "frequency_global_relative_l2_error"
+        ),
+        imaginary_leakage_abs_error=descriptor.tolerance("imaginary_leakage_abs_error"),
+        volume_absolute_error=descriptor.tolerance("volume_absolute_error"),
     )
     verified_reconstruction_trace = build_verified_reconstruction_trace(
         case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        icsd_policy_id=descriptor.icsd_policy_id,
+        icsd_policy_version=descriptor.icsd_policy_version,
         raw_kspace_hash=analysis["raw_hash"],
         derived_reconstruction_hash=analysis["derived_reconstruction_hash"],
         forward_projection_hash=analysis["forward_projection_hash"],
@@ -1314,6 +1624,7 @@ def _build_claim_to_proof_contracts(
         mask_voxel_delta=analysis["mask_voxel_delta"],
     )
     return {
+        "verification_profile_descriptor": verification_profile_descriptor,
         "ai_claim_envelope": ai_claim_envelope,
         "verified_reconstruction_trace": verified_reconstruction_trace,
         "mask_derivation_policy": mask_derivation_policy,

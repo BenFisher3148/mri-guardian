@@ -10,6 +10,8 @@ The Guardian Layer must prove integrity without making the hospital handoff oper
 - a shape-scoped worst-case bound
 - a streaming strategy that starts verification early without weakening the release gate
 
+Each runtime profile also declares performance expectations. Those expectations are monitoring surfaces only; they do not change proof validity, replay validity, or final-release eligibility unless a separate operational policy chooses to act on them.
+
 ## Benchmark Method
 
 Benchmarking is implemented in [`mri_guardian/timing.py`](../mri_guardian/timing.py).
@@ -32,7 +34,7 @@ Current parameters:
 
 The authoritative machine-readable record is [`../demo_artifacts/performance_profile.json`](../demo_artifacts/performance_profile.json).
 
-On the current local run dated March 26, 2026, the generated profile reported:
+On the current local run dated March 26, 2026, the generated `brain_t1_baseline` performance profile reported:
 
 | Probe | Shape | Voxels | Reconstruction | Verification | Total | Overhead |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -49,6 +51,13 @@ Derived worst-case bound on the largest profiled volume:
 Backend on that run:
 
 - `NumPy FFT core (2.4.3) with Numba available (0.64.0)`
+
+The profile artifact also records:
+
+- `profile_name`, `profile_revision`, and `profile_digest`
+- the embedded `verification_profile_descriptor`
+- `performance_expectations.normative = false`
+- budget-versus-observed comparisons for representative and worst-case totals
 
 ## Worst-Case Bound Policy
 
