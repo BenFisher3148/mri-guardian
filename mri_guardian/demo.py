@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 from icsd.core.serialise import canonical_json_dumps
 
@@ -13,10 +14,13 @@ from .bundle import (
     write_portable_evidence_bundle,
 )
 from .harness import (
+    MULTI_SERIES_CASE_KIND,
     MriGuardianHarness,
     build_case_verification_report,
     build_demo_authority_sources,
     build_demo_case,
+    build_multi_series_demo_authority_sources,
+    build_multi_series_demo_case,
     render_release_bundle_json,
 )
 from .integration import (
@@ -43,15 +47,18 @@ def run_demo(
     output_dir: Path | str,
     profile_name: str = DEFAULT_PROFILE_NAME,
     tamper_mode: bool = False,
+    case_kind: str = "single_series_v1",
 ) -> None:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     (output_path / "comparison_rejected_candidate.html").unlink(missing_ok=True)
     descriptor = get_verification_profile(profile_name)
-    case_state = build_demo_case(profile_name=descriptor.profile_name)
+    if case_kind == MULTI_SERIES_CASE_KIND:
+        case_state = build_multi_series_demo_case()
+    else:
+        case_state = build_demo_case(profile_name=descriptor.profile_name)
     pending_report = build_case_verification_report(
         case_state,
-        profile_name=descriptor.profile_name,
     )
     _write_profile_artifacts(output_path, pending_report["profile"])
     (output_path / "verification_report.json").write_text(
@@ -59,7 +66,7 @@ def run_demo(
         encoding="utf-8",
     )
     (output_path / "performance_profile.json").write_text(
-        f"{canonical_json_dumps(build_guardian_performance_profile(descriptor.profile_name))}\n",
+        f"{canonical_json_dumps(_build_demo_performance_profile(case_state, pending_report, descriptor.profile_name))}\n",
         encoding="utf-8",
     )
     (output_path / "comparison.html").write_text(
@@ -88,16 +95,24 @@ def run_demo(
         transparency_log_path=output_path / "transparency-log.jsonl",
         default_profile_name=descriptor.profile_name,
     )
-    result = harness.release_case(
-        state=case_state,
-        actor="guardian:demo",
-        authority_sources=build_demo_authority_sources(
-            case_id=case_state["case_id"],
+    if case_kind == MULTI_SERIES_CASE_KIND:
+        result = harness.release_multi_series_case(
+            state=case_state,
+            actor="guardian:demo",
+            authority_sources_by_series_id=build_multi_series_demo_authority_sources(),
+            timestamp=DEMO_TIMESTAMP,
+        )
+    else:
+        result = harness.release_case(
+            state=case_state,
+            actor="guardian:demo",
+            authority_sources=build_demo_authority_sources(
+                case_id=case_state["case_id"],
+                profile_name=descriptor.profile_name,
+            ),
             profile_name=descriptor.profile_name,
-        ),
-        profile_name=descriptor.profile_name,
-        timestamp=DEMO_TIMESTAMP,
-    )
+            timestamp=DEMO_TIMESTAMP,
+        )
     (output_path / "evidence.json").write_text(
         f"{result.evidence_json}\n",
         encoding="utf-8",
@@ -112,27 +127,30 @@ def run_demo(
         encoding="utf-8",
     )
     report = build_case_verification_report(result.after_state)
-    (output_path / "ai_claim_envelope.json").write_text(
-        f"{canonical_json_dumps(report['contracts']['ai_claim_envelope'])}\n",
-        encoding="utf-8",
-    )
     _write_profile_artifacts(output_path, report["contracts"]["verification_profile_descriptor"])
     (output_path / "verification_report.json").write_text(
         f"{canonical_json_dumps(report)}\n",
         encoding="utf-8",
     )
-    (output_path / "verified_reconstruction_trace.json").write_text(
-        f"{canonical_json_dumps(report['contracts']['verified_reconstruction_trace'])}\n",
-        encoding="utf-8",
-    )
-    (output_path / "mask_derivation_policy.json").write_text(
-        f"{canonical_json_dumps(report['contracts']['mask_derivation_policy'])}\n",
-        encoding="utf-8",
-    )
-    (output_path / "verification_tolerance_policy.json").write_text(
-        f"{canonical_json_dumps(report['contracts']['verification_tolerance_policy'])}\n",
-        encoding="utf-8",
-    )
+    if result.after_state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        _write_multi_series_contract_artifacts(output_path, report)
+    else:
+        (output_path / "ai_claim_envelope.json").write_text(
+            f"{canonical_json_dumps(report['contracts']['ai_claim_envelope'])}\n",
+            encoding="utf-8",
+        )
+        (output_path / "verified_reconstruction_trace.json").write_text(
+            f"{canonical_json_dumps(report['contracts']['verified_reconstruction_trace'])}\n",
+            encoding="utf-8",
+        )
+        (output_path / "mask_derivation_policy.json").write_text(
+            f"{canonical_json_dumps(report['contracts']['mask_derivation_policy'])}\n",
+            encoding="utf-8",
+        )
+        (output_path / "verification_tolerance_policy.json").write_text(
+            f"{canonical_json_dumps(report['contracts']['verification_tolerance_policy'])}\n",
+            encoding="utf-8",
+        )
     bundle_path = output_path / f"{case_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
     write_portable_evidence_bundle(
         result=result,
@@ -184,11 +202,18 @@ def main() -> int:
         action="store_true",
         help="Write deterministic tamper-mode reports that demonstrate live failure detection.",
     )
+    parser.add_argument(
+        "--case-kind",
+        choices=("single_series_v1", MULTI_SERIES_CASE_KIND),
+        default="single_series_v1",
+        help="Generate either the legacy single-series demo or the additive multi-series v2 demo.",
+    )
     args = parser.parse_args()
     run_demo(
         output_dir=args.output_dir,
         profile_name=args.profile,
         tamper_mode=args.tamper_mode,
+        case_kind=args.case_kind,
     )
     return 0
 
@@ -237,6 +262,60 @@ def _write_profile_artifacts(output_path: Path, payload: dict[str, object]) -> N
     content = f"{canonical_json_dumps(payload)}\n"
     for filename in _PROFILE_ARTIFACT_NAMES:
         (output_path / filename).write_text(content, encoding="utf-8")
+
+
+def _write_multi_series_contract_artifacts(
+    output_path: Path,
+    report: dict[str, Any],
+) -> None:
+    (output_path / "cross_series_verification_policy.json").write_text(
+        f"{canonical_json_dumps(report['contracts']['cross_series_verification_policy'])}\n",
+        encoding="utf-8",
+    )
+    (output_path / "cross_series_verification_trace.json").write_text(
+        f"{canonical_json_dumps(report['contracts']['cross_series_verification_trace'])}\n",
+        encoding="utf-8",
+    )
+    series_contracts = {
+        "case_kind": MULTI_SERIES_CASE_KIND,
+        "series": [
+            {
+                "series_id": item["series_id"],
+                "resolved_role": item["resolved_role"],
+                "gating_status": item["gating_status"],
+                "series_proof_status": item["series_proof_status"],
+                "downstream_release_allowed": item["downstream_release_allowed"],
+                "contracts": item["contracts"],
+            }
+            for item in report["series_reports"]
+        ],
+    }
+    (output_path / "series_contracts.json").write_text(
+        f"{canonical_json_dumps(series_contracts)}\n",
+        encoding="utf-8",
+    )
+
+
+def _build_demo_performance_profile(
+    state: dict[str, Any],
+    pending_report: dict[str, Any],
+    fallback_profile_name: str,
+) -> dict[str, Any]:
+    if state.get("case_kind") != MULTI_SERIES_CASE_KIND:
+        return build_guardian_performance_profile(fallback_profile_name)
+    return {
+        "case_kind": MULTI_SERIES_CASE_KIND,
+        "series": [
+            {
+                "series_id": item["series_id"],
+                "profile_name": item["profile"]["profile_name"],
+                "performance_profile": build_guardian_performance_profile(
+                    item["profile"]["profile_name"]
+                ),
+            }
+            for item in pending_report["series_reports"]
+        ],
+    }
 
 
 if __name__ == "__main__":

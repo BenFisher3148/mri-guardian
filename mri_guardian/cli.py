@@ -14,6 +14,7 @@ from icsd.core.serialise import canonical_json_dumps
 
 from .bundle import MRI_GUARD_BUNDLE_EXTENSION, verify_bundle
 from .demo import run_demo
+from .harness import MULTI_SERIES_CASE_KIND
 from .profiles import DEFAULT_PROFILE_NAME
 
 
@@ -43,6 +44,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--tamper-mode",
         action="store_true",
         help="Include deterministic tamper-mode artifacts.",
+    )
+    demo_parser.add_argument(
+        "--case-kind",
+        choices=("single_series_v1", MULTI_SERIES_CASE_KIND),
+        default="single_series_v1",
+        help="Generate either the legacy single-series demo or the additive multi-series v2 demo.",
     )
 
     verify_parser = subparsers.add_parser(
@@ -171,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output_dir,
             profile_name=args.profile,
             tamper_mode=args.tamper_mode,
+            case_kind=args.case_kind,
         )
         print(f"Demo artifacts written to {Path(args.output_dir)}")
         return 0

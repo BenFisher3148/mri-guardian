@@ -10,6 +10,7 @@ import numpy as np
 from icsd.core.serialise import hash_canonical_json
 
 from .harness import (
+    MULTI_SERIES_CASE_KIND,
     _extract_arrays,
     build_case_verification_report,
     _round_float,
@@ -26,6 +27,8 @@ def build_side_by_side_view_model(
     profile_name: str | None = None,
 ) -> dict[str, Any]:
     """Return a deterministic model for side-by-side AI versus verified review."""
+    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        return _build_multi_series_view_model(state)
     arrays, failure = _extract_arrays(state)
     if failure is not None:
         raise ValueError(failure.message)
@@ -159,6 +162,211 @@ def build_side_by_side_view_model(
     }
 
 
+def _build_multi_series_view_model(state: dict[str, Any]) -> dict[str, Any]:
+    report = build_case_verification_report(state)
+    primary_reason = (
+        report["failure_reasons"][0]["summary"]
+        if report["failure_reasons"]
+        else "all_blocking_checks_passed"
+    )
+    primary_series = next(
+        item for item in report["series_reports"] if item["resolved_role"] == "primary"
+    )
+    timing_profiles = [
+        {
+            "series_id": item["series_id"],
+            "profile_name": item["profile"]["profile_name"],
+            "timing": build_timing_overlay_snapshot(item["profile"]["profile_name"]),
+        }
+        for item in report["series_reports"]
+    ]
+    return {
+        "case_kind": MULTI_SERIES_CASE_KIND,
+        "title": "MRI Guardian Layer",
+        "subtitle": "Study-level verification across multiple MRI series.",
+        "release_eligible": bool(report["release_eligible"]),
+        "decision_summary": report["decision_summary"],
+        "verification": {
+            "headline": (
+                "Verification PASSED" if report["release_eligible"] else "Verification FAILED"
+            ),
+            "primary_reason_summary": primary_reason,
+            "reasons": report["failure_reasons"],
+            "tiers": [
+                {
+                    "code": key,
+                    "title": value["title"],
+                    "status": value["status"],
+                    "summary": value["summary"],
+                }
+                for key, value in report["verification_tiers"].items()
+            ],
+        },
+        "study": {
+            "required_series_ids": report["analysis"]["required_series_ids"],
+            "supporting_series_ids": report["analysis"]["supporting_series_ids"],
+            "auxiliary_series_ids": report["analysis"]["auxiliary_series_ids"],
+            "released_series_ids": report["analysis"]["released_series_ids"],
+            "withheld_series_ids": report["analysis"]["withheld_series_ids"],
+            "geometry_verification": report["analysis"]["geometry_verification"],
+            "lesion_corroboration": report["analysis"]["lesion_corroboration"],
+            "profile_descriptor_hash": hash_canonical_json(
+                report["contracts"]["verification_profile_descriptor"]
+            ),
+        },
+        "series": [
+            {
+                "series_id": item["series_id"],
+                "series_uid": item["series_uid"],
+                "sequence_id": item["sequence_id"],
+                "profile_name": item["profile"]["profile_name"],
+                "resolved_role": item["resolved_role"],
+                "gating_status": item["gating_status"],
+                "series_proof_status": item["series_proof_status"],
+                "series_release_eligible": item["series_release_eligible"],
+                "downstream_release_allowed": item["downstream_release_allowed"],
+                "primary_reason_summary": item["primary_reason_summary"],
+                "verified_mask_voxel_count": item["analysis"]["verified_mask_voxel_count"],
+                "computed_tumor_volume_mm3": item["analysis"]["computed_tumor_volume_mm3"],
+                "grid_signature": item["grid_signature"],
+            }
+            for item in report["series_reports"]
+        ],
+        "timing_profiles": timing_profiles,
+        "primary_profile_name": primary_series["profile"]["profile_name"],
+    }
+
+
+def _render_multi_series_report_html(
+    state: dict[str, Any],
+    *,
+    report_title: str | None = None,
+) -> str:
+    view_model = _build_multi_series_view_model(state)
+    title = report_title if report_title is not None else view_model["title"]
+    series_rows = "\n".join(
+        (
+            "<tr>"
+            f"<td>{escape(item['series_id'])}</td>"
+            f"<td>{escape(item['resolved_role'])}</td>"
+            f"<td>{escape(item['gating_status'])}</td>"
+            f"<td>{escape(item['profile_name'])}</td>"
+            f"<td>{escape(item['series_proof_status'])}</td>"
+            f"<td>{'Yes' if item['downstream_release_allowed'] else 'No'}</td>"
+            f"<td>{escape(item['primary_reason_summary'])}</td>"
+            "</tr>"
+        )
+        for item in view_model["series"]
+    )
+    tier_markup = "\n".join(
+        (
+            "<li>"
+            f"<strong>{escape(item['title'])}</strong>: "
+            f"{escape(item['status'])} - {escape(item['summary'])}"
+            "</li>"
+        )
+        for item in view_model["verification"]["tiers"]
+    )
+    reason_markup = "\n".join(
+        f"<li><strong>{escape(item['code'])}</strong>: {escape(item['message'])}</li>"
+        for item in view_model["verification"]["reasons"]
+    )
+    if not reason_markup:
+        reason_markup = "<li>all_blocking_checks_passed</li>"
+    released_series = ", ".join(view_model["study"]["released_series_ids"]) or "none"
+    withheld_series = ", ".join(view_model["study"]["withheld_series_ids"]) or "none"
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape(title)}</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: "Aptos", "Segoe UI Variable", "Trebuchet MS", sans-serif;
+      background: linear-gradient(135deg, #f8f1e6 0%, #ebe1d2 100%);
+      color: #101820;
+    }}
+    main {{
+      width: min(1120px, calc(100vw - 32px));
+      margin: 24px auto;
+      display: grid;
+      gap: 18px;
+    }}
+    section {{
+      background: rgba(255, 248, 239, 0.94);
+      border-radius: 20px;
+      padding: 20px;
+      box-shadow: 0 18px 40px rgba(16, 24, 32, 0.12);
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+    }}
+    th, td {{
+      padding: 10px 8px;
+      border-bottom: 1px solid rgba(16, 24, 32, 0.12);
+      text-align: left;
+      vertical-align: top;
+    }}
+    .status {{
+      font-weight: 700;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <p class="status">{escape(view_model['verification']['headline'])}</p>
+      <h1>{escape(title)}</h1>
+      <p>{escape(view_model['subtitle'])}</p>
+      <p>Primary reason: {escape(view_model['verification']['primary_reason_summary'])}</p>
+      <p>Released series: {escape(released_series)}</p>
+      <p>Withheld series: {escape(withheld_series)}</p>
+    </section>
+    <section>
+      <h2>Study Gate</h2>
+      <ul>
+        <li>Required series: {escape(", ".join(view_model['study']['required_series_ids']))}</li>
+        <li>Supporting series: {escape(", ".join(view_model['study']['supporting_series_ids']))}</li>
+        <li>Auxiliary series: {escape(", ".join(view_model['study']['auxiliary_series_ids']))}</li>
+        <li>Geometry rule: {escape(view_model['study']['geometry_verification']['rule'])}</li>
+        <li>Corroboration rule: {escape(view_model['study']['lesion_corroboration']['rule'])}</li>
+      </ul>
+    </section>
+    <section>
+      <h2>Verification Tiers</h2>
+      <ul>{tier_markup}</ul>
+    </section>
+    <section>
+      <h2>Series Register</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Series</th>
+            <th>Role</th>
+            <th>Gate</th>
+            <th>Profile</th>
+            <th>Proof</th>
+            <th>Released</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          {series_rows}
+        </tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Failure Reasons</h2>
+      <ul>{reason_markup}</ul>
+    </section>
+  </main>
+</body>
+</html>"""
+
+
 def render_side_by_side_report_html(
     state: dict[str, Any],
     *,
@@ -166,6 +374,8 @@ def render_side_by_side_report_html(
     profile_name: str | None = None,
 ) -> str:
     """Render a self-contained HTML report for human review."""
+    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        return _render_multi_series_report_html(state, report_title=report_title)
     view_model = build_side_by_side_view_model(state, profile_name=profile_name)
     title = report_title if report_title is not None else view_model["title"]
     summary = view_model["summary"]

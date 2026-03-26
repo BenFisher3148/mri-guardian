@@ -32,6 +32,8 @@ The repository currently uses mocked DICOM narratives in [`mri_guardian/integrat
 - egress transport: `dicom-c-store`
 - study and patient context are preserved across ingress and egress
 - only Guardian-verified derived series are emitted from the Guardian path
+- in `multi_series_v2`, the ingress envelope carries one study-shaped Guardian case with ordered payload series and one study-level cross-series policy
+- in `multi_series_v2`, the egress package includes one study-level manifest/evidence summary plus only downstream-allowed released series; withheld auxiliary series are explicit in the study payload rather than silently disappearing
 
 Current mocked object mapping:
 
@@ -45,6 +47,12 @@ Current mocked object mapping:
 | Egress | verified segmentation | `Segmentation Storage (mock)` |
 | Egress | verification manifest | `Comprehensive SR Storage (mock)` |
 | Egress | ICSD evidence | `Encapsulated JSON Storage (mock)` |
+
+For `multi_series_v2`, the mocked egress submission keeps two levels distinct:
+
+- `series_manifests` covers every payload series in proof-significant order, including failed auxiliaries
+- `series_payloads` covers only the released downstream subset
+- `withheld_series` records series omitted from downstream release together with their role and proof outcome
 
 ## Current Interoperability Artifacts
 

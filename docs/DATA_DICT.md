@@ -26,6 +26,23 @@ The base case state is the canonical input to the verification harness.
 | `verified_manifest` | `dict | None` | Deterministic proof manifest, populated only on release. |
 | `workstation_payload` | `dict | None` | Verified downstream payload, populated only on release. |
 
+## Multi-Series Case State
+
+`multi_series_v2` adds a study-level wrapper around the existing single-series fields.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `case_kind` | `str` | Fixed to `multi_series_v2` for the study-level path. |
+| `case_id` | `str` | Stable study identifier used across artifacts. |
+| `patient_pseudonym` | `str` | Study-level pseudonymized patient identifier. |
+| `study_uid` | `str` | Study identifier preserved across ingress and egress. |
+| `scanner_id` | `str` | Study-level scanner identifier. |
+| `release_status` | `str` | `pending_verification` or `released_to_radiologist`. |
+| `series` | `list[dict]` | Ordered payload series. Each entry contains a unique `series_id` plus the existing per-series raw, AI, mask, volume, and embedded profile fields. |
+| `cross_series_policy` | `dict` | Study-level gate selecting `primary_series_id`, `supporting_series_ids`, `required_series_ids`, the geometry rule, and the corroboration rule. |
+| `verified_manifest` | `dict | None` | Released study manifest. Includes every payload series in proof-significant order. |
+| `workstation_payload` | `dict | None` | Released study payload. Includes only downstream-allowed series plus an explicit withheld-series summary. |
+
 ## Released Workstation Payload
 
 Current top-level keys from [`../demo_artifacts/workstation_payload.json`](../demo_artifacts/workstation_payload.json):
@@ -48,6 +65,11 @@ Current top-level keys from [`../demo_artifacts/workstation_payload.json`](../de
 | `tumor_volume_mm3` | `float` | Verified tumour volume. |
 | `reconstruction` | `list[list[list[float]]]` | Released raw-derived reconstruction. |
 | `verified_mask` | `list[list[list[int]]]` | Released verified mask. |
+
+For `multi_series_v2`, the top-level released payload contains:
+
+- `series_payloads`: only the series that remain downstream-allowed after the merged study gate
+- `withheld_series`: explicit summaries for payload series that were preserved in study artifacts but omitted from downstream release
 
 ## Evidence Envelope
 
@@ -78,6 +100,9 @@ Defined in [`../mri_guardian/contracts.py`](../mri_guardian/contracts.py).
 | `MaskDerivationPolicy` | Deterministic mapping from raw-derived reconstruction to verified mask | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, proof-significant `algorithm`, and canonical resolved `parameters` |
 | `VerificationTolerancePolicy` | Explicit numeric tolerance contract | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, per-voxel, per-frequency, global-norm, imaginary leakage, and volume tolerances |
 | `VerifiedReconstructionTrace` | Proof trace from raw k-space to verified reconstruction, mask, and volume | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, raw hash, derived hash, verified mask hash, measurement metrics, claim comparison metrics |
+| `CrossSeriesVerificationPolicy` | Study-level multi-series gate contract | `primary_series_id`, canonicalized `supporting_series_ids`, canonicalized `required_series_ids`, geometry rule, corroboration rule |
+| `CrossSeriesVerificationTrace` | Study-level trace for geometry, corroboration, and merged release evaluation | `geometry_verification`, `lesion_corroboration`, `merged_release_evaluation` |
+| `MultiSeriesVerificationProfileDescriptorSet` | Ordered wrapper around per-series runtime profile descriptors | proof-significant ordered `series_descriptors` list |
 | `GuardianIntegrationNarrative` | Hospital-facing integration narrative | DICOM compliance story, hospital placement, fail-closed behaviour |
 
 ### Mask Policy Shape
@@ -101,6 +126,19 @@ Released manifests expose `mask_verification` in two logical sections:
 - `comparison`: exact-match outcome over AI vs verified mask, including voxel counts and deltas
 
 Flat compatibility aliases may still appear during the transition, but future non-threshold families should rely on canonical `mask_rules` and `policy`/`comparison` structure rather than `mask_threshold`.
+
+### Multi-Series Gating Shape
+
+- `required_series_ids` is the only authoritative merged-release gating set.
+- `primary_series_id` must appear exactly once in `required_series_ids`.
+- For this milestone, every `supporting_series_id` is required and every payload series outside `required_series_ids` is auxiliary.
+- Duplicate payload `series_id` values are a structural study-shape failure and stop meaningful cross-series evaluation.
+- `supporting_series_ids` must be non-empty in `multi_series_v2`; this is a hard validation error rather than an automatic downgrade to single-series.
+- `required_series_ids` and `supporting_series_ids` are canonicalized into outer study order. Caller order is not proof-significant.
+- Geometry equality is exact equality over canonicalized voxel spacing plus exact voxel shape.
+- Positive-lesion corroboration uses exact coordinate intersection count `> 0`.
+- If every required verified mask is empty, corroboration passes; lesion absence is not separately cross-series corroborated in this milestone.
+- `series_manifests` includes all payload series in proof-significant order; `series_payloads` includes only downstream-allowed series and `withheld_series` records explicit omissions.
 
 ## Integration Artifacts
 

@@ -29,11 +29,15 @@ from mri_guardian.demo import run_demo
 from mri_guardian.harness import (
     MRI_GUARDIAN_POLICY_NAME,
     MRI_GUARDIAN_POLICY_VERSION,
+    MULTI_SERIES_CASE_KIND,
     RELEASE_STATUS_RELEASED,
     MriGuardianHarness,
     build_case_verification_report,
     build_demo_authority_sources,
     build_demo_case,
+    build_multi_series_case_verification_report,
+    build_multi_series_demo_authority_sources,
+    build_multi_series_demo_case,
 )
 from mri_guardian.integration import (
     build_guardian_integration_narrative,
@@ -1358,6 +1362,155 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(integration_trace["pipeline"][1]["decision"], "blocked")
         self.assertEqual(integration_trace["pipeline"][2]["label"], "PACS Output Blocked")
 
+    def test_multi_series_duplicate_series_id_is_structural_shape_failure(self) -> None:
+        state = build_multi_series_demo_case()
+        state["series"][1]["series_id"] = state["series"][0]["series_id"]
+
+        with self.assertRaisesRegex(ValueError, "duplicate payload series_id"):
+            build_multi_series_case_verification_report(state)
+
+    def test_multi_series_requires_non_empty_supporting_list(self) -> None:
+        state = build_multi_series_demo_case()
+        state["cross_series_policy"]["supporting_series_ids"] = []
+        state["cross_series_policy"]["required_series_ids"] = ["t1-primary"]
+
+        with self.assertRaisesRegex(ValueError, "supporting_series_ids"):
+            build_multi_series_case_verification_report(state)
+
+    def test_multi_series_demo_case_releases_and_records_study_manifest(self) -> None:
+        state, result = self._release_multi_series_demo_case()
+        manifest = result.after_state["verified_manifest"]
+        workstation_payload = result.after_state["workstation_payload"]
+
+        self.assertEqual(result.after_state["release_status"], RELEASE_STATUS_RELEASED)
+        self.assertEqual(manifest["case_kind"], MULTI_SERIES_CASE_KIND)
+        self.assertEqual(len(manifest["series_manifests"]), 4)
+        self.assertEqual(
+            [item["resolved_role"] for item in manifest["series_manifests"]],
+            ["primary", "supporting", "supporting", "auxiliary"],
+        )
+        self.assertTrue(manifest["cross_series_verification"]["geometry_verification"]["verified"])
+        self.assertTrue(manifest["cross_series_verification"]["lesion_corroboration"]["verified"])
+        self.assertEqual(len(workstation_payload["series_payloads"]), 4)
+        self.assertEqual(workstation_payload["withheld_series"], [])
+        report = build_multi_series_case_verification_report(result.after_state)
+        self.assertTrue(report["release_eligible"])
+        self.assertEqual(report["contracts"]["verification_profile_descriptor"], report["profile"])
+
+    def test_multi_series_geometry_mismatch_blocks_merged_release(self) -> None:
+        state = build_multi_series_demo_case()
+        supporting = self._series_entry(state, "t2-supporting")
+        supporting["voxel_spacing_mm"] = [1.0, 0.8, 2.5]
+        supporting["tumor_volume_mm3"] = round(
+            float(np.sum(supporting["tumor_mask"]) * np.prod(supporting["voxel_spacing_mm"])),
+            9,
+        )
+
+        report = build_multi_series_case_verification_report(state)
+
+        self.assertFalse(report["release_eligible"])
+        self.assertEqual(
+            report["decision_summary"]["block_category"],
+            "required_series_geometry_mismatch",
+        )
+        self.assertIn("t2-supporting", report["failure_reasons"][0]["details"]["mismatched_series_ids"])
+
+    def test_multi_series_missing_required_series_is_reported_explicitly(self) -> None:
+        state = build_multi_series_demo_case()
+        state["cross_series_policy"]["supporting_series_ids"] = ["t2-supporting", "missing-support"]
+        state["cross_series_policy"]["required_series_ids"] = ["t1-primary", "t2-supporting", "missing-support"]
+
+        report = build_multi_series_case_verification_report(state)
+
+        self.assertFalse(report["release_eligible"])
+        self.assertEqual(report["decision_summary"]["block_category"], "missing_required_series")
+        self.assertEqual(
+            report["failure_reasons"][0]["details"]["missing_required_series_ids"],
+            ["missing-support"],
+        )
+
+    def test_multi_series_primary_positive_requires_at_least_one_supporting_overlap(self) -> None:
+        state = build_multi_series_demo_case()
+
+        report = build_multi_series_case_verification_report(state)
+
+        self.assertTrue(report["release_eligible"])
+        supporting = report["analysis"]["lesion_corroboration"]["supporting_series"]
+        overlap_map = {item["series_id"]: item["intersection_voxel_count"] for item in supporting}
+        self.assertGreater(overlap_map["t2-supporting"], 0)
+        self.assertEqual(overlap_map["flair-supporting"], 0)
+
+    def test_multi_series_supporting_only_lesion_blocks_release(self) -> None:
+        state = build_multi_series_demo_case()
+        primary_shape = np.asarray(self._series_entry(state, "t1-primary")["ai_reconstruction"]).shape
+        self._rewrite_series_for_profile(
+            state,
+            "t1-primary",
+            np.zeros(primary_shape, dtype=np.float64),
+        )
+
+        report = build_multi_series_case_verification_report(state)
+
+        self.assertFalse(report["release_eligible"])
+        self.assertEqual(
+            report["decision_summary"]["block_category"],
+            "positive_lesion_corroboration_failed",
+        )
+        self.assertIn("primary verified mask is empty", report["failure_reasons"][-1]["message"])
+
+    def test_multi_series_all_required_empty_masks_pass_corroboration(self) -> None:
+        state = build_multi_series_demo_case()
+        for series_id in ("t1-primary", "t2-supporting", "flair-supporting"):
+            shape = np.asarray(self._series_entry(state, series_id)["ai_reconstruction"]).shape
+            self._rewrite_series_for_profile(
+                state,
+                series_id,
+                np.zeros(shape, dtype=np.float64),
+            )
+
+        report = build_multi_series_case_verification_report(state)
+
+        self.assertTrue(report["release_eligible"])
+        self.assertTrue(report["analysis"]["lesion_corroboration"]["verified"])
+
+    def test_multi_series_auxiliary_failure_is_reported_but_non_gating(self) -> None:
+        state = build_multi_series_demo_case()
+        auxiliary = self._series_entry(state, "derived-auxiliary")
+        auxiliary["tumor_mask"][0][0][0] = 1
+        voxel_spacing = np.asarray(auxiliary["voxel_spacing_mm"], dtype=np.float64)
+        auxiliary["tumor_volume_mm3"] = round(float(np.sum(auxiliary["tumor_mask"]) * np.prod(voxel_spacing)), 9)
+
+        report = build_multi_series_case_verification_report(state)
+        _, result = self._release_multi_series_demo_case(state=state)
+
+        self.assertTrue(report["release_eligible"])
+        auxiliary_report = next(
+            item for item in report["series_reports"] if item["series_id"] == "derived-auxiliary"
+        )
+        self.assertFalse(auxiliary_report["series_release_eligible"])
+        self.assertFalse(auxiliary_report["downstream_release_allowed"])
+        self.assertEqual(len(result.after_state["workstation_payload"]["series_payloads"]), 3)
+        self.assertEqual(
+            result.after_state["workstation_payload"]["withheld_series"][0]["series_id"],
+            "derived-auxiliary",
+        )
+
+    def test_multi_series_auxiliary_geometry_and_lesion_do_not_gate_release(self) -> None:
+        state = build_multi_series_demo_case()
+        auxiliary = self._series_entry(state, "derived-auxiliary")
+        auxiliary["voxel_spacing_mm"] = [1.0, 0.8, 2.5]
+        lesion = np.full((2, 2, 2), 40.0, dtype=np.float64)
+        self._rewrite_series_for_profile(state, "derived-auxiliary", lesion)
+
+        report = build_multi_series_case_verification_report(state)
+
+        self.assertTrue(report["release_eligible"])
+        auxiliary_report = next(
+            item for item in report["series_reports"] if item["series_id"] == "derived-auxiliary"
+        )
+        self.assertEqual(auxiliary_report["resolved_role"], "auxiliary")
+        self.assertTrue(auxiliary_report["series_release_eligible"])
+
     def test_view_model_reports_clean_baseline_case(self) -> None:
         view_model = build_side_by_side_view_model(build_demo_case())
 
@@ -1744,6 +1897,49 @@ class MriGuardianHarnessTests(unittest.TestCase):
             )
         )
 
+    def test_multi_series_mock_dicom_pacs_and_bundle_replay_identically(self) -> None:
+        state, result = self._release_multi_series_demo_case()
+        bundle_path = self.runtime_root / f"{state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
+        dicom_input = build_mock_dicom_input(result.before_state)
+        pacs_submission = build_mock_pacs_submission(
+            result,
+            bundle_reference=bundle_path.name,
+        )
+        integration_trace = build_mock_integration_trace(
+            dicom_input=dicom_input,
+            pacs_output=pacs_submission,
+        )
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        verification = verify_bundle(bundle_path)
+
+        self.assertEqual(dicom_input["study"]["case_kind"], MULTI_SERIES_CASE_KIND)
+        self.assertEqual(pacs_submission["verification_summary"]["case_kind"], MULTI_SERIES_CASE_KIND)
+        self.assertEqual(integration_trace["pipeline"][1]["case_kind"], MULTI_SERIES_CASE_KIND)
+        self.assertTrue(verification["verified"])
+        self.assertTrue(verification["details"]["replay_verified"])
+
+    def test_run_demo_multi_series_emits_verified_artifacts(self) -> None:
+        demo_root = self.runtime_root / "multi_series_demo"
+
+        run_demo(
+            output_dir=demo_root,
+            case_kind=MULTI_SERIES_CASE_KIND,
+        )
+        verification = run_verify_command(demo_root)
+        report = json.loads((demo_root / "verification_report.json").read_text(encoding="utf-8"))
+        pacs_submission = json.loads((demo_root / "pacs_submission.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(verification["verified"])
+        self.assertEqual(report["case_kind"], MULTI_SERIES_CASE_KIND)
+        self.assertEqual(pacs_submission["verification_summary"]["case_kind"], MULTI_SERIES_CASE_KIND)
+        self.assertTrue((demo_root / "comparison.html").exists())
+        self.assertTrue((demo_root / "bundle_verification.json").exists())
+
     def test_cli_verify_command_reports_directory_success(self) -> None:
         _, result = self._release_demo_case()
         bundle_path = self.runtime_root / f"{result.after_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
@@ -2003,6 +2199,52 @@ class MriGuardianHarnessTests(unittest.TestCase):
             timestamp="2026-03-26T00:00:00Z",
         )
         return state, result
+
+    def _release_multi_series_demo_case(
+        self,
+        *,
+        state: dict[str, object] | None = None,
+    ) -> tuple[dict[str, object], object]:
+        working_state = build_multi_series_demo_case() if state is None else state
+        result = self._build_harness().release_multi_series_case(
+            state=working_state,
+            actor="guardian:test",
+            authority_sources_by_series_id=build_multi_series_demo_authority_sources(),
+            timestamp="2026-03-26T00:00:00Z",
+        )
+        return working_state, result
+
+    def _series_entry(self, state: dict[str, object], series_id: str) -> dict[str, object]:
+        for entry in state["series"]:
+            if entry["series_id"] == series_id:
+                return entry
+        raise AssertionError(f"Series {series_id!r} not found.")
+
+    def _rewrite_series_for_profile(
+        self,
+        state: dict[str, object],
+        series_id: str,
+        reconstruction: np.ndarray,
+    ) -> None:
+        series_entry = self._series_entry(state, series_id)
+        descriptor = verification_profile_descriptor_from_dict(
+            dict(series_entry["verification_profile_descriptor"])
+        )
+        raw_kspace = np.fft.fft2(reconstruction, axes=(-2, -1))
+        derived_reconstruction = np.fft.ifft2(raw_kspace, axes=(-2, -1)).real
+        verified_mask = derive_verified_mask(
+            derived_reconstruction,
+            descriptor.mask_rules,
+        ).verified_mask
+        voxel_spacing = np.asarray(series_entry["voxel_spacing_mm"], dtype=np.float64)
+        series_entry["raw_real"] = raw_kspace.real.tolist()
+        series_entry["raw_imag"] = raw_kspace.imag.tolist()
+        series_entry["ai_reconstruction"] = derived_reconstruction.tolist()
+        series_entry["tumor_mask"] = verified_mask.astype(np.int64).tolist()
+        series_entry["tumor_volume_mm3"] = round(
+            float(np.count_nonzero(verified_mask) * np.prod(voxel_spacing)),
+            9,
+        )
 
     def _build_warning_stack_case(self) -> dict[str, object]:
         state = build_demo_case()

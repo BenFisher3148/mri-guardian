@@ -234,6 +234,68 @@ class VerifiedReconstructionTrace:
         }
 
 
+@dataclass(frozen=True)
+class CrossSeriesVerificationPolicy:
+    """Study-level policy that selects the blocking cross-series gate."""
+
+    case_id: str
+    primary_series_id: str
+    supporting_series_ids: tuple[str, ...]
+    required_series_ids: tuple[str, ...]
+    geometry_rule: str
+    corroboration_rule: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "CrossSeriesVerificationPolicy",
+            "interface_version": "2026.03",
+            "case_id": self.case_id,
+            "primary_series_id": self.primary_series_id,
+            "supporting_series_ids": list(self.supporting_series_ids),
+            "required_series_ids": list(self.required_series_ids),
+            "geometry_rule": self.geometry_rule,
+            "corroboration_rule": self.corroboration_rule,
+        }
+
+
+@dataclass(frozen=True)
+class CrossSeriesVerificationTrace:
+    """Deterministic trace for study-level geometry and corroboration gating."""
+
+    case_id: str
+    policy_hash: str
+    geometry_verification: dict[str, Any]
+    lesion_corroboration: dict[str, Any]
+    merged_release_evaluation: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "CrossSeriesVerificationTrace",
+            "interface_version": "2026.03",
+            "case_id": self.case_id,
+            "policy_hash": self.policy_hash,
+            "geometry_verification": dict(self.geometry_verification),
+            "lesion_corroboration": dict(self.lesion_corroboration),
+            "merged_release_evaluation": dict(self.merged_release_evaluation),
+        }
+
+
+@dataclass(frozen=True)
+class MultiSeriesVerificationProfileDescriptorSet:
+    """Ordered wrapper that binds per-series runtime descriptors for one study."""
+
+    case_id: str
+    series_descriptors: tuple[dict[str, Any], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "MultiSeriesVerificationProfileDescriptorSet",
+            "interface_version": "2026.03",
+            "case_id": self.case_id,
+            "series_descriptors": [dict(item) for item in self.series_descriptors],
+        }
+
+
 def build_ai_claim_envelope(
     *,
     state: dict[str, Any],
@@ -379,3 +441,50 @@ def build_verified_reconstruction_trace(
 def build_verification_profile_contract(profile_name: str) -> dict[str, Any]:
     """Return the canonical public descriptor for the active runtime profile."""
     return build_verification_profile_descriptor(profile_name)
+
+
+def build_cross_series_verification_policy(
+    *,
+    case_id: str,
+    primary_series_id: str,
+    supporting_series_ids: list[str] | tuple[str, ...],
+    required_series_ids: list[str] | tuple[str, ...],
+    geometry_rule: str,
+    corroboration_rule: str,
+) -> dict[str, Any]:
+    return CrossSeriesVerificationPolicy(
+        case_id=case_id,
+        primary_series_id=primary_series_id,
+        supporting_series_ids=tuple(str(value) for value in supporting_series_ids),
+        required_series_ids=tuple(str(value) for value in required_series_ids),
+        geometry_rule=str(geometry_rule),
+        corroboration_rule=str(corroboration_rule),
+    ).to_dict()
+
+
+def build_cross_series_verification_trace(
+    *,
+    case_id: str,
+    policy: dict[str, Any],
+    geometry_verification: dict[str, Any],
+    lesion_corroboration: dict[str, Any],
+    merged_release_evaluation: dict[str, Any],
+) -> dict[str, Any]:
+    return CrossSeriesVerificationTrace(
+        case_id=str(case_id),
+        policy_hash=hash_canonical_json(policy),
+        geometry_verification=dict(geometry_verification),
+        lesion_corroboration=dict(lesion_corroboration),
+        merged_release_evaluation=dict(merged_release_evaluation),
+    ).to_dict()
+
+
+def build_multi_series_verification_profile_descriptor_set(
+    *,
+    case_id: str,
+    series_descriptors: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    return MultiSeriesVerificationProfileDescriptorSet(
+        case_id=str(case_id),
+        series_descriptors=tuple(dict(item) for item in series_descriptors),
+    ).to_dict()

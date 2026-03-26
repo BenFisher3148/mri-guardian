@@ -8,7 +8,7 @@ from typing import Any
 from icsd.core.serialise import hash_canonical_json
 from icsd.core.transition import TransitionResult
 
-from .harness import build_case_verification_report
+from .harness import MULTI_SERIES_CASE_KIND, build_case_verification_report
 
 _INTEGRATION_SCHEMA_VERSION = "0.1"
 _STATE_FIELDS = (
@@ -40,12 +40,77 @@ def build_mock_dicom_input(
 ) -> dict[str, Any]:
     """Return a mocked DICOM ingress envelope for the Guardian Layer."""
     report = build_case_verification_report(state)
-    analysis = report["analysis"]
-    contracts = report["contracts"]
-    claim_envelope = contracts["ai_claim_envelope"]
     integration_narrative = build_guardian_integration_narrative(
         current_guardian_decision="pending_verification",
     )
+    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        objects: list[dict[str, Any]] = []
+        for series_report in report["series_reports"]:
+            claim_envelope = series_report["contracts"]["ai_claim_envelope"]
+            objects.extend(
+                [
+                    {
+                        "series_id": series_report["series_id"],
+                        "series_uid": series_report["series_uid"],
+                        "role": "raw_kspace",
+                        "sop_class": "MR Raw Data Storage (mock)",
+                        "hash": series_report["analysis"]["raw_hash"],
+                        "members": ["raw_real", "raw_imag"],
+                    },
+                    {
+                        "series_id": series_report["series_id"],
+                        "series_uid": series_report["series_uid"],
+                        "role": "ai_reconstruction",
+                        "sop_class": "MR Image Storage (mock)",
+                        "hash": claim_envelope["claimed_outputs"]["ai_reconstruction_hash"],
+                    },
+                    {
+                        "series_id": series_report["series_id"],
+                        "series_uid": series_report["series_uid"],
+                        "role": "ai_segmentation",
+                        "sop_class": "Segmentation Storage (mock)",
+                        "hash": claim_envelope["claimed_outputs"]["ai_mask_hash"],
+                    },
+                    {
+                        "series_id": series_report["series_id"],
+                        "series_uid": series_report["series_uid"],
+                        "role": "ai_volume_claim",
+                        "sop_class": "Comprehensive SR Storage (mock)",
+                        "hash": hash_canonical_json(claim_envelope["claimed_outputs"]),
+                    },
+                ]
+            )
+        return {
+            "schema_version": _INTEGRATION_SCHEMA_VERSION,
+            "kind": "mock_dicom_input",
+            "transport": "dicom-c-store",
+            "endpoint": {
+                "source_ae_title": source_ae_title,
+                "destination_ae_title": destination_ae_title,
+            },
+            "study": {
+                "case_kind": MULTI_SERIES_CASE_KIND,
+                "case_id": state["case_id"],
+                "study_uid": state["study_uid"],
+                "patient_pseudonym": state["patient_pseudonym"],
+                "series_count": len(state["series"]),
+            },
+            "dicom_tags": {
+                "Modality": "MR",
+                "PatientID": state["patient_pseudonym"],
+                "StudyInstanceUID": state["study_uid"],
+                "ManufacturerModelName": state["scanner_id"],
+                "NumberOfStudyRelatedSeries": len(state["series"]),
+            },
+            "objects": objects,
+            "cross_series_policy": report["contracts"]["cross_series_verification_policy"],
+            "verification_profile_descriptor": report["contracts"]["verification_profile_descriptor"],
+            "integration_narrative": integration_narrative,
+            "guardian_case": deepcopy(state),
+        }
+    analysis = report["analysis"]
+    contracts = report["contracts"]
+    claim_envelope = contracts["ai_claim_envelope"]
     return {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_dicom_input",
@@ -106,6 +171,8 @@ def restore_case_state_from_dicom_input(dicom_input: dict[str, Any]) -> dict[str
     case_state = dicom_input.get("guardian_case")
     if not isinstance(case_state, dict):
         raise ValueError("Mocked DICOM input is missing guardian_case.")
+    if case_state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        return deepcopy(case_state)
     missing_fields = [field for field in _STATE_FIELDS if field not in case_state]
     if missing_fields:
         raise ValueError(
@@ -125,9 +192,97 @@ def build_mock_pacs_submission(
     """Return a mocked PACS handoff envelope for an accepted case."""
     state = result.after_state
     report = build_case_verification_report(state)
-    contracts = report["contracts"]
     if not report["release_eligible"]:
         raise ValueError("Mock PACS submission requires a release-eligible case.")
+    contracts = report["contracts"]
+    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        workstation_payload = state["workstation_payload"]
+        evidence_hash = hash_canonical_json(result.evidence.as_dict())
+        manifest_hash = hash_canonical_json(state["verified_manifest"])
+        integration_narrative = build_guardian_integration_narrative(
+            current_guardian_decision="released",
+        )
+        released_series = []
+        for series_payload in workstation_payload["series_payloads"]:
+            payload = series_payload["workstation_payload"]
+            released_series.extend(
+                [
+                    {
+                        "series_id": series_payload["series_id"],
+                        "role": "verified_reconstruction",
+                        "series_uid": f"{series_payload['series_uid']}-guardian-reconstruction",
+                        "series_description": "Guardian Layer Verified Reconstruction",
+                        "sop_class": "MR Image Storage (mock)",
+                        "hash": payload["reconstruction_hash"],
+                    },
+                    {
+                        "series_id": series_payload["series_id"],
+                        "role": "verified_segmentation",
+                        "series_uid": f"{series_payload['series_uid']}-guardian-segmentation",
+                        "series_description": "Guardian Layer Verified Tumour Mask",
+                        "sop_class": "Segmentation Storage (mock)",
+                        "hash": payload["verified_mask_hash"],
+                    },
+                ]
+            )
+        released_series.extend(
+            [
+                {
+                    "role": "verified_manifest",
+                    "series_uid": f"{state['study_uid']}-guardian-study-manifest",
+                    "series_description": "Guardian Layer Study Verification Manifest",
+                    "sop_class": "Comprehensive SR Storage (mock)",
+                    "hash": manifest_hash,
+                },
+                {
+                    "role": "icsd_evidence",
+                    "series_uid": f"{state['study_uid']}-guardian-study-evidence",
+                    "series_description": "Guardian Layer Study ICSD Evidence",
+                    "sop_class": "Encapsulated JSON Storage (mock)",
+                    "hash": evidence_hash,
+                },
+            ]
+        )
+        return {
+            "schema_version": _INTEGRATION_SCHEMA_VERSION,
+            "kind": "mock_pacs_submission",
+            "transport": "dicom-c-store",
+            "endpoint": {
+                "source_ae_title": source_ae_title,
+                "destination_ae_title": destination_ae_title,
+            },
+            "study": {
+                "case_kind": MULTI_SERIES_CASE_KIND,
+                "case_id": state["case_id"],
+                "study_uid": state["study_uid"],
+                "source_series_ids": [item["series_id"] for item in report["series_reports"]],
+            },
+            "submission_status": "released",
+            "series": released_series,
+            "verification_summary": {
+                "guardian_mode": "verification_proxy",
+                "case_kind": MULTI_SERIES_CASE_KIND,
+                "decision": "released",
+                "decision_class": report["decision_summary"]["decision_class"],
+                "primary_reason": _primary_reason_summary(report),
+                "tier_statuses": _tier_statuses(report),
+                "proof_status": report["decision_summary"]["proof_status"],
+                "profile_policy_status": report["decision_summary"]["profile_policy_status"],
+                "released_series_ids": report["analysis"]["released_series_ids"],
+                "withheld_series_ids": report["analysis"]["withheld_series_ids"],
+                "bundle_reference": bundle_reference,
+                "evidence_hash": evidence_hash,
+                "verification_profile_descriptor_hash": hash_canonical_json(
+                    contracts["verification_profile_descriptor"]
+                ),
+            },
+            "integration_narrative": integration_narrative,
+            "proof_contracts": {
+                "verification_profile_descriptor": contracts["verification_profile_descriptor"],
+                "cross_series_verification_policy": contracts["cross_series_verification_policy"],
+                "cross_series_verification_trace": contracts["cross_series_verification_trace"],
+            },
+        }
     workstation_payload = state["workstation_payload"]
     evidence_hash = hash_canonical_json(result.evidence.as_dict())
     manifest_hash = hash_canonical_json(state["verified_manifest"])
@@ -219,6 +374,55 @@ def build_mock_pacs_block_notice(
     integration_narrative = build_guardian_integration_narrative(
         current_guardian_decision="blocked",
     )
+    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        return {
+            "schema_version": _INTEGRATION_SCHEMA_VERSION,
+            "kind": "mock_pacs_block_notice",
+            "transport": "dicom-c-store",
+            "endpoint": {
+                "source_ae_title": source_ae_title,
+                "destination_ae_title": destination_ae_title,
+            },
+            "study": {
+                "case_kind": MULTI_SERIES_CASE_KIND,
+                "case_id": state["case_id"],
+                "study_uid": state["study_uid"],
+                "source_series_ids": [item["series_id"] for item in report["series_reports"]],
+            },
+            "submission_status": "blocked",
+            "blocked_reason": _primary_reason_summary(report),
+            "failure_reasons": report["failure_reasons"],
+            "verification_summary": {
+                "guardian_mode": "verification_proxy",
+                "case_kind": MULTI_SERIES_CASE_KIND,
+                "decision": "blocked",
+                "decision_class": report["decision_summary"]["decision_class"],
+                "tier_statuses": _tier_statuses(report),
+                "proof_status": report["decision_summary"]["proof_status"],
+                "profile_policy_status": report["decision_summary"]["profile_policy_status"],
+                "released_series_ids": report["analysis"]["released_series_ids"],
+                "withheld_series_ids": report["analysis"]["withheld_series_ids"],
+                "verification_profile_descriptor_hash": hash_canonical_json(
+                    contracts["verification_profile_descriptor"]
+                ),
+            },
+            "integration_narrative": integration_narrative,
+            "proof_contracts": {
+                "verification_profile_descriptor": contracts["verification_profile_descriptor"],
+                "cross_series_verification_policy": contracts["cross_series_verification_policy"],
+                "cross_series_verification_trace": contracts["cross_series_verification_trace"],
+            },
+            "withheld_series": [
+                {
+                    "series_id": item["series_id"],
+                    "resolved_role": item["resolved_role"],
+                    "gating_status": item["gating_status"],
+                    "series_proof_status": item["series_proof_status"],
+                    "downstream_release_allowed": item["downstream_release_allowed"],
+                }
+                for item in report["analysis"]["series"]
+            ],
+        }
     return {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_pacs_block_notice",
@@ -288,6 +492,50 @@ def build_mock_integration_trace(
     integration_narrative = build_guardian_integration_narrative(
         current_guardian_decision=str(pacs_output["submission_status"]),
     )
+    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        return {
+            "schema_version": _INTEGRATION_SCHEMA_VERSION,
+            "kind": "mock_integration_trace",
+            "case_id": state["case_id"],
+            "integration_narrative": integration_narrative,
+            "pipeline": [
+                {
+                    "stage": "dicom_ingress",
+                    "label": "DICOM Input",
+                    "transport": dicom_input["transport"],
+                    "ae_title": dicom_input["endpoint"]["source_ae_title"],
+                    "object_count": len(dicom_input["objects"]),
+                    "study_uid": state["study_uid"],
+                    "series_count": len(state["series"]),
+                },
+                {
+                    "stage": "guardian_layer",
+                    "label": "MRI Guardian Layer",
+                    "mode": "verification_proxy",
+                    "case_kind": MULTI_SERIES_CASE_KIND,
+                    "decision": pacs_output["submission_status"],
+                    "decision_class": report["decision_summary"]["decision_class"],
+                    "primary_reason": _primary_reason_summary(report),
+                    "tier_statuses": _tier_statuses(report),
+                },
+                {
+                    "stage": "pacs_egress",
+                    "label": (
+                        "PACS Output"
+                        if pacs_output["submission_status"] == "released"
+                        else "PACS Output Blocked"
+                    ),
+                    "transport": pacs_output["transport"],
+                    "ae_title": pacs_output["endpoint"]["destination_ae_title"],
+                    "artifact_kind": pacs_kind,
+                    "object_count": len(egress_objects),
+                },
+            ],
+            "hashes": {
+                "dicom_input_hash": hash_canonical_json(dicom_input),
+                "pacs_output_hash": hash_canonical_json(pacs_output),
+            },
+        }
     return {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_integration_trace",

@@ -33,6 +33,8 @@ The Guardian Layer is intentionally non-invasive. It does not replace the MRI sc
 - Release is fail-closed for the Guardian handoff. If blocking proof fails, nothing verified is forwarded downstream.
 - Identical inputs must produce identical released state, evidence, bundle members, and replay hashes.
 - The replay path must bind to the embedded runtime profile descriptor by `profile_name`, `profile_revision`, and `profile_digest`, not the process default.
+- In `multi_series_v2`, all payload series are individually verified and reported, but only `required_series_ids` participate in merged release gating.
+- In `multi_series_v2`, study order is proof-significant for canonical serialization, stable diffs, and deterministic replay.
 
 ## Profile Registry
 
@@ -89,6 +91,21 @@ The verified-mask layer uses a fixed approved algorithm catalogue and canonical 
    - portable bundle
 9. If proof fails, a blocking heuristic fails, or the profile is non-final, block the Guardian handoff and emit explicit failure reasons with separate `proof_failure`, `heuristic_block`, or `profile_policy_block` categories.
 
+## Multi-Series V2
+
+`multi_series_v2` adds a study-level container on top of the existing per-series proof path.
+
+- one study contains an ordered `series` list plus one `cross_series_policy`
+- all payload series are individually verified and reported
+- `required_series_ids` is the only authoritative merged-release gating set
+- duplicate payload `series_id` values are an early study-shape validation failure
+- `supporting_series_ids` must be non-empty for `multi_series_v2`; callers must not auto-downgrade into the single-series path
+- payload series outside `required_series_ids` are auxiliary for this milestone
+- caller-provided `required_series_ids` and `supporting_series_ids` are accepted, then canonicalized into outer study order; caller order is not proof-significant
+- required-series geometry is checked only on canonicalized voxel spacing plus exact voxel shape
+- positive-lesion corroboration is a study-level gate only when required verified masks are non-empty
+- corroboration overlap is exact coordinate intersection count `> 0`; adjacency without identical coordinates does not count
+
 ## Explainability Layers
 
 | Tier | Purpose | Blocking |
@@ -103,6 +120,8 @@ The project operates on a simple two-state release model:
 
 - `pending_verification`: input captured, no released payload is allowed.
 - `released_to_radiologist`: `verified_manifest` and `workstation_payload` exist and must match the deterministic proof trace exactly.
+
+In `multi_series_v2`, released study manifests include all payload series in proof-significant order and record each series role, gating status, proof status, and downstream release flag. Released study workstation payloads include only downstream-allowed series plus an explicit withheld-series summary.
 
 Released cases are only valid if the mathematical trace still verifies when recomputed.
 

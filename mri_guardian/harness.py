@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,10 @@ from icsd.core.transition import Transition, TransitionResult
 
 from .contracts import (
     build_ai_claim_envelope,
+    build_cross_series_verification_policy,
+    build_cross_series_verification_trace,
     build_mask_derivation_policy,
+    build_multi_series_verification_profile_descriptor_set,
     build_verification_profile_contract,
     build_verification_tolerance_policy,
     build_verified_reconstruction_trace,
@@ -27,6 +31,7 @@ from .mask_engine import (
     CONNECTED_COMPONENT_ALGORITHM,
     MORPHOLOGY_ALGORITHM,
     SLICE_CONSISTENCY_ALGORITHM,
+    THRESHOLD_ALGORITHM,
     derive_verified_mask,
 )
 from .profiles import (
@@ -38,6 +43,7 @@ from .profiles import (
     default_icsd_policy_version,
     get_verification_profile,
     resolve_profile_name,
+    verification_profile_descriptor_from_dict,
 )
 from .transparency import JsonlHashChainTransparencyLog
 
@@ -45,6 +51,9 @@ MRI_GUARDIAN_POLICY_NAME = DEFAULT_PROFILE_NAME
 MRI_GUARDIAN_POLICY_VERSION = default_icsd_policy_version()
 RELEASE_STATUS_PENDING = "pending_verification"
 RELEASE_STATUS_RELEASED = "released_to_radiologist"
+MULTI_SERIES_CASE_KIND = "multi_series_v2"
+MULTI_SERIES_GEOMETRY_RULE = "same_voxel_grid_required"
+MULTI_SERIES_CORROBORATION_RULE = "positive_primary_lesion_requires_supporting_exact_overlap"
 _AUTHORITY_REQUIREMENT_MAP = build_authority_requirement_map()
 
 
@@ -59,6 +68,10 @@ class MriGuardianHarness:
     ) -> None:
         self._default_profile_name = get_verification_profile(default_profile_name).profile_name
         self._transition = _build_release_transition(
+            transparency_log_path=Path(transparency_log_path),
+            default_profile_name=self._default_profile_name,
+        )
+        self._multi_series_transition = _build_multi_series_release_transition(
             transparency_log_path=Path(transparency_log_path),
             default_profile_name=self._default_profile_name,
         )
@@ -101,12 +114,54 @@ class MriGuardianHarness:
     ) -> bool:
         return self._transition.verify_transparency(evidence).verified
 
+    def release_multi_series_case(
+        self,
+        *,
+        state: Mapping[str, Any],
+        actor: str,
+        authority_sources_by_series_id: Mapping[
+            str,
+            Iterable[AuthoritySource | Mapping[str, Any]],
+        ],
+        timestamp: str | None = None,
+        transition_id: str | UUID | None = None,
+    ) -> TransitionResult:
+        working_state = deepcopy(dict(state))
+        if working_state.get("case_kind") != MULTI_SERIES_CASE_KIND:
+            raise ValueError(
+                "release_multi_series_case requires a state with "
+                f"case_kind={MULTI_SERIES_CASE_KIND!r}."
+            )
+        context = _build_multi_series_context(working_state)
+        _validate_multi_series_authority_sources_by_series_id(
+            state=working_state,
+            authority_sources_by_series_id=authority_sources_by_series_id,
+        )
+        flattened_sources = _flatten_multi_series_authority_sources(
+            authority_sources_by_series_id=authority_sources_by_series_id,
+            series_order=context["series_order"],
+        )
+        primary_descriptor = _resolve_primary_series_descriptor(working_state)
+        return self._multi_series_transition.apply(
+            state=working_state,
+            entity_type="mri_study",
+            entity_id=str(working_state["case_id"]),
+            actor=actor,
+            authority_sources=flattened_sources,
+            profile=primary_descriptor.profile_name,
+            policy_version=primary_descriptor.icsd_policy_version,
+            timestamp=timestamp,
+            transition_id=transition_id,
+        )
+
 def build_case_verification_report(
     state: Mapping[str, Any],
     *,
     profile_name: str | None = None,
 ) -> dict[str, Any]:
     """Return the deterministic verification envelope for one MRI case."""
+    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        return build_multi_series_case_verification_report(state)
     resolved_profile_name = resolve_profile_name(profile_name=profile_name, state=dict(state))
     descriptor = get_verification_profile(resolved_profile_name)
     profile_contract = build_verification_profile_contract(descriptor.profile_name)
@@ -126,6 +181,16 @@ def build_case_verification_report(
         "decision_summary": decision_summary,
         "release_eligible": bool(decision_summary["final_release_allowed"]),
     }
+
+
+def build_multi_series_case_verification_report(
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the deterministic verification envelope for one study-shaped Guardian case."""
+    context = _build_multi_series_context(state)
+    series_reports = [_build_multi_series_series_report(context, series_id) for series_id in context["series_order"]]
+    report = _build_multi_series_study_report(context, series_reports)
+    return report
 
 
 def build_demo_case(*, profile_name: str = DEFAULT_PROFILE_NAME) -> dict[str, Any]:
@@ -154,6 +219,71 @@ def build_demo_case(*, profile_name: str = DEFAULT_PROFILE_NAME) -> dict[str, An
         "verification_profile_descriptor": build_verification_profile_contract(
             descriptor.profile_name
         ),
+        "verified_manifest": None,
+        "workstation_payload": None,
+    }
+
+
+def build_multi_series_demo_case() -> dict[str, Any]:
+    """Return a deterministic multi-series study with primary, supporting, and auxiliary series."""
+    case_id = "mri-study-0001"
+    patient_pseudonym = "anon-0001"
+    study_uid = "study-0001"
+    scanner_id = "scanner-7t-alpha"
+    demo_shape = (2, 2, 2)
+    series_specs = (
+        ("series-primary-t1", "t1-primary", "brain_t1_baseline", ((0, 0, 0), (0, 0, 1))),
+        ("series-supporting-t2", "t2-supporting", "brain_t2_baseline", ((0, 0, 0),)),
+        ("series-supporting-flair", "flair-supporting", "brain_t1_baseline", ((1, 1, 1),)),
+        ("series-auxiliary-derived", "derived-auxiliary", "brain_t1_component_review", ((1, 1, 1),)),
+    )
+    series: list[dict[str, Any]] = []
+    for series_uid, series_id, profile_name, hot_voxels in series_specs:
+        descriptor = get_verification_profile(profile_name)
+        seeded_reconstruction = _reconstruction_with_hot_voxels(
+            demo_shape,
+            hot_voxels,
+            hot_value=4.0 if descriptor.mask_algorithm == THRESHOLD_ALGORITHM else 40.0,
+        )
+        voxel_spacing_mm = np.asarray([0.8, 0.8, 2.5], dtype=np.float64)
+        raw_kspace = np.fft.fft2(seeded_reconstruction, axes=(-2, -1))
+        reconstruction = np.fft.ifft2(raw_kspace, axes=(-2, -1)).real
+        tumor_mask = _derive_verified_mask(reconstruction, descriptor)
+        tumor_volume_mm3 = _round_float(
+            int(tumor_mask.sum()) * float(np.prod(voxel_spacing_mm))
+        )
+        series.append(
+            {
+                "series_id": series_id,
+                "series_uid": series_uid,
+                "sequence_id": _demo_sequence_id(descriptor.profile_name),
+                "ai_model_id": "raw-mri-ai-v4",
+                "raw_real": _float_array_to_list(raw_kspace.real),
+                "raw_imag": _float_array_to_list(raw_kspace.imag),
+                "ai_reconstruction": _float_array_to_list(reconstruction),
+                "tumor_mask": tumor_mask.tolist(),
+                "voxel_spacing_mm": _float_array_to_list(voxel_spacing_mm),
+                "tumor_volume_mm3": tumor_volume_mm3,
+                "verification_profile_descriptor": build_verification_profile_contract(
+                    descriptor.profile_name
+                ),
+            }
+        )
+    return {
+        "case_kind": MULTI_SERIES_CASE_KIND,
+        "case_id": case_id,
+        "patient_pseudonym": patient_pseudonym,
+        "study_uid": study_uid,
+        "scanner_id": scanner_id,
+        "release_status": RELEASE_STATUS_PENDING,
+        "series": series,
+        "cross_series_policy": {
+            "primary_series_id": "t1-primary",
+            "supporting_series_ids": ["t2-supporting", "flair-supporting"],
+            "required_series_ids": ["t1-primary", "t2-supporting", "flair-supporting"],
+            "geometry_rule": MULTI_SERIES_GEOMETRY_RULE,
+            "corroboration_rule": MULTI_SERIES_CORROBORATION_RULE,
+        },
         "verified_manifest": None,
         "workstation_payload": None,
     }
@@ -218,6 +348,852 @@ def build_demo_authority_sources(
             )
         )
     return tuple(sources)
+
+
+def build_multi_series_demo_authority_sources() -> dict[str, tuple[AuthoritySource, ...]]:
+    """Return authority anchors for each demo study series."""
+    state = build_multi_series_demo_case()
+    sources: dict[str, tuple[AuthoritySource, ...]] = {}
+    for series_entry in state["series"]:
+        descriptor = verification_profile_descriptor_from_state(series_entry)
+        base_sources = build_demo_authority_sources(
+            case_id=f"{state['case_id']}-{series_entry['series_id']}",
+            profile_name=descriptor.profile_name,
+        )
+        sources[str(series_entry["series_id"])] = tuple(
+            _series_scoped_authority_source(series_entry["series_id"], source)
+            for source in base_sources
+        )
+    return sources
+
+
+def verification_profile_descriptor_from_state(state: Mapping[str, Any]) -> Any:
+    """Resolve an embedded profile descriptor payload or fall back to the registry."""
+    payload = state.get("verification_profile_descriptor")
+    if isinstance(payload, Mapping):
+        return verification_profile_descriptor_from_dict(dict(payload))
+    return get_verification_profile(resolve_profile_name(profile_name=None, state=dict(state)))
+
+
+def _reconstruction_with_hot_voxels(
+    shape: tuple[int, int, int],
+    hot_voxels: tuple[tuple[int, int, int], ...],
+    *,
+    hot_value: float,
+) -> np.ndarray:
+    reconstruction = np.zeros(shape, dtype=np.float64)
+    for z_index, y_index, x_index in hot_voxels:
+        reconstruction[z_index, y_index, x_index] = hot_value
+    return reconstruction
+
+
+def _series_scoped_authority_source(
+    series_id: str,
+    source: AuthoritySource | Mapping[str, Any],
+) -> AuthoritySource:
+    if isinstance(source, AuthoritySource):
+        details = dict(source.details)
+        details["series_id"] = str(series_id)
+        return AuthoritySource(
+            source_type=str(source.source_type),
+            source_id=str(source.source_id),
+            reference=str(source.reference),
+            details=details,
+        )
+    details = dict(source.get("details", {}))
+    details["series_id"] = str(series_id)
+    return AuthoritySource(
+        source_type=str(source["source_type"]),
+        source_id=str(source["source_id"]),
+        reference=str(source["reference"]),
+        details=details,
+    )
+
+
+def _build_multi_series_context(state: Mapping[str, Any]) -> dict[str, Any]:
+    if state.get("case_kind") != MULTI_SERIES_CASE_KIND:
+        raise ValueError(
+            f"Multi-series cases must declare case_kind={MULTI_SERIES_CASE_KIND!r}."
+        )
+    for field_name in ("case_id", "patient_pseudonym", "study_uid", "scanner_id"):
+        value = state.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"Field {field_name!r} must be a non-empty string.")
+    release_status = state.get("release_status")
+    if release_status not in {RELEASE_STATUS_PENDING, RELEASE_STATUS_RELEASED}:
+        raise ValueError("release_status must be a known MRI guardian state.")
+    series_entries = state.get("series")
+    if not isinstance(series_entries, list) or not series_entries:
+        raise ValueError("Multi-series cases must contain a non-empty series list.")
+    series_by_id: dict[str, dict[str, Any]] = {}
+    series_order: list[str] = []
+    duplicate_series_ids: set[str] = set()
+    for entry in series_entries:
+        if not isinstance(entry, Mapping):
+            raise ValueError("Each multi-series entry must be a mapping.")
+        series_id = entry.get("series_id")
+        if not isinstance(series_id, str) or not series_id.strip():
+            raise ValueError("Each multi-series entry must contain a non-empty series_id.")
+        normalized_id = series_id.strip()
+        if normalized_id in series_by_id:
+            duplicate_series_ids.add(normalized_id)
+            continue
+        series_by_id[normalized_id] = dict(entry)
+        series_order.append(normalized_id)
+    if duplicate_series_ids:
+        duplicate_list = ", ".join(sorted(duplicate_series_ids))
+        raise ValueError(
+            "Multi-series study shape is invalid: duplicate payload series_id values are "
+            f"not allowed ({duplicate_list})."
+        )
+    policy = state.get("cross_series_policy")
+    if not isinstance(policy, Mapping):
+        raise ValueError("Multi-series cases must contain a cross_series_policy mapping.")
+    primary_series_id = policy.get("primary_series_id")
+    if not isinstance(primary_series_id, str) or not primary_series_id.strip():
+        raise ValueError("cross_series_policy.primary_series_id must be a non-empty string.")
+    supporting_series_ids = policy.get("supporting_series_ids")
+    if not isinstance(supporting_series_ids, list) or not supporting_series_ids:
+        raise ValueError(
+            "cross_series_policy.supporting_series_ids must be a non-empty list for "
+            f"{MULTI_SERIES_CASE_KIND!r}."
+        )
+    required_series_ids = policy.get("required_series_ids")
+    if not isinstance(required_series_ids, list) or not required_series_ids:
+        raise ValueError("cross_series_policy.required_series_ids must be a non-empty list.")
+    declared_supporting = tuple(str(value).strip() for value in supporting_series_ids)
+    declared_required = tuple(str(value).strip() for value in required_series_ids)
+    if len(set(declared_supporting)) != len(declared_supporting):
+        raise ValueError("cross_series_policy.supporting_series_ids must be unique.")
+    if len(set(declared_required)) != len(declared_required):
+        raise ValueError("cross_series_policy.required_series_ids must be unique.")
+    primary_series_id = str(primary_series_id).strip()
+    if declared_required.count(primary_series_id) != 1:
+        raise ValueError(
+            "cross_series_policy.primary_series_id must appear exactly once in required_series_ids."
+        )
+    for series_id in declared_supporting:
+        if declared_required.count(series_id) != 1:
+            raise ValueError(
+                "Each supporting series_id must appear exactly once in required_series_ids."
+            )
+    if set(declared_required) != ({primary_series_id} | set(declared_supporting)):
+        raise ValueError(
+            "For this milestone, required_series_ids must resolve to exactly the primary "
+            "series plus every supporting series."
+        )
+    if policy.get("geometry_rule") != MULTI_SERIES_GEOMETRY_RULE:
+        raise ValueError(
+            "cross_series_policy.geometry_rule must be "
+            f"{MULTI_SERIES_GEOMETRY_RULE!r}."
+        )
+    if policy.get("corroboration_rule") != MULTI_SERIES_CORROBORATION_RULE:
+        raise ValueError(
+            "cross_series_policy.corroboration_rule must be "
+            f"{MULTI_SERIES_CORROBORATION_RULE!r}."
+        )
+    canonical_required = tuple(
+        series_id for series_id in series_order if series_id in set(declared_required)
+    )
+    canonical_supporting = tuple(
+        series_id for series_id in series_order if series_id in set(declared_supporting)
+    )
+    missing_required = tuple(
+        series_id for series_id in declared_required if series_id not in series_by_id
+    )
+    auxiliary_series_ids = tuple(
+        series_id for series_id in series_order if series_id not in set(canonical_required)
+    )
+    policy_contract = build_cross_series_verification_policy(
+        case_id=str(state["case_id"]),
+        primary_series_id=primary_series_id,
+        supporting_series_ids=list(canonical_supporting),
+        required_series_ids=list(canonical_required),
+        geometry_rule=MULTI_SERIES_GEOMETRY_RULE,
+        corroboration_rule=MULTI_SERIES_CORROBORATION_RULE,
+    )
+    return {
+        "case_id": str(state["case_id"]),
+        "patient_pseudonym": str(state["patient_pseudonym"]),
+        "study_uid": str(state["study_uid"]),
+        "scanner_id": str(state["scanner_id"]),
+        "release_status": str(release_status),
+        "series_entries": [series_by_id[series_id] for series_id in series_order],
+        "series_by_id": series_by_id,
+        "series_order": tuple(series_order),
+        "primary_series_id": primary_series_id,
+        "supporting_series_ids": canonical_supporting,
+        "required_series_ids": canonical_required,
+        "auxiliary_series_ids": auxiliary_series_ids,
+        "missing_required_series_ids": missing_required,
+        "cross_series_policy": policy_contract,
+        "state": dict(state),
+    }
+
+
+def _build_multi_series_series_state(
+    context: Mapping[str, Any],
+    series_id: str,
+) -> dict[str, Any]:
+    entry = dict(context["series_by_id"][series_id])
+    return {
+        "case_id": context["case_id"],
+        "patient_pseudonym": context["patient_pseudonym"],
+        "study_uid": context["study_uid"],
+        "series_uid": entry["series_uid"],
+        "scanner_id": context["scanner_id"],
+        "sequence_id": entry["sequence_id"],
+        "ai_model_id": entry["ai_model_id"],
+        "release_status": RELEASE_STATUS_PENDING,
+        "raw_real": deepcopy(entry["raw_real"]),
+        "raw_imag": deepcopy(entry["raw_imag"]),
+        "ai_reconstruction": deepcopy(entry["ai_reconstruction"]),
+        "tumor_mask": deepcopy(entry["tumor_mask"]),
+        "voxel_spacing_mm": deepcopy(entry["voxel_spacing_mm"]),
+        "tumor_volume_mm3": entry["tumor_volume_mm3"],
+        "verification_profile_descriptor": deepcopy(entry["verification_profile_descriptor"]),
+        "verified_manifest": None,
+        "workstation_payload": None,
+    }
+
+
+def _canonical_voxel_spacing_tuple(
+    values: list[float] | tuple[float, ...],
+) -> tuple[float, float, float]:
+    spacing = tuple(_round_float(float(value)) for value in values)
+    if len(spacing) != 3:
+        raise ValueError("voxel_spacing_mm must contain exactly three elements.")
+    return spacing  # type: ignore[return-value]
+
+
+def _grid_signature_for_series_report(series_report: Mapping[str, Any]) -> dict[str, Any]:
+    shape = tuple(np.asarray(series_report["analysis"]["derived_reconstruction"]).shape)
+    spacing = _canonical_voxel_spacing_tuple(series_report["series_state"]["voxel_spacing_mm"])
+    payload = {
+        "shape": list(shape),
+        "canonical_voxel_spacing_mm": list(spacing),
+    }
+    return {
+        "shape": list(shape),
+        "canonical_voxel_spacing_mm": list(spacing),
+        "signature": hash_canonical_json(payload),
+    }
+
+
+def _build_multi_series_series_report(
+    context: Mapping[str, Any],
+    series_id: str,
+) -> dict[str, Any]:
+    series_state = _build_multi_series_series_state(context, series_id)
+    single_report = build_case_verification_report(series_state)
+    resolved_role = "auxiliary"
+    if series_id == context["primary_series_id"]:
+        resolved_role = "primary"
+    elif series_id in set(context["supporting_series_ids"]):
+        resolved_role = "supporting"
+    gating_status = "required" if series_id in set(context["required_series_ids"]) else "auxiliary"
+    descriptor = verification_profile_descriptor_from_state(series_state)
+    expected_payload = _build_workstation_payload(
+        series_state,
+        single_report["analysis"],
+        descriptor,
+    )
+    primary_reason = "all_blocking_checks_passed"
+    if single_report["failure_reasons"]:
+        primary_reason = str(single_report["failure_reasons"][0]["summary"])
+    elif single_report["decision_summary"]["decision_class"] == DECISION_CLASS_TRIAGE_ONLY:
+        primary_reason = "proof_passed_but_profile_is_triage_only"
+    elif single_report["decision_summary"]["operator_review_required"]:
+        primary_reason = "all_blocking_checks_passed; clinical_plausibility_review_recommended"
+    report = {
+        **single_report,
+        "series_id": series_id,
+        "series_uid": series_state["series_uid"],
+        "sequence_id": series_state["sequence_id"],
+        "series_state": series_state,
+        "resolved_role": resolved_role,
+        "gating_status": gating_status,
+        "series_proof_status": single_report["decision_summary"]["proof_status"],
+        "series_release_eligible": bool(single_report["release_eligible"]),
+        "downstream_release_allowed": False,
+        "expected_workstation_payload": expected_payload,
+        "primary_reason_summary": primary_reason,
+    }
+    report["grid_signature"] = _grid_signature_for_series_report(report)
+    return report
+
+
+def _build_multi_series_geometry_verification(
+    *,
+    required_series_ids: tuple[str, ...],
+    missing_required_series_ids: tuple[str, ...],
+    series_reports: Mapping[str, dict[str, Any]],
+) -> dict[str, Any]:
+    signatures = [
+        {
+            "series_id": series_id,
+            "resolved_role": series_reports[series_id]["resolved_role"],
+            "grid_signature": deepcopy(series_reports[series_id]["grid_signature"]),
+        }
+        for series_id in required_series_ids
+    ]
+    if missing_required_series_ids:
+        return {
+            "evaluated": False,
+            "verified": False,
+            "rule": MULTI_SERIES_GEOMETRY_RULE,
+            "required_series": signatures,
+            "missing_required_series_ids": list(missing_required_series_ids),
+            "mismatched_series_ids": [],
+            "message": "Required-series geometry was not evaluated because required series are missing.",
+        }
+    if not signatures:
+        return {
+            "evaluated": False,
+            "verified": False,
+            "rule": MULTI_SERIES_GEOMETRY_RULE,
+            "required_series": [],
+            "missing_required_series_ids": [],
+            "mismatched_series_ids": [],
+            "message": "Required-series geometry was not evaluated because no required series resolved.",
+        }
+    reference_signature = signatures[0]["grid_signature"]["signature"]
+    mismatched = [
+        item["series_id"]
+        for item in signatures[1:]
+        if item["grid_signature"]["signature"] != reference_signature
+    ]
+    return {
+        "evaluated": True,
+        "verified": not mismatched,
+        "rule": MULTI_SERIES_GEOMETRY_RULE,
+        "required_series": signatures,
+        "reference_series_id": signatures[0]["series_id"],
+        "missing_required_series_ids": [],
+        "mismatched_series_ids": mismatched,
+        "message": (
+            "Required-series geometry is canonicalized onto one exact voxel grid."
+            if not mismatched
+            else "Required-series geometry does not share one canonical voxel grid."
+        ),
+    }
+
+
+def _build_multi_series_lesion_corroboration(
+    *,
+    primary_series_id: str,
+    supporting_series_ids: tuple[str, ...],
+    required_series_ids: tuple[str, ...],
+    missing_required_series_ids: tuple[str, ...],
+    geometry_verification: Mapping[str, Any],
+    series_reports: Mapping[str, dict[str, Any]],
+) -> dict[str, Any]:
+    required_counts = {
+        series_id: int(series_reports[series_id]["analysis"]["verified_mask_voxel_count"])
+        for series_id in required_series_ids
+    }
+    if missing_required_series_ids or not geometry_verification["verified"]:
+        return {
+            "evaluated": False,
+            "verified": False,
+            "rule": MULTI_SERIES_CORROBORATION_RULE,
+            "primary_series_id": primary_series_id,
+            "supporting_series_ids": list(supporting_series_ids),
+            "required_series_ids": list(required_series_ids),
+            "required_verified_mask_voxel_counts": required_counts,
+            "supporting_series": [],
+            "message": "Positive-lesion corroboration was not evaluated because required-series geometry did not verify.",
+        }
+    primary_mask = np.asarray(
+        series_reports[primary_series_id]["analysis"]["verified_mask"],
+        dtype=np.int64,
+    )
+    primary_count = int(np.count_nonzero(primary_mask))
+    supporting_entries: list[dict[str, Any]] = []
+    overlapping_supporters = 0
+    supporting_positive_without_primary = False
+    for series_id in supporting_series_ids:
+        supporting_mask = np.asarray(
+            series_reports[series_id]["analysis"]["verified_mask"],
+            dtype=np.int64,
+        )
+        supporting_count = int(np.count_nonzero(supporting_mask))
+        intersection_count = int(np.count_nonzero((primary_mask == 1) & (supporting_mask == 1)))
+        if primary_count == 0 and supporting_count > 0:
+            supporting_positive_without_primary = True
+        if intersection_count > 0:
+            overlapping_supporters += 1
+        supporting_entries.append(
+            {
+                "series_id": series_id,
+                "verified_mask_voxel_count": supporting_count,
+                "intersection_voxel_count": intersection_count,
+                "overlaps_primary": bool(intersection_count > 0),
+            }
+        )
+    if all(count == 0 for count in required_counts.values()):
+        verified = True
+        message = "Every required verified mask is empty, so positive-lesion corroboration passes."
+    elif primary_count == 0 and supporting_positive_without_primary:
+        verified = False
+        message = (
+            "The primary verified mask is empty while at least one required supporting "
+            "series contains a positive verified lesion."
+        )
+    elif primary_count > 0 and overlapping_supporters > 0:
+        verified = True
+        message = (
+            "The primary verified lesion is corroborated by at least one supporting series "
+            "with exact coordinate overlap."
+        )
+    else:
+        verified = False
+        message = (
+            "The primary verified lesion is not corroborated by any supporting series with "
+            "exact coordinate overlap."
+        )
+    return {
+        "evaluated": True,
+        "verified": verified,
+        "rule": MULTI_SERIES_CORROBORATION_RULE,
+        "primary_series_id": primary_series_id,
+        "supporting_series_ids": list(supporting_series_ids),
+        "required_series_ids": list(required_series_ids),
+        "primary_verified_mask_voxel_count": primary_count,
+        "required_verified_mask_voxel_counts": required_counts,
+        "supporting_series": supporting_entries,
+        "message": message,
+    }
+
+
+def _build_multi_series_series_manifest(series_report: Mapping[str, Any]) -> dict[str, Any]:
+    manifest = deepcopy(series_report["manifest"])
+    manifest.update(
+        {
+            "series_id": series_report["series_id"],
+            "series_uid": series_report["series_uid"],
+            "sequence_id": series_report["sequence_id"],
+            "resolved_role": series_report["resolved_role"],
+            "gating_status": series_report["gating_status"],
+            "series_proof_status": series_report["series_proof_status"],
+            "downstream_release_allowed": series_report["downstream_release_allowed"],
+            "primary_reason_summary": series_report["primary_reason_summary"],
+            "grid_signature": deepcopy(series_report["grid_signature"]),
+        }
+    )
+    return manifest
+
+
+def _build_multi_series_failure_reasons(
+    *,
+    series_reports: list[dict[str, Any]],
+    geometry_verification: Mapping[str, Any],
+    lesion_corroboration: Mapping[str, Any],
+    merged_release_evaluation: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    reasons: list[dict[str, Any]] = []
+    missing_required = list(merged_release_evaluation["missing_required_series_ids"])
+    if missing_required:
+        reasons.append(
+            {
+                "code": "missing_required_series",
+                "category": "study_shape_failure",
+                "summary": "missing_required_series",
+                "delta": len(missing_required),
+                "message": (
+                    "The cross-series policy references required series_id values that are "
+                    "not present in the study payload."
+                ),
+                "details": {"missing_required_series_ids": missing_required},
+            }
+        )
+    required_not_release_eligible = list(
+        merged_release_evaluation["required_series_not_release_eligible"]
+    )
+    if required_not_release_eligible:
+        reasons.append(
+            {
+                "code": "required_series_not_release_eligible",
+                "category": "per_series_gate_failure",
+                "summary": "required_series_not_release_eligible",
+                "delta": len(required_not_release_eligible),
+                "message": (
+                    "At least one required series failed its individual proof or profile gate."
+                ),
+                "details": {
+                    "series_ids": required_not_release_eligible,
+                    "series_summaries": {
+                        report["series_id"]: report["primary_reason_summary"]
+                        for report in series_reports
+                        if report["series_id"] in set(required_not_release_eligible)
+                    },
+                },
+            }
+        )
+    mismatched_series = list(geometry_verification.get("mismatched_series_ids", []))
+    if mismatched_series:
+        reasons.append(
+            {
+                "code": "required_series_geometry_mismatch",
+                "category": "cross_series_failure",
+                "summary": "required_series_geometry_mismatch",
+                "delta": len(mismatched_series),
+                "message": (
+                    "Required series do not share one canonical voxel grid after spacing "
+                    "canonicalization."
+                ),
+                "details": {"mismatched_series_ids": mismatched_series},
+            }
+        )
+    if lesion_corroboration.get("evaluated") and not lesion_corroboration.get("verified"):
+        reasons.append(
+            {
+                "code": "positive_lesion_corroboration_failed",
+                "category": "cross_series_failure",
+                "summary": "positive_lesion_corroboration_failed",
+                "delta": None,
+                "message": str(lesion_corroboration["message"]),
+                "details": {
+                    "primary_series_id": lesion_corroboration["primary_series_id"],
+                    "supporting_series": lesion_corroboration["supporting_series"],
+                },
+            }
+        )
+    return reasons
+
+
+def _build_multi_series_verification_tiers(
+    *,
+    series_reports: list[dict[str, Any]],
+    missing_required_series_ids: tuple[str, ...],
+    geometry_verification: Mapping[str, Any],
+    lesion_corroboration: Mapping[str, Any],
+    final_release_allowed: bool,
+) -> dict[str, Any]:
+    required_reports = [report for report in series_reports if report["gating_status"] == "required"]
+    required_passed = all(report["series_release_eligible"] for report in required_reports)
+    auxiliary_failures = [
+        report["series_id"]
+        for report in series_reports
+        if report["gating_status"] == "auxiliary" and not report["series_release_eligible"]
+    ]
+    return {
+        "study_shape": {
+            "title": "Study Shape",
+            "status": "passed" if not missing_required_series_ids else "failed",
+            "summary": (
+                "Study-level payload shape and required-series references are structurally coherent."
+                if not missing_required_series_ids
+                else "The study-level policy references required series that are missing from the payload."
+            ),
+        },
+        "series_proof": {
+            "title": "Per-Series Proof",
+            "status": "passed" if required_passed else "failed",
+            "summary": (
+                "Every required series passed its own proof and profile gate."
+                if required_passed
+                else "At least one required series failed its own proof or profile gate."
+            ),
+            "auxiliary_failures": auxiliary_failures,
+        },
+        "cross_series_consistency": {
+            "title": "Cross-Series Consistency",
+            "status": (
+                "passed"
+                if geometry_verification["verified"] and lesion_corroboration["verified"]
+                else "failed"
+            ),
+            "summary": (
+                "Required-series geometry and positive-lesion corroboration both verified."
+                if geometry_verification["verified"] and lesion_corroboration["verified"]
+                else "Required-series geometry or positive-lesion corroboration did not verify."
+            ),
+        },
+        "merged_release": {
+            "title": "Merged Release",
+            "status": "passed" if final_release_allowed else "failed",
+            "summary": (
+                "The study passed the merged release gate."
+                if final_release_allowed
+                else "The study did not pass the merged release gate."
+            ),
+        },
+    }
+
+
+def _build_multi_series_study_report(
+    context: Mapping[str, Any],
+    series_reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    report_by_series_id = {report["series_id"]: report for report in series_reports}
+    required_series_ids = tuple(context["required_series_ids"])
+    auxiliary_series_ids = tuple(context["auxiliary_series_ids"])
+    missing_required = tuple(context["missing_required_series_ids"])
+    required_not_release_eligible = [
+        series_id
+        for series_id in required_series_ids
+        if not report_by_series_id[series_id]["series_release_eligible"]
+    ]
+    geometry_verification = _build_multi_series_geometry_verification(
+        required_series_ids=required_series_ids,
+        missing_required_series_ids=missing_required,
+        series_reports=report_by_series_id,
+    )
+    lesion_corroboration = _build_multi_series_lesion_corroboration(
+        primary_series_id=context["primary_series_id"],
+        supporting_series_ids=tuple(context["supporting_series_ids"]),
+        required_series_ids=required_series_ids,
+        missing_required_series_ids=missing_required,
+        geometry_verification=geometry_verification,
+        series_reports=report_by_series_id,
+    )
+    final_release_allowed = (
+        not missing_required
+        and not required_not_release_eligible
+        and bool(geometry_verification["verified"])
+        and bool(lesion_corroboration["verified"])
+    )
+    updated_series_reports: list[dict[str, Any]] = []
+    released_series_ids: list[str] = []
+    withheld_series_ids: list[str] = []
+    for report in series_reports:
+        downstream_release_allowed = bool(
+            final_release_allowed and report["series_release_eligible"]
+        )
+        updated_report = {**report, "downstream_release_allowed": downstream_release_allowed}
+        updated_series_reports.append(updated_report)
+        if downstream_release_allowed:
+            released_series_ids.append(report["series_id"])
+        else:
+            withheld_series_ids.append(report["series_id"])
+    block_category = "none"
+    if missing_required:
+        block_category = "missing_required_series"
+    elif required_not_release_eligible:
+        block_category = "required_series_not_release_eligible"
+    elif not geometry_verification["verified"]:
+        block_category = "required_series_geometry_mismatch"
+    elif not lesion_corroboration["verified"]:
+        block_category = "positive_lesion_corroboration_failed"
+    merged_release_evaluation = {
+        "verified": final_release_allowed,
+        "required_series_ids": list(required_series_ids),
+        "auxiliary_series_ids": list(auxiliary_series_ids),
+        "missing_required_series_ids": list(missing_required),
+        "required_series_not_release_eligible": list(required_not_release_eligible),
+        "released_series_ids": released_series_ids,
+        "withheld_series_ids": withheld_series_ids,
+        "block_category": block_category,
+        "final_release_allowed": final_release_allowed,
+    }
+    cross_series_trace = build_cross_series_verification_trace(
+        case_id=context["case_id"],
+        policy=context["cross_series_policy"],
+        geometry_verification=geometry_verification,
+        lesion_corroboration=lesion_corroboration,
+        merged_release_evaluation=merged_release_evaluation,
+    )
+    verification_profile_descriptor = build_multi_series_verification_profile_descriptor_set(
+        case_id=context["case_id"],
+        series_descriptors=[
+            {
+                "series_id": report["series_id"],
+                "resolved_role": report["resolved_role"],
+                "gating_status": report["gating_status"],
+                "verification_profile_descriptor": deepcopy(
+                    report["contracts"]["verification_profile_descriptor"]
+                ),
+            }
+            for report in updated_series_reports
+        ],
+    )
+    failure_reasons = _build_multi_series_failure_reasons(
+        series_reports=updated_series_reports,
+        geometry_verification=geometry_verification,
+        lesion_corroboration=lesion_corroboration,
+        merged_release_evaluation=merged_release_evaluation,
+    )
+    decision_summary = {
+        "proof_status": "passed" if final_release_allowed else "failed",
+        "profile_policy_status": "passed" if final_release_allowed else "blocked",
+        "decision_class": "final_release_candidate" if final_release_allowed else "blocked",
+        "block_category": block_category,
+        "final_release_allowed": final_release_allowed,
+        "operator_review_required": any(
+            report["decision_summary"]["operator_review_required"]
+            for report in updated_series_reports
+            if report["downstream_release_allowed"]
+        ),
+    }
+    verification_tiers = _build_multi_series_verification_tiers(
+        series_reports=updated_series_reports,
+        missing_required_series_ids=missing_required,
+        geometry_verification=geometry_verification,
+        lesion_corroboration=lesion_corroboration,
+        final_release_allowed=final_release_allowed,
+    )
+    manifest = {
+        "case_kind": MULTI_SERIES_CASE_KIND,
+        "case_id": context["case_id"],
+        "patient_pseudonym": context["patient_pseudonym"],
+        "study_uid": context["study_uid"],
+        "scanner_id": context["scanner_id"],
+        "verification_profile_descriptor": verification_profile_descriptor,
+        "cross_series_policy": context["cross_series_policy"],
+        "cross_series_verification": cross_series_trace,
+        "series_manifests": [
+            _build_multi_series_series_manifest(report) for report in updated_series_reports
+        ],
+        "decision_summary": decision_summary,
+        "verification_tiers": verification_tiers,
+    }
+    return {
+        "case_kind": MULTI_SERIES_CASE_KIND,
+        "profile": verification_profile_descriptor,
+        "analysis": {
+            "required_series_ids": list(required_series_ids),
+            "supporting_series_ids": list(context["supporting_series_ids"]),
+            "auxiliary_series_ids": list(auxiliary_series_ids),
+            "missing_required_series_ids": list(missing_required),
+            "released_series_ids": released_series_ids,
+            "withheld_series_ids": withheld_series_ids,
+            "series": [
+                {
+                    "series_id": report["series_id"],
+                    "resolved_role": report["resolved_role"],
+                    "gating_status": report["gating_status"],
+                    "series_proof_status": report["series_proof_status"],
+                    "series_release_eligible": report["series_release_eligible"],
+                    "downstream_release_allowed": report["downstream_release_allowed"],
+                    "grid_signature": deepcopy(report["grid_signature"]),
+                    "verified_mask_voxel_count": int(
+                        report["analysis"]["verified_mask_voxel_count"]
+                    ),
+                    "computed_tumor_volume_mm3": report["analysis"]["computed_tumor_volume_mm3"],
+                }
+                for report in updated_series_reports
+            ],
+            "geometry_verification": geometry_verification,
+            "lesion_corroboration": lesion_corroboration,
+        },
+        "contracts": {
+            "verification_profile_descriptor": verification_profile_descriptor,
+            "cross_series_verification_policy": context["cross_series_policy"],
+            "cross_series_verification_trace": cross_series_trace,
+        },
+        "series_reports": updated_series_reports,
+        "manifest": manifest,
+        "verification_tiers": verification_tiers,
+        "failure_reasons": failure_reasons,
+        "decision_summary": decision_summary,
+        "release_eligible": final_release_allowed,
+    }
+
+
+def _build_multi_series_workstation_payload(
+    state: Mapping[str, Any],
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "case_kind": MULTI_SERIES_CASE_KIND,
+        "case_id": state["case_id"],
+        "study_uid": state["study_uid"],
+        "scanner_id": state["scanner_id"],
+        "patient_pseudonym": state["patient_pseudonym"],
+        "cross_series_policy": deepcopy(report["contracts"]["cross_series_verification_policy"]),
+        "decision_summary": deepcopy(report["decision_summary"]),
+        "series_payloads": [
+            {
+                "series_id": series_report["series_id"],
+                "series_uid": series_report["series_uid"],
+                "sequence_id": series_report["sequence_id"],
+                "resolved_role": series_report["resolved_role"],
+                "gating_status": series_report["gating_status"],
+                "series_proof_status": series_report["series_proof_status"],
+                "downstream_release_allowed": True,
+                "workstation_payload": deepcopy(series_report["expected_workstation_payload"]),
+            }
+            for series_report in report["series_reports"]
+            if series_report["downstream_release_allowed"]
+        ],
+        "withheld_series": [
+            {
+                "series_id": series_report["series_id"],
+                "series_uid": series_report["series_uid"],
+                "sequence_id": series_report["sequence_id"],
+                "resolved_role": series_report["resolved_role"],
+                "gating_status": series_report["gating_status"],
+                "series_proof_status": series_report["series_proof_status"],
+                "downstream_release_allowed": False,
+                "withheld_reason": series_report["primary_reason_summary"],
+            }
+            for series_report in report["series_reports"]
+            if not series_report["downstream_release_allowed"]
+        ],
+    }
+
+
+def _resolve_primary_series_descriptor(state: Mapping[str, Any]) -> Any:
+    context = _build_multi_series_context(state)
+    primary_series_id = context["primary_series_id"]
+    if primary_series_id in context["series_by_id"]:
+        return verification_profile_descriptor_from_state(context["series_by_id"][primary_series_id])
+    return verification_profile_descriptor_from_state(context["series_entries"][0])
+
+
+def _flatten_multi_series_authority_sources(
+    *,
+    authority_sources_by_series_id: Mapping[str, Iterable[AuthoritySource | Mapping[str, Any]]],
+    series_order: tuple[str, ...],
+) -> tuple[AuthoritySource, ...]:
+    flattened: list[AuthoritySource] = []
+    for series_id in series_order:
+        sources = authority_sources_by_series_id[series_id]
+        flattened.extend(
+            _series_scoped_authority_source(series_id, source) for source in sources
+        )
+    return tuple(flattened)
+
+
+def _validate_multi_series_authority_sources_by_series_id(
+    *,
+    state: Mapping[str, Any],
+    authority_sources_by_series_id: Mapping[str, Iterable[AuthoritySource | Mapping[str, Any]]],
+) -> None:
+    context = _build_multi_series_context(state)
+    expected_series_ids = set(context["series_order"])
+    provided_series_ids = {str(series_id) for series_id in authority_sources_by_series_id}
+    missing_series_ids = sorted(expected_series_ids - provided_series_ids)
+    extra_series_ids = sorted(provided_series_ids - expected_series_ids)
+    if missing_series_ids:
+        raise ValueError(
+            "authority_sources_by_series_id is missing entries for payload series: "
+            + ", ".join(missing_series_ids)
+        )
+    if extra_series_ids:
+        raise ValueError(
+            "authority_sources_by_series_id contains unknown payload series: "
+            + ", ".join(extra_series_ids)
+        )
+    for series_id in context["series_order"]:
+        descriptor = verification_profile_descriptor_from_state(context["series_by_id"][series_id])
+        resolved_sources = tuple(
+            _series_scoped_authority_source(series_id, source)
+            for source in authority_sources_by_series_id[series_id]
+        )
+        seen_types = {source.source_type for source in resolved_sources}
+        missing_types = sorted(set(descriptor.required_authority_source_types) - seen_types)
+        if missing_types:
+            raise ValueError(
+                f"authority validation failed for series {series_id!r}: missing authority "
+                f"source types {', '.join(missing_types)}."
+            )
+        if any(source.details.get("series_id") != series_id for source in resolved_sources):
+            raise ValueError(
+                f"authority validation failed for series {series_id!r}: sources must stay tagged "
+                "to the owning series_id."
+            )
 
 
 def _build_demo_reconstruction(descriptor: Any) -> np.ndarray:
@@ -352,6 +1328,46 @@ def _build_release_transition(
     )
 
 
+def _build_multi_series_release_transition(
+    *,
+    transparency_log_path: Path,
+    default_profile_name: str,
+) -> Transition:
+    invariants = InvariantSet(
+        (
+            Invariant(
+                name="multi_series_required_strings_present",
+                check=_check_multi_series_required_strings,
+            ),
+            Invariant(
+                name="release_status_known",
+                check=_check_release_status,
+            ),
+            Invariant(
+                name="multi_series_study_shape_valid",
+                check=_check_multi_series_study_shape,
+            ),
+            Invariant(
+                name="release_payloads_guarded",
+                check=_check_release_payload_contract,
+            ),
+            Invariant(
+                name="released_state_matches_mathematical_trace",
+                check=_check_released_state_matches_trace,
+            ),
+        )
+    )
+    return Transition(
+        name="release_verified_multi_series_mri_study",
+        mutate=_release_multi_series_to_radiologist,
+        profile_registry=build_profile_registry(invariants),
+        default_profile=default_profile_name,
+        authority_validator=_validate_multi_series_flattened_authority_sources,
+        transparency_log=JsonlHashChainTransparencyLog(transparency_log_path),
+        verify_transparency_after_append=True,
+    )
+
+
 def _release_to_radiologist(state: dict[str, Any]) -> None:
     descriptor = get_verification_profile(
         resolve_profile_name(profile_name=None, state=state)
@@ -363,6 +1379,13 @@ def _release_to_radiologist(state: dict[str, Any]) -> None:
     contracts = _build_claim_to_proof_contracts(state, analysis, descriptor)
     state["verified_manifest"] = _build_verified_manifest(state, analysis, contracts, descriptor)
     state["workstation_payload"] = _build_workstation_payload(state, analysis, descriptor)
+    state["release_status"] = RELEASE_STATUS_RELEASED
+
+
+def _release_multi_series_to_radiologist(state: dict[str, Any]) -> None:
+    report = build_multi_series_case_verification_report(state)
+    state["verified_manifest"] = deepcopy(report["manifest"])
+    state["workstation_payload"] = _build_multi_series_workstation_payload(state, report)
     state["release_status"] = RELEASE_STATUS_RELEASED
 
 
@@ -380,6 +1403,19 @@ def _validate_authority_sources(
             f"missing authority source types {missing}."
         )
         raise ValueError(msg)
+
+
+def _validate_multi_series_flattened_authority_sources(
+    authority: str,
+    authority_sources: tuple[AuthoritySource, ...],
+) -> None:
+    del authority
+    for source in authority_sources:
+        if source.details.get("series_id"):
+            continue
+        raise ValueError(
+            "Multi-series authority sources must carry series_id in their details block."
+        )
 
 
 def _check_required_strings(state: Mapping[str, Any]) -> InvariantFailure | None:
@@ -401,6 +1437,37 @@ def _check_required_strings(state: Mapping[str, Any]) -> InvariantFailure | None
                 message=f"Field {field_name!r} must be a non-empty string.",
                 details={"field": field_name},
             )
+    return None
+
+
+def _check_multi_series_required_strings(state: Mapping[str, Any]) -> InvariantFailure | None:
+    required_fields = (
+        "case_id",
+        "patient_pseudonym",
+        "study_uid",
+        "scanner_id",
+    )
+    for field_name in required_fields:
+        value = state.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            return InvariantFailure(
+                invariant="multi_series_required_strings_present",
+                code="missing_string_field",
+                message=f"Field {field_name!r} must be a non-empty string.",
+                details={"field": field_name},
+            )
+    return None
+
+
+def _check_multi_series_study_shape(state: Mapping[str, Any]) -> InvariantFailure | None:
+    try:
+        _build_multi_series_context(state)
+    except ValueError as exc:
+        return InvariantFailure(
+            invariant="multi_series_study_shape_valid",
+            code="invalid_multi_series_study_shape",
+            message=str(exc),
+        )
     return None
 
 
@@ -512,7 +1579,6 @@ def _check_released_state_matches_trace(
                 message=str(exc),
             ),
         )
-    analysis = report["analysis"]
     failures: list[InvariantFailure] = []
     manifest = state.get("verified_manifest")
     expected_manifest = report["manifest"]
@@ -528,7 +1594,8 @@ def _check_released_state_matches_trace(
                 },
             )
         )
-    else:
+    elif state.get("case_kind") != MULTI_SERIES_CASE_KIND:
+        analysis = report["analysis"]
         for section_name in _release_gate_sections():
             section = expected_manifest[section_name]
             if section["verified"]:
@@ -544,11 +1611,30 @@ def _check_released_state_matches_trace(
                     details={"section": section_name, "section_payload": section},
                 )
             )
+    elif not report["release_eligible"]:
+        failures.append(
+            InvariantFailure(
+                invariant="released_state_matches_mathematical_trace",
+                code="release_proof_failed",
+                message=(
+                    "Released multi-series cases are only representable when the merged "
+                    "study gate verifies successfully."
+                ),
+                details={"decision_summary": report["decision_summary"]},
+            )
+        )
     workstation_payload = state.get("workstation_payload")
-    descriptor = get_verification_profile(
-        resolve_profile_name(profile_name=None, state=dict(state))
-    )
-    expected_workstation_payload = _build_workstation_payload(state, analysis, descriptor)
+    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        expected_workstation_payload = _build_multi_series_workstation_payload(state, report)
+    else:
+        descriptor = get_verification_profile(
+            resolve_profile_name(profile_name=None, state=dict(state))
+        )
+        expected_workstation_payload = _build_workstation_payload(
+            state,
+            report["analysis"],
+            descriptor,
+        )
     if workstation_payload != expected_workstation_payload:
         failures.append(
             InvariantFailure(

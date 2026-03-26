@@ -18,6 +18,7 @@ from icsd.core.serialise import canonical_json_dumps, hash_canonical_json
 from icsd.core.transition import TransitionResult
 
 from .harness import (
+    MULTI_SERIES_CASE_KIND,
     RELEASE_STATUS_RELEASED,
     MriGuardianHarness,
     _check_released_state_matches_trace,
@@ -77,7 +78,10 @@ def write_portable_evidence_bundle(
     report = build_case_verification_report(state)
     if not report["release_eligible"]:
         raise ValueError("Portable bundles can only be written for release-eligible cases.")
-    if not report["profile"]["release_semantics"]["portable_bundle_allowed"]:
+    if (
+        state.get("case_kind") != MULTI_SERIES_CASE_KIND
+        and not report["profile"]["release_semantics"]["portable_bundle_allowed"]
+    ):
         raise ValueError(
             "Portable bundles are not allowed for the selected runtime profile."
         )
@@ -175,10 +179,15 @@ def verify_portable_evidence_bundle(bundle_path: Path | str) -> dict[str, Any]:
         replay_descriptor = payloads[_REPLAY_DESCRIPTOR_NAME]
         signatures = payloads[_SIGNATURES_NAME]
         anchored_evidence_payload = _transparency_log_payload_from_mapping(evidence_payload)
-        try:
-            verification_profile_descriptor_from_dict(profile_descriptor)
-        except ValueError as exc:
-            failures.append(f"verification_profile_descriptor.json is invalid: {exc}")
+        if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+            descriptor_failure = _validate_multi_series_profile_descriptor_set(profile_descriptor)
+            if descriptor_failure is not None:
+                failures.append(descriptor_failure)
+        else:
+            try:
+                verification_profile_descriptor_from_dict(profile_descriptor)
+            except ValueError as exc:
+                failures.append(f"verification_profile_descriptor.json is invalid: {exc}")
 
         evidence_failures = validate_evidence_payload(evidence_payload)
         if evidence_failures:
@@ -317,6 +326,17 @@ def _build_bundle_manifest(
     log_snapshot: Mapping[str, Any],
     receipt_entry: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        return _build_multi_series_bundle_manifest(
+            state=state,
+            report=report,
+            evidence_payload=evidence_payload,
+            anchored_evidence_payload=anchored_evidence_payload,
+            transcript=transcript,
+            replay_descriptor=replay_descriptor,
+            log_snapshot=log_snapshot,
+            receipt_entry=receipt_entry,
+        )
     analysis = report["analysis"]
     contracts = report["contracts"]
     return {
@@ -402,6 +422,14 @@ def _build_bundle_transcript(
     receipt_entry: Mapping[str, Any],
     checkpoint: str | None,
 ) -> dict[str, Any]:
+    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        return _build_multi_series_bundle_transcript(
+            state=state,
+            report=report,
+            evidence_payload=evidence_payload,
+            receipt_entry=receipt_entry,
+            checkpoint=checkpoint,
+        )
     analysis = report["analysis"]
     manifest = report["manifest"]
     tiers = report["verification_tiers"]
@@ -498,6 +526,16 @@ def _build_replay_descriptor(
     log_snapshot: Mapping[str, Any],
     receipt_entry: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        return _build_multi_series_replay_descriptor(
+            before_state=before_state,
+            state=state,
+            report=report,
+            evidence_payload=evidence_payload,
+            anchored_evidence_payload=anchored_evidence_payload,
+            log_snapshot=log_snapshot,
+            receipt_entry=receipt_entry,
+        )
     prefix_entries = log_snapshot["entries"][: receipt_entry["index"]]
     prefix_bytes = _serialise_transparency_entries(prefix_entries)
     return {
@@ -614,6 +652,20 @@ def _verify_deterministic_replay(
     receipt_entry: Mapping[str, Any],
     scratch_root: Path,
 ) -> dict[str, Any]:
+    if input_state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        return _verify_multi_series_deterministic_replay(
+            input_state=input_state,
+            expected_state=expected_state,
+            expected_report=expected_report,
+            expected_evidence_payload=expected_evidence_payload,
+            expected_profile_descriptor=expected_profile_descriptor,
+            expected_member_bytes=expected_member_bytes,
+            expected_bundle_bytes=expected_bundle_bytes,
+            replay_descriptor=replay_descriptor,
+            log_snapshot=log_snapshot,
+            receipt_entry=receipt_entry,
+            scratch_root=scratch_root,
+        )
     failures: list[str] = []
     expected_hashes = dict(replay_descriptor["expected_hashes"])
     observed_hashes = {
@@ -699,6 +751,377 @@ def _verify_deterministic_replay(
             actor=str(replay_descriptor["actor"]),
             authority_sources=replay_descriptor["authority_sources"],
             profile_name=str(replay_descriptor["profile_name"]),
+            timestamp=str(replay_descriptor["timestamp"]),
+            transition_id=str(replay_descriptor["transition_id"]),
+        )
+        replay_evidence_payload = replay_result.evidence.as_dict()
+        if replay_result.after_state != expected_state:
+            failures.append(
+                "Deterministic replay did not reproduce the released_state.json payload."
+            )
+        if replay_evidence_payload != expected_evidence_payload:
+            failures.append("Deterministic replay did not reproduce the evidence.json payload.")
+        replay_report = build_case_verification_report(replay_result.after_state)
+        if replay_report != expected_report:
+            failures.append(
+                "Deterministic replay did not reproduce the verification_report.json payload."
+            )
+        replay_profile_descriptor = replay_report["contracts"]["verification_profile_descriptor"]
+        if replay_profile_descriptor != expected_profile_descriptor:
+            failures.append(
+                "Deterministic replay did not reproduce the verification_profile_descriptor.json payload."
+            )
+
+        replay_bundle_path = temp_root / f"{expected_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
+        write_portable_evidence_bundle(
+            result=replay_result,
+            transparency_log_path=temp_log_path,
+            output_path=replay_bundle_path,
+        )
+        replay_source = _load_bundle_source(replay_bundle_path)
+        for member_name in _REQUIRED_BUNDLE_MEMBERS:
+            if replay_source["member_bytes"][member_name] == expected_member_bytes[member_name]:
+                continue
+            failures.append(
+                f"Deterministic replay changed bundle member {member_name!r}."
+            )
+        replay_bundle_bytes = replay_bundle_path.read_bytes()
+        replay_bundle_sha256 = _sha256_hex(replay_bundle_bytes)
+        if expected_bundle_bytes is not None and replay_bundle_bytes != expected_bundle_bytes:
+            failures.append("Deterministic replay did not reproduce the original bundle archive bytes.")
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+    return {
+        "verified": not failures,
+        "failures": failures,
+        "details": {"replayed_bundle_sha256": replay_bundle_sha256},
+    }
+
+
+def _validate_multi_series_profile_descriptor_set(payload: Mapping[str, Any]) -> str | None:
+    if payload.get("interface_type") != "MultiSeriesVerificationProfileDescriptorSet":
+        return (
+            "verification_profile_descriptor.json is invalid: expected "
+            "'MultiSeriesVerificationProfileDescriptorSet'."
+        )
+    series_descriptors = payload.get("series_descriptors")
+    if not isinstance(series_descriptors, list) or not series_descriptors:
+        return (
+            "verification_profile_descriptor.json is invalid: series_descriptors must be a "
+            "non-empty list."
+        )
+    for item in series_descriptors:
+        if not isinstance(item, Mapping):
+            return (
+                "verification_profile_descriptor.json is invalid: each series descriptor "
+                "entry must be a mapping."
+            )
+        profile_descriptor = item.get("verification_profile_descriptor")
+        if not isinstance(profile_descriptor, Mapping):
+            return (
+                "verification_profile_descriptor.json is invalid: each series descriptor "
+                "entry must contain verification_profile_descriptor."
+            )
+        try:
+            verification_profile_descriptor_from_dict(dict(profile_descriptor))
+        except ValueError as exc:
+            return f"verification_profile_descriptor.json is invalid: {exc}"
+    return None
+
+
+def _group_authority_sources_by_series_id(
+    authority_sources: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for source in authority_sources:
+        details = dict(source.get("details", {}))
+        series_id = details.get("series_id")
+        if not isinstance(series_id, str) or not series_id:
+            raise ValueError("Multi-series authority source is missing details.series_id.")
+        grouped.setdefault(series_id, []).append(dict(source))
+    return grouped
+
+
+def _build_multi_series_bundle_manifest(
+    *,
+    state: Mapping[str, Any],
+    report: Mapping[str, Any],
+    evidence_payload: Mapping[str, Any],
+    anchored_evidence_payload: Mapping[str, Any],
+    transcript: Mapping[str, Any],
+    replay_descriptor: Mapping[str, Any],
+    log_snapshot: Mapping[str, Any],
+    receipt_entry: Mapping[str, Any],
+) -> dict[str, Any]:
+    contracts = report["contracts"]
+    return {
+        "schema_version": _BUNDLE_SCHEMA_VERSION,
+        "bundle_type": "mri_guard_bundle_multi_series_v2",
+        "bundle_media_type": _BUNDLE_MEDIA_TYPE,
+        "case_kind": MULTI_SERIES_CASE_KIND,
+        "case_id": state["case_id"],
+        "entity_type": evidence_payload["entity_type"],
+        "entity_id": evidence_payload["entity_id"],
+        "generated_at": evidence_payload["timestamp"],
+        "actor": evidence_payload["actor"],
+        "verdict": "This study is verifiably correct.",
+        "hashes": {
+            "verification_profile_descriptor_hash": hash_canonical_json(
+                contracts["verification_profile_descriptor"]
+            ),
+            "cross_series_verification_policy_hash": hash_canonical_json(
+                contracts["cross_series_verification_policy"]
+            ),
+            "cross_series_verification_trace_hash": hash_canonical_json(
+                contracts["cross_series_verification_trace"]
+            ),
+            "series_manifest_hashes": [
+                {
+                    "series_id": item["series_id"],
+                    "hash": hash_canonical_json(item),
+                }
+                for item in report["manifest"]["series_manifests"]
+            ],
+            "input_state_hash": replay_descriptor["expected_hashes"]["input_state_hash"],
+            "verified_manifest_hash": hash_canonical_json(state["verified_manifest"]),
+            "workstation_payload_hash": hash_canonical_json(state["workstation_payload"]),
+            "released_state_hash": hash_canonical_json(state),
+            "evidence_hash": hash_canonical_json(evidence_payload),
+            "anchored_evidence_hash": hash_canonical_json(anchored_evidence_payload),
+            "verification_report_hash": hash_canonical_json(report),
+            "transcript_hash": hash_canonical_json(transcript),
+            "transparency_log_hash": _sha256_hex(log_snapshot["bytes"]),
+            "transparency_prefix_hash": replay_descriptor["expected_hashes"][
+                "transparency_prefix_hash"
+            ],
+        },
+        "verification": {
+            "release_eligible": bool(report["release_eligible"]),
+            "decision_summary": report["decision_summary"],
+            "failure_reasons": report["failure_reasons"],
+            "tiers": {
+                key: value["status"] for key, value in report["verification_tiers"].items()
+            },
+            "released_series_ids": report["analysis"]["released_series_ids"],
+            "withheld_series_ids": report["analysis"]["withheld_series_ids"],
+        },
+        "deterministic_replay": {
+            "supported": True,
+            "mode": replay_descriptor["replay_mode"],
+            "input_member": _INPUT_STATE_NAME,
+            "replay_member": _REPLAY_DESCRIPTOR_NAME,
+            "profile_descriptor_member": _PROFILE_DESCRIPTOR_NAME,
+            "transition_id": replay_descriptor["transition_id"],
+        },
+        "transparency": {
+            "receipt_reference": _transparency_receipt(evidence_payload)["reference"],
+            "entry_hash": receipt_entry["entry_hash"],
+            "previous_entry_hash": receipt_entry["previous_entry_hash"],
+            "checkpoint": log_snapshot["checkpoint"],
+            "entry_index": receipt_entry["index"],
+            "log_length": len(log_snapshot["entries"]),
+        },
+        "members": list(_REQUIRED_BUNDLE_MEMBERS),
+        "signatures_member": _SIGNATURES_NAME,
+    }
+
+
+def _build_multi_series_bundle_transcript(
+    *,
+    state: Mapping[str, Any],
+    report: Mapping[str, Any],
+    evidence_payload: Mapping[str, Any],
+    receipt_entry: Mapping[str, Any],
+    checkpoint: str | None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": _BUNDLE_SCHEMA_VERSION,
+        "transcript_type": "portable_mri_guard_multi_series_transcript",
+        "case_id": state["case_id"],
+        "timestamp": evidence_payload["timestamp"],
+        "actor": evidence_payload["actor"],
+        "statement": "This study is verifiably correct.",
+        "events": [
+            {
+                "stage": "profile_set",
+                "summary": "Resolved the ordered study profile descriptor set.",
+                "details": {
+                    "descriptor_hash": hash_canonical_json(
+                        report["contracts"]["verification_profile_descriptor"]
+                    ),
+                    "series_count": len(report["series_reports"]),
+                },
+            },
+            {
+                "stage": "per_series_proof",
+                "summary": "Verified every payload series independently.",
+                "details": {
+                    "series": [
+                        {
+                            "series_id": item["series_id"],
+                            "resolved_role": item["resolved_role"],
+                            "gating_status": item["gating_status"],
+                            "series_proof_status": item["series_proof_status"],
+                        }
+                        for item in report["series_reports"]
+                    ],
+                },
+            },
+            {
+                "stage": "cross_series_consistency",
+                "summary": "Evaluated required-series geometry and positive-lesion corroboration.",
+                "details": {
+                    "geometry_verification": report["contracts"]["cross_series_verification_trace"][
+                        "geometry_verification"
+                    ],
+                    "lesion_corroboration": report["contracts"]["cross_series_verification_trace"][
+                        "lesion_corroboration"
+                    ],
+                },
+            },
+            {
+                "stage": "release",
+                "summary": "Released only the study series that remained downstream-allowed after the merged gate.",
+                "details": {
+                    "release_status": state["release_status"],
+                    "released_series_ids": report["analysis"]["released_series_ids"],
+                    "withheld_series_ids": report["analysis"]["withheld_series_ids"],
+                    "workstation_payload_hash": hash_canonical_json(state["workstation_payload"]),
+                    "verified_manifest_hash": hash_canonical_json(state["verified_manifest"]),
+                },
+            },
+            {
+                "stage": "transparency",
+                "summary": "Anchored the ICSD evidence envelope into the append-only transparency hash chain.",
+                "details": {
+                    "receipt_reference": _transparency_receipt(evidence_payload)["reference"],
+                    "entry_hash": receipt_entry["entry_hash"],
+                    "previous_entry_hash": receipt_entry["previous_entry_hash"],
+                    "checkpoint": checkpoint,
+                },
+            },
+        ],
+    }
+
+
+def _build_multi_series_replay_descriptor(
+    *,
+    before_state: Mapping[str, Any],
+    state: Mapping[str, Any],
+    report: Mapping[str, Any],
+    evidence_payload: Mapping[str, Any],
+    anchored_evidence_payload: Mapping[str, Any],
+    log_snapshot: Mapping[str, Any],
+    receipt_entry: Mapping[str, Any],
+) -> dict[str, Any]:
+    prefix_entries = log_snapshot["entries"][: receipt_entry["index"]]
+    prefix_bytes = _serialise_transparency_entries(prefix_entries)
+    primary_series_report = next(
+        item for item in report["series_reports"] if item["resolved_role"] == "primary"
+    )
+    return {
+        "schema_version": _BUNDLE_SCHEMA_VERSION,
+        "case_kind": MULTI_SERIES_CASE_KIND,
+        "replay_type": "deterministic_mri_guard_multi_series_replay",
+        "replay_mode": "seeded_transparency_prefix",
+        "statement": "Same replay input produces identical multi-series output and identical hashes.",
+        "entity_type": evidence_payload["entity_type"],
+        "entity_id": evidence_payload["entity_id"],
+        "authority": evidence_payload["authority"],
+        "actor": evidence_payload["actor"],
+        "timestamp": evidence_payload["timestamp"],
+        "transition_id": evidence_payload["transition_id"],
+        "default_profile_name": primary_series_report["profile"]["profile_name"],
+        "authority_sources_by_series_id": _group_authority_sources_by_series_id(
+            list(evidence_payload["authority_sources"])
+        ),
+        "transparency_prefix_entry_count": receipt_entry["index"],
+        "expected_hashes": {
+            "input_state_hash": hash_canonical_json(before_state),
+            "released_state_hash": hash_canonical_json(state),
+            "workstation_payload_hash": hash_canonical_json(state["workstation_payload"]),
+            "verified_manifest_hash": hash_canonical_json(state["verified_manifest"]),
+            "verification_profile_descriptor_hash": hash_canonical_json(
+                report["contracts"]["verification_profile_descriptor"]
+            ),
+            "evidence_hash": hash_canonical_json(evidence_payload),
+            "anchored_evidence_hash": hash_canonical_json(anchored_evidence_payload),
+            "verification_report_hash": hash_canonical_json(report),
+            "transparency_prefix_hash": _sha256_hex(prefix_bytes),
+        },
+    }
+
+
+def _verify_multi_series_deterministic_replay(
+    *,
+    input_state: Mapping[str, Any],
+    expected_state: Mapping[str, Any],
+    expected_report: Mapping[str, Any],
+    expected_evidence_payload: Mapping[str, Any],
+    expected_profile_descriptor: Mapping[str, Any],
+    expected_member_bytes: Mapping[str, bytes],
+    expected_bundle_bytes: bytes | None,
+    replay_descriptor: Mapping[str, Any],
+    log_snapshot: Mapping[str, Any],
+    receipt_entry: Mapping[str, Any],
+    scratch_root: Path,
+) -> dict[str, Any]:
+    failures: list[str] = []
+    expected_hashes = dict(replay_descriptor["expected_hashes"])
+    observed_hashes = {
+        "input_state_hash": hash_canonical_json(input_state),
+        "released_state_hash": hash_canonical_json(expected_state),
+        "workstation_payload_hash": hash_canonical_json(expected_state["workstation_payload"]),
+        "verified_manifest_hash": hash_canonical_json(expected_state["verified_manifest"]),
+        "verification_profile_descriptor_hash": hash_canonical_json(expected_profile_descriptor),
+        "evidence_hash": hash_canonical_json(expected_evidence_payload),
+        "anchored_evidence_hash": hash_canonical_json(
+            _transparency_log_payload_from_mapping(expected_evidence_payload)
+        ),
+        "verification_report_hash": hash_canonical_json(expected_report),
+        "transparency_prefix_hash": _sha256_hex(
+            _serialise_transparency_entries(log_snapshot["entries"][: receipt_entry["index"]])
+        ),
+    }
+    for hash_name, observed_value in observed_hashes.items():
+        if expected_hashes.get(hash_name) == observed_value:
+            continue
+        failures.append(
+            f"replay.json expected {hash_name}={expected_hashes.get(hash_name)!r}, got {observed_value!r}."
+        )
+
+    descriptor_failure = _validate_multi_series_profile_descriptor_set(expected_profile_descriptor)
+    if descriptor_failure is not None:
+        failures.append(descriptor_failure)
+
+    replay_bundle_sha256 = None
+    if failures:
+        return {
+            "verified": False,
+            "failures": failures,
+            "details": {"replayed_bundle_sha256": replay_bundle_sha256},
+        }
+
+    prefix_entries = log_snapshot["entries"][: receipt_entry["index"]]
+    prefix_bytes = _serialise_transparency_entries(prefix_entries)
+    temp_root = scratch_root / (
+        f".mri_guard_replay_{_sha256_hex(_json_bytes(replay_descriptor))[:12]}"
+    )
+    if temp_root.exists():
+        shutil.rmtree(temp_root, ignore_errors=True)
+    temp_root.mkdir(parents=True, exist_ok=True)
+    try:
+        temp_log_path = temp_root / _TRANSPARENCY_LOG_NAME
+        temp_log_path.write_bytes(prefix_bytes)
+        harness = MriGuardianHarness(
+            transparency_log_path=temp_log_path,
+            default_profile_name=str(replay_descriptor["default_profile_name"]),
+        )
+        replay_result = harness.release_multi_series_case(
+            state=input_state,
+            actor=str(replay_descriptor["actor"]),
+            authority_sources_by_series_id=replay_descriptor["authority_sources_by_series_id"],
             timestamp=str(replay_descriptor["timestamp"]),
             transition_id=str(replay_descriptor["transition_id"]),
         )

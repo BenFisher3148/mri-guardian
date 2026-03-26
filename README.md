@@ -8,7 +8,7 @@ It is intentionally non-invasive. The reconstruction AI and the PACS/workstation
 
 - What it is: a verification layer between a raw MRI AI and PACS/workstation handoff.
 - What it prevents: invented pixels, unsupported tumour masks, and incorrect tumour-volume claims moving through the Guardian path.
-- What the demo shows: accepted verification, live tamper detection, portable evidence bundles, mocked DICOM/PACS integration, and bounded performance.
+- What the demo shows: accepted verification, live tamper detection, portable evidence bundles, mocked DICOM/PACS integration, bounded performance, and additive `multi_series_v2` study gating.
 - What it is not: a replacement PACS, scanner, or reporting workstation.
 
 ## Quick Review Path
@@ -17,6 +17,7 @@ If you are short on time, the fastest way to understand the repo is:
 
 1. Install the general environment from [requirements.txt](requirements.txt) or the exact reviewed stack from [requirements-review.txt](requirements-review.txt), then install the local package with `pip install -e .`.
 2. Run the deterministic demo with `mri-guardian demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode`.
+   Or run the additive study-level path with `mri-guardian demo --output-dir demo_artifacts --case-kind multi_series_v2`.
 3. Open `demo_artifacts/comparison.html` and one of the `tamper_*.html` reports.
 4. If you want the deeper model, then read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/INTEROPERABILITY.md](docs/INTEROPERABILITY.md), and [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
@@ -26,6 +27,7 @@ After `pip install -e .`, the repository exposes a single CLI:
 
 ```powershell
 mri-guardian demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode
+mri-guardian demo --output-dir demo_artifacts --case-kind multi_series_v2
 mri-guardian verify demo_artifacts
 mri-guardian test
 ```
@@ -34,6 +36,7 @@ The same commands also work as a module entrypoint:
 
 ```powershell
 python -m mri_guardian demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode
+python -m mri_guardian demo --output-dir demo_artifacts --case-kind multi_series_v2
 python -m mri_guardian verify demo_artifacts
 python -m mri_guardian test
 ```
@@ -53,6 +56,15 @@ The verification envelope is now split into three explainability tiers:
 - Level 1: Structural validity. ICSD-facing checks over identifiers, numeric tensors, voxel geometry, and release-state shape.
 - Level 2: Physical consistency. Raw k-space reprojection, deterministic reconstruction parity, mask parity, and tumour-volume proof.
 - Level 3: Clinical plausibility. Profile-scoped heuristics over the verified anatomy, with centrally defined `disabled`, `advisory`, `warning`, and `blocking` semantics.
+
+The repository now also supports an additive `multi_series_v2` study container. In that path:
+
+- every payload series is individually verified and reported
+- `required_series_ids` is the only authoritative merged-release gating set
+- auxiliary series are preserved and reported but remain non-gating for this milestone
+- duplicate payload `series_id` values and empty `supporting_series_ids` are hard study-shape failures; the path does not auto-downgrade to single-series
+- same-grid geometry uses exact equality over canonicalized voxel spacing plus voxel shape
+- positive-lesion corroboration uses exact coordinate intersection count `> 0`
 
 ## Runtime Profiles
 
