@@ -30,6 +30,50 @@ _STATE_FIELDS = (
     "verified_manifest",
     "workstation_payload",
 )
+_OPTIONAL_STATE_FIELDS = ("ai_stack_identity",)
+_AI_RUNTIME_CONTEXT_FIELDS = (
+    "inference_runtime_version",
+    "inference_device_class",
+)
+
+
+def _require_runtime_string(value: Any, *, path: str) -> str:
+    if type(value) is not str or value == "":
+        raise ValueError(f"{path} must be a non-empty string.")
+    return value
+
+
+def _canonical_ai_runtime_context(
+    value: Any,
+) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if type(value) is not dict:
+        raise ValueError("ai_runtime_context must be an object.")
+    missing_fields = [
+        field for field in _AI_RUNTIME_CONTEXT_FIELDS if field not in value
+    ]
+    if missing_fields:
+        missing = ", ".join(missing_fields)
+        raise ValueError(f"ai_runtime_context is missing required fields: {missing}.")
+    unexpected_fields = sorted(
+        field for field in value if field not in set(_AI_RUNTIME_CONTEXT_FIELDS)
+    )
+    if unexpected_fields:
+        unexpected = ", ".join(unexpected_fields)
+        raise ValueError(
+            f"ai_runtime_context contains unsupported fields: {unexpected}."
+        )
+    return {
+        "inference_runtime_version": _require_runtime_string(
+            value["inference_runtime_version"],
+            path="ai_runtime_context.inference_runtime_version",
+        ),
+        "inference_device_class": _require_runtime_string(
+            value["inference_device_class"],
+            path="ai_runtime_context.inference_device_class",
+        ),
+    }
 
 
 def _input_field_hash(state: dict[str, Any], field: str) -> str | None:
@@ -161,9 +205,11 @@ def build_mock_dicom_input(
     *,
     source_ae_title: str = "MRI-AI-SCANNER",
     destination_ae_title: str = "MRI-GUARDIAN-LAYER",
+    ai_runtime_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a mocked DICOM ingress envelope for the Guardian Layer."""
     report = build_case_verification_report(state)
+    runtime_context = _canonical_ai_runtime_context(ai_runtime_context)
     integration_narrative = build_guardian_integration_narrative(
         current_guardian_decision="pending_verification",
     )
@@ -171,7 +217,7 @@ def build_mock_dicom_input(
         objects: list[dict[str, Any]] = []
         for series_report in report["series_reports"]:
             objects.extend(_multi_series_input_objects(series_report))
-        return {
+        payload = {
             "schema_version": _INTEGRATION_SCHEMA_VERSION,
             "kind": "mock_dicom_input",
             "transport": "dicom-c-store",
@@ -202,7 +248,10 @@ def build_mock_dicom_input(
             "integration_narrative": integration_narrative,
             "guardian_case": deepcopy(state),
         }
-    return {
+        if runtime_context is not None:
+            payload["ai_runtime_context"] = runtime_context
+        return payload
+    payload = {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_dicom_input",
         "transport": "dicom-c-store",
@@ -233,6 +282,9 @@ def build_mock_dicom_input(
         "integration_narrative": integration_narrative,
         "guardian_case": deepcopy(dict(state)),
     }
+    if runtime_context is not None:
+        payload["ai_runtime_context"] = runtime_context
+    return payload
 
 
 def restore_case_state_from_dicom_input(dicom_input: dict[str, Any]) -> dict[str, Any]:
@@ -247,7 +299,11 @@ def restore_case_state_from_dicom_input(dicom_input: dict[str, Any]) -> dict[str
     missing_fields = [field for field in _STATE_FIELDS if field not in case_state]
     if missing_fields:
         return deepcopy(case_state)
-    return {field: deepcopy(case_state[field]) for field in _STATE_FIELDS}
+    restored_state = {field: deepcopy(case_state[field]) for field in _STATE_FIELDS}
+    for field in _OPTIONAL_STATE_FIELDS:
+        if field in case_state:
+            restored_state[field] = deepcopy(case_state[field])
+    return restored_state
 
 
 def build_mock_pacs_submission(
@@ -256,10 +312,12 @@ def build_mock_pacs_submission(
     source_ae_title: str = "MRI-GUARDIAN-LAYER",
     destination_ae_title: str = "NHS-RAD-WS-PACS",
     bundle_reference: str | None = None,
+    ai_runtime_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a mocked PACS handoff envelope for an accepted case."""
     state = result.after_state
     report = build_case_verification_report(state)
+    runtime_context = _canonical_ai_runtime_context(ai_runtime_context)
     if not report["release_eligible"]:
         raise ValueError("Mock PACS submission requires a release-eligible case.")
     contracts = report["contracts"]
@@ -311,7 +369,7 @@ def build_mock_pacs_submission(
                 },
             ]
         )
-        return {
+        payload = {
             "schema_version": _INTEGRATION_SCHEMA_VERSION,
             "kind": "mock_pacs_submission",
             "transport": "dicom-c-store",
@@ -352,13 +410,16 @@ def build_mock_pacs_submission(
                 "cross_series_verification_trace": contracts["cross_series_verification_trace"],
             },
         }
+        if runtime_context is not None:
+            payload["ai_runtime_context"] = runtime_context
+        return payload
     workstation_payload = state["workstation_payload"]
     evidence_hash = hash_canonical_json(result.evidence.as_dict())
     manifest_hash = hash_canonical_json(state["verified_manifest"])
     integration_narrative = build_guardian_integration_narrative(
         current_guardian_decision="released",
     )
-    return {
+    payload = {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_pacs_submission",
         "transport": "dicom-c-store",
@@ -420,13 +481,11 @@ def build_mock_pacs_submission(
             "profile_digest": report["manifest"]["profile_digest"],
         },
         "integration_narrative": integration_narrative,
-        "proof_contracts": {
-            "verification_profile_descriptor": contracts["verification_profile_descriptor"],
-            "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
-            "mask_derivation_policy": contracts["mask_derivation_policy"],
-            "verification_tolerance_policy": contracts["verification_tolerance_policy"],
-        },
+        "proof_contracts": _single_series_proof_contracts(report),
     }
+    if runtime_context is not None:
+        payload["ai_runtime_context"] = runtime_context
+    return payload
 
 
 def build_mock_pacs_block_notice(
@@ -434,9 +493,11 @@ def build_mock_pacs_block_notice(
     *,
     source_ae_title: str = "MRI-GUARDIAN-LAYER",
     destination_ae_title: str = "NHS-RAD-WS-PACS",
+    ai_runtime_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a mocked PACS block notice for a rejected case."""
     report = build_case_verification_report(state)
+    runtime_context = _canonical_ai_runtime_context(ai_runtime_context)
     contracts = report["contracts"]
     if report["release_eligible"]:
         raise ValueError("Mock PACS block notice requires a rejected case.")
@@ -445,7 +506,7 @@ def build_mock_pacs_block_notice(
         current_guardian_decision="blocked",
     )
     if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
-        return {
+        payload = {
             "schema_version": _INTEGRATION_SCHEMA_VERSION,
             "kind": "mock_pacs_block_notice",
             "transport": "dicom-c-store",
@@ -494,7 +555,10 @@ def build_mock_pacs_block_notice(
                 for item in report["analysis"]["series"]
             ],
         }
-    return {
+        if runtime_context is not None:
+            payload["ai_runtime_context"] = runtime_context
+        return payload
+    payload = {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_pacs_block_notice",
         "transport": "dicom-c-store",
@@ -526,16 +590,25 @@ def build_mock_pacs_block_notice(
         "proof_contracts": _single_series_proof_contracts(report),
         "withheld_series": _single_series_withheld_series(report),
     }
+    if runtime_context is not None:
+        payload["ai_runtime_context"] = runtime_context
+    return payload
 
 
 def build_mock_integration_trace(
     *,
     dicom_input: dict[str, Any],
     pacs_output: dict[str, Any],
+    ai_runtime_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a mocked boundary trace from DICOM ingress to PACS egress."""
     state = restore_case_state_from_dicom_input(dicom_input)
     report = build_case_verification_report(state)
+    runtime_context = _canonical_ai_runtime_context(
+        ai_runtime_context
+        if ai_runtime_context is not None
+        else pacs_output.get("ai_runtime_context", dicom_input.get("ai_runtime_context"))
+    )
     pacs_kind = pacs_output.get("kind")
     if pacs_kind not in {"mock_pacs_submission", "mock_pacs_block_notice"}:
         raise ValueError("Unsupported PACS output envelope.")
@@ -544,7 +617,7 @@ def build_mock_integration_trace(
         current_guardian_decision=str(pacs_output["submission_status"]),
     )
     if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
-        return {
+        payload = {
             "schema_version": _INTEGRATION_SCHEMA_VERSION,
             "kind": "mock_integration_trace",
             "case_id": _string_or_fallback(state.get("case_id"), "unknown-case"),
@@ -588,7 +661,10 @@ def build_mock_integration_trace(
                 "pacs_output_hash": hash_canonical_json(pacs_output),
             },
         }
-    return {
+        if runtime_context is not None:
+            payload["ai_runtime_context"] = runtime_context
+        return payload
+    payload = {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_integration_trace",
         "case_id": _string_or_fallback(state.get("case_id"), "unknown-case"),
@@ -631,6 +707,9 @@ def build_mock_integration_trace(
             "pacs_output_hash": hash_canonical_json(pacs_output),
         },
     }
+    if runtime_context is not None:
+        payload["ai_runtime_context"] = runtime_context
+    return payload
 
 
 def build_guardian_integration_narrative(
@@ -724,6 +803,8 @@ def _single_series_proof_contracts(report: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "verification_profile_descriptor": contracts["verification_profile_descriptor"],
     }
+    if "ai_claim_envelope" in contracts:
+        payload["ai_claim_envelope"] = contracts["ai_claim_envelope"]
     for key in (
         "verified_reconstruction_trace",
         "mask_derivation_policy",

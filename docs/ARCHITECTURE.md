@@ -33,6 +33,7 @@ The Guardian Layer is intentionally non-invasive. It does not replace the MRI sc
 - Release is fail-closed for the Guardian handoff. If blocking proof fails, nothing verified is forwarded downstream.
 - Identical inputs must produce identical released state, evidence, bundle members, and replay hashes.
 - The replay path must bind to the embedded runtime profile descriptor by `profile_name`, `profile_revision`, and `profile_digest`, not the process default.
+- Canonical `ai_stack_identity` is claim-bound declared provenance when present. It affects claim identity hashes, but it is not an independently verified physical invariant of the proof process.
 - New monitoring logic must treat the additive `decision` object as canonical; `decision_summary` remains compatibility-only.
 - In `multi_series_v2`, all payload series are individually verified and reported, but only `required_series_ids` participate in merged release gating.
 - In `multi_series_v2`, study order is proof-significant for canonical serialization, stable diffs, and deterministic replay.
@@ -46,6 +47,13 @@ The architecture separates three identities:
 - Descriptive metadata: `sequence_family`, `clinical_mode`
 
 The canonical `VerificationProfileDescriptor` is a first-class artifact. It is serialized with stable field ordering, hashed with SHA-256 over an explicit digest scope, and embedded in reports, released manifests, replay descriptors, and portable bundles.
+
+The claim layer now carries two different AI identities:
+
+- `ai_model_id`: coarse upstream model-family identifier
+- `ai_stack_identity`: optional exact declared model-stack identity bound into `AIClaimEnvelope`
+
+`ai_stack_identity` is canonicalized when present, but it remains a producer declaration. Guardian proves reconstruction, mask, and volume consistency against raw data; it does not independently verify the truth of the declared model stack itself.
 
 ## Approved Mask Algorithm Catalogue
 

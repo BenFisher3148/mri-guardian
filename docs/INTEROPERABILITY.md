@@ -71,6 +71,20 @@ The mocked PACS and trace surfaces mirror the canonical decision object from the
 - `pacs_block_notice.json -> verification_summary.canonical_decision`
 - `integration_trace.json -> pipeline[guardian_layer].canonical_decision`
 
+Mocked operational envelopes may also carry optional `ai_runtime_context`:
+
+- `inference_runtime_version`
+- `inference_device_class`
+
+This runtime context is operational-only. It is excluded from Guardian core state,
+proof hashes, manifests, evidence, bundle hashes, and replay material.
+
+For single-series summaries, `proof_contracts.ai_claim_envelope` is now surfaced
+directly so audit consumers can inspect canonical declared claim provenance without
+opening the full manifest. That visibility does not change the semantics:
+`ai_claim_envelope.ai_stack_identity` is canonical claim provenance, not runtime
+provenance and not independently verified model validity.
+
 For deterministic structural rejects, the mocked DICOM ingress and downstream trace artifacts still remain available even if proof-only contract members such as the AI claim envelope could not be derived. Those fields may therefore be absent or `null` on fail-soft structural examples.
 
 ## Fail-Open vs Fail-Closed

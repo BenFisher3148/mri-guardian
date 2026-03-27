@@ -95,6 +95,57 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.runtime_root.mkdir(parents=True, exist_ok=False)
         self.addCleanup(self._cleanup_runtime_root)
 
+    def _attach_ai_stack_identity(
+        self,
+        state: dict[str, object],
+        *,
+        compatibility_type: str = "exact_sequence_id",
+        declared_value: str | None = None,
+        parameters: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        if declared_value is None:
+            if compatibility_type == "sequence_family":
+                descriptor = verification_profile_descriptor_from_dict(
+                    dict(state["verification_profile_descriptor"])
+                )
+                declared_value = descriptor.sequence_family
+            else:
+                declared_value = str(state["sequence_id"])
+        state["ai_stack_identity"] = {
+            "model_version_id": "raw-mri-ai-v4.1.0",
+            "weights_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "preprocessing_pipeline_sha256": (
+                "1111111111111111111111111111111111111111111111111111111111111111"
+            ),
+            "postprocessing_pipeline_sha256": (
+                "2222222222222222222222222222222222222222222222222222222222222222"
+            ),
+            "input_normalization": {
+                "scheme": "zscore_per_channel",
+                "parameters": (
+                    parameters
+                    if parameters is not None
+                    else {
+                        "channel_order": {"secondary": 1, "primary": 0},
+                        "clip_range": [0.0, 1.0],
+                        "epsilon": 1e-6,
+                        "per_channel": True,
+                    }
+                ),
+            },
+            "sequence_model_compatibility": {
+                "compatibility_type": compatibility_type,
+                "declared_value": declared_value,
+            },
+        }
+        return state
+
+    def _ai_runtime_context(self) -> dict[str, str]:
+        return {
+            "inference_runtime_version": "guardian-runtime/2.3.4",
+            "inference_device_class": "cuda_sm80",
+        }
+
     def test_profile_registry_lists_expected_profiles_and_compat_aliases(self) -> None:
         self.assertEqual(
             list_verification_profiles(),
@@ -631,6 +682,131 @@ class MriGuardianHarnessTests(unittest.TestCase):
             hash_canonical_json(report["contracts"]["verification_tolerance_policy"]),
         )
         self.assertEqual(state["verification_profile_descriptor"], report["profile"])
+
+    def test_ai_claim_envelope_preserves_legacy_shape_when_ai_stack_identity_is_absent(self) -> None:
+        state = build_demo_case()
+
+        report = build_case_verification_report(state)
+        expected_claim_envelope = {
+            "interface_type": "AIClaimEnvelope",
+            "interface_version": "2026.03",
+            "claim_scope": "reconstruction_segmentation_volume",
+            "case_id": state["case_id"],
+            "study_uid": state["study_uid"],
+            "series_uid": state["series_uid"],
+            "patient_pseudonym": state["patient_pseudonym"],
+            "ai_model_id": state["ai_model_id"],
+            "raw_kspace_hash": report["analysis"]["raw_hash"],
+            "voxel_spacing_mm": state["voxel_spacing_mm"],
+            "claimed_outputs": {
+                "ai_reconstruction_hash": report["analysis"]["ai_reconstruction_hash"],
+                "ai_mask_hash": report["analysis"]["ai_mask_hash"],
+                "claimed_tumor_volume_mm3": state["tumor_volume_mm3"],
+            },
+        }
+
+        self.assertEqual(report["contracts"]["ai_claim_envelope"], expected_claim_envelope)
+        self.assertNotIn("ai_stack_identity", report["contracts"]["ai_claim_envelope"])
+        self.assertEqual(
+            canonical_json_dumps(report["contracts"]["ai_claim_envelope"]),
+            canonical_json_dumps(expected_claim_envelope),
+        )
+
+    def test_ai_claim_envelope_binds_declared_ai_stack_identity_into_claim_hashes(self) -> None:
+        state_without_provenance = build_demo_case()
+        state_with_provenance = self._attach_ai_stack_identity(build_demo_case())
+
+        baseline_report = build_case_verification_report(state_without_provenance)
+        provenance_report = build_case_verification_report(state_with_provenance)
+
+        self.assertNotIn("ai_stack_identity", baseline_report["contracts"]["ai_claim_envelope"])
+        self.assertEqual(
+            provenance_report["contracts"]["ai_claim_envelope"]["ai_stack_identity"],
+            state_with_provenance["ai_stack_identity"],
+        )
+        self.assertNotEqual(
+            hash_canonical_json(baseline_report["contracts"]["ai_claim_envelope"]),
+            hash_canonical_json(provenance_report["contracts"]["ai_claim_envelope"]),
+        )
+        self.assertEqual(
+            provenance_report["contracts"]["verified_reconstruction_trace"]["claim_envelope_hash"],
+            hash_canonical_json(provenance_report["contracts"]["ai_claim_envelope"]),
+        )
+
+    def test_ai_stack_identity_rejects_invalid_json_like_parameters(self) -> None:
+        invalid_parameters = (
+            {"bad": None},
+            {"bad": (1, 2)},
+            {"bad": np.float64(1.0)},
+            {"bad": float("inf")},
+            {"bad": object()},
+        )
+
+        for parameters in invalid_parameters:
+            with self.subTest(parameters=repr(parameters)):
+                state = self._attach_ai_stack_identity(
+                    build_demo_case(),
+                    parameters=parameters,
+                )
+                report = build_case_verification_report(state)
+
+                self.assertFalse(report["release_eligible"])
+                self.assertEqual(report["decision"]["decision_class"], "blocked_structural")
+                self.assertEqual(
+                    report["failure_reasons"][0]["code"],
+                    "invalid_ai_stack_identity",
+                )
+
+    def test_ai_stack_identity_rejects_invalid_sha256_formats_and_empty_identifier_fields(self) -> None:
+        invalid_overrides = {
+            "weights_sha256": " 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "preprocessing_pipeline_sha256": (
+                "0x1111111111111111111111111111111111111111111111111111111111111111"
+            ),
+            "postprocessing_pipeline_sha256": (
+                "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"
+            ),
+            "model_version_id": "",
+        }
+
+        for field_name, invalid_value in invalid_overrides.items():
+            with self.subTest(field_name=field_name):
+                state = self._attach_ai_stack_identity(build_demo_case())
+                state["ai_stack_identity"][field_name] = invalid_value
+                report = build_case_verification_report(state)
+
+                self.assertFalse(report["release_eligible"])
+                self.assertEqual(report["decision"]["decision_class"], "blocked_structural")
+                self.assertEqual(
+                    report["failure_reasons"][0]["code"],
+                    "invalid_ai_stack_identity",
+                )
+
+    def test_ai_stack_identity_rejects_sequence_compatibility_mismatches(self) -> None:
+        cases = (
+            ("exact_sequence_id", "wrong-sequence"),
+            ("sequence_family", "not-a-known-family"),
+            ("sequence_family", "brain_t2"),
+        )
+
+        for compatibility_type, declared_value in cases:
+            with self.subTest(
+                compatibility_type=compatibility_type,
+                declared_value=declared_value,
+            ):
+                state = self._attach_ai_stack_identity(
+                    build_demo_case(),
+                    compatibility_type=compatibility_type,
+                    declared_value=declared_value,
+                )
+                report = build_case_verification_report(state)
+
+                self.assertFalse(report["release_eligible"])
+                self.assertEqual(report["decision"]["decision_class"], "blocked_structural")
+                self.assertEqual(
+                    report["failure_reasons"][0]["code"],
+                    "invalid_ai_stack_identity",
+                )
 
     def test_morphology_profile_releases_and_keeps_mask_policy_nested(self) -> None:
         _, result = self._release_demo_case(profile_name="brain_t1_morphology_review")
@@ -1435,6 +1611,18 @@ class MriGuardianHarnessTests(unittest.TestCase):
             "between_reconstruction_ai_and_pacs",
         )
 
+    def test_mock_dicom_input_round_trips_optional_ai_stack_identity(self) -> None:
+        state = self._attach_ai_stack_identity(build_demo_case())
+
+        dicom_input = build_mock_dicom_input(state)
+        restored_state = restore_case_state_from_dicom_input(dicom_input)
+
+        self.assertEqual(restored_state, state)
+        self.assertEqual(
+            dicom_input["ai_claim_envelope"]["ai_stack_identity"],
+            state["ai_stack_identity"],
+        )
+
     def test_mock_pacs_submission_exposes_verified_handoff_contract(self) -> None:
         _, result = self._release_demo_case()
 
@@ -1469,6 +1657,78 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(integration_trace["pipeline"][0]["label"], "DICOM Input")
         self.assertEqual(integration_trace["pipeline"][1]["decision_class"], "final_release_candidate")
         self.assertEqual(integration_trace["pipeline"][2]["label"], "PACS Output")
+
+    def test_single_series_proof_contracts_include_ai_claim_envelope(self) -> None:
+        state = self._attach_ai_stack_identity(build_demo_case())
+        result = self._build_harness().release_case(
+            state=state,
+            actor="guardian:test",
+            authority_sources=build_demo_authority_sources(case_id=state["case_id"]),
+            timestamp="2026-03-26T00:00:00Z",
+        )
+
+        pacs_submission = build_mock_pacs_submission(result)
+        structural_block_state = build_demo_case()
+        structural_block_state["verification_profile_descriptor"] = {
+            "profile_name": "does_not_exist"
+        }
+        pacs_block = build_mock_pacs_block_notice(structural_block_state)
+
+        self.assertIn("ai_claim_envelope", pacs_submission["proof_contracts"])
+        self.assertEqual(
+            pacs_submission["proof_contracts"]["ai_claim_envelope"]["ai_stack_identity"],
+            state["ai_stack_identity"],
+        )
+        self.assertNotIn("ai_claim_envelope", pacs_block["proof_contracts"])
+
+    def test_ai_runtime_context_remains_integration_only(self) -> None:
+        runtime_context = self._ai_runtime_context()
+        state = self._attach_ai_stack_identity(build_demo_case())
+        dicom_input = build_mock_dicom_input(
+            state,
+            ai_runtime_context=runtime_context,
+        )
+        result = self._build_harness().release_case(
+            state=state,
+            actor="guardian:test",
+            authority_sources=build_demo_authority_sources(case_id=state["case_id"]),
+            timestamp="2026-03-26T00:00:00Z",
+        )
+        pacs_submission = build_mock_pacs_submission(
+            result,
+            ai_runtime_context=runtime_context,
+        )
+        integration_trace = build_mock_integration_trace(
+            dicom_input=dicom_input,
+            pacs_output=pacs_submission,
+        )
+        restored_state = restore_case_state_from_dicom_input(dicom_input)
+        report = build_case_verification_report(result.after_state)
+
+        self.assertEqual(dicom_input["ai_runtime_context"], runtime_context)
+        self.assertEqual(pacs_submission["ai_runtime_context"], runtime_context)
+        self.assertEqual(integration_trace["ai_runtime_context"], runtime_context)
+        self.assertNotIn("ai_runtime_context", restored_state)
+        self.assertNotIn("ai_runtime_context", result.after_state)
+        self.assertNotIn("ai_runtime_context", result.after_state["verified_manifest"])
+        self.assertNotIn("ai_runtime_context", report["contracts"]["ai_claim_envelope"])
+
+    def test_ai_runtime_context_validation_rejects_malformed_payloads(self) -> None:
+        invalid_contexts = (
+            {"inference_runtime_version": "guardian-runtime/2.3.4"},
+            {
+                "inference_runtime_version": "guardian-runtime/2.3.4",
+                "inference_device_class": "",
+            },
+        )
+
+        for invalid_context in invalid_contexts:
+            with self.subTest(invalid_context=invalid_context):
+                with self.assertRaisesRegex(ValueError, "ai_runtime_context"):
+                    build_mock_dicom_input(
+                        build_demo_case(),
+                        ai_runtime_context=invalid_context,
+                    )
 
     def test_boundary_release_surfaces_canonical_reason_in_viewer_and_pacs(self) -> None:
         state = build_demo_case()
@@ -1586,6 +1846,37 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(workstation_payload["withheld_series"], [])
         report = build_multi_series_case_verification_report(result.after_state)
         self.assertTrue(report["release_eligible"])
+        self.assertEqual(report["contracts"]["verification_profile_descriptor"], report["profile"])
+
+    def test_multi_series_claim_provenance_remains_per_series_only(self) -> None:
+        state = build_multi_series_demo_case()
+        primary_series = self._series_entry(state, "t1-primary")
+        auxiliary_series = self._series_entry(state, "derived-auxiliary")
+        self._attach_ai_stack_identity(primary_series)
+        self._attach_ai_stack_identity(
+            auxiliary_series,
+            compatibility_type="sequence_family",
+        )
+
+        report = build_multi_series_case_verification_report(state)
+        series_reports = {
+            item["series_id"]: item
+            for item in report["series_reports"]
+        }
+
+        self.assertIn(
+            "ai_stack_identity",
+            series_reports["t1-primary"]["contracts"]["ai_claim_envelope"],
+        )
+        self.assertNotIn(
+            "ai_stack_identity",
+            series_reports["t2-supporting"]["contracts"]["ai_claim_envelope"],
+        )
+        self.assertIn(
+            "ai_stack_identity",
+            series_reports["derived-auxiliary"]["contracts"]["ai_claim_envelope"],
+        )
+        self.assertNotIn("ai_claim_envelope", report["contracts"])
         self.assertEqual(report["contracts"]["verification_profile_descriptor"], report["profile"])
 
     def test_multi_series_geometry_mismatch_blocks_merged_release(self) -> None:

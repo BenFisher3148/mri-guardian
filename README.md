@@ -282,11 +282,13 @@ The AI can suggest a reconstruction, but it cannot inject a different pixel rast
 
 That interface is now explicit rather than implied. The harness emits:
 
-- `AIClaimEnvelope`: the AI-side reconstruction, mask, and volume claim anchored to the raw-input hash
+- `AIClaimEnvelope`: the AI-side reconstruction, mask, and volume claim anchored to the raw-input hash, with optional canonical declared `ai_stack_identity`
 - `MaskDerivationPolicy`: the approved deterministic algorithm identity and canonical resolved parameters that turn a raw-derived reconstruction into the admissible mask
 - `VerificationTolerancePolicy`: the attack-aware tolerance contract that states which metrics are per-voxel, global-norm, and frequency-domain
 - `VerificationProfileDescriptor`: the canonical runtime profile contract with `profile_name`, `profile_revision`, `profile_digest`, release semantics, authority requirements, heuristics, and performance expectations
 - `VerifiedReconstructionTrace`: the proof object that links the raw measurements, derived reconstruction, mask policy, and verified volume back to the original claim
+
+When present, `ai_stack_identity` is canonical claim provenance rather than a new physical proof. Guardian canonicalizes and hashes the producer declaration into the claim identity, but it does not independently verify that the declared model stack itself is true.
 
 Tolerance handling is also explicit rather than hand-wavy. The verifier now defines:
 
@@ -345,6 +347,8 @@ That means a reviewer can carry the artifact elsewhere, verify it offline, and s
 The replay layer makes the bundle regulator-friendly: `verify_bundle(...)` does not just check static integrity. It replays the release from the bundled `input_state.json`, `replay.json`, and transparency-log prefix, then confirms that the regenerated released state, evidence payload, and bundle members are identical.
 
 Replay identity now includes the embedded runtime profile descriptor. A verifier can therefore prove not just "the profile name was `brain_t1_baseline`" but "the exact canonical descriptor body used at runtime had this digest."
+
+The same distinction applies to declared AI stack provenance: if `ai_stack_identity` is present, replay can prove that the released artifacts were bound to that exact declaration. It does not elevate that declaration into an independently proven model-validity statement.
 
 The added viewer makes that boundary human-visible. It renders the verification proxy exactly as a reviewer would experience it:
 

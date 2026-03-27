@@ -2,13 +2,220 @@
 
 from __future__ import annotations
 
+import math
+import re
+from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
 from icsd.core.serialise import hash_canonical_json
 
 from .mask_engine import THRESHOLD_ALGORITHM, resolve_mask_policy
-from .profiles import build_verification_profile_descriptor
+from .profiles import (
+    build_verification_profile_descriptor,
+    get_verification_profile,
+    list_verification_profiles,
+    resolve_profile_name,
+    verification_profile_descriptor_from_dict,
+)
+
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_AI_STACK_IDENTITY_FIELDS = (
+    "model_version_id",
+    "weights_sha256",
+    "preprocessing_pipeline_sha256",
+    "postprocessing_pipeline_sha256",
+    "input_normalization",
+    "sequence_model_compatibility",
+)
+_INPUT_NORMALIZATION_FIELDS = ("scheme", "parameters")
+_SEQUENCE_MODEL_COMPATIBILITY_FIELDS = ("compatibility_type", "declared_value")
+
+
+def _require_object_shape(
+    value: Any,
+    *,
+    path: str,
+    required_fields: tuple[str, ...],
+) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise ValueError(f"{path} must be an object.")
+    missing_fields = [field for field in required_fields if field not in value]
+    if missing_fields:
+        missing = ", ".join(missing_fields)
+        raise ValueError(f"{path} is missing required fields: {missing}.")
+    unexpected_fields = sorted(
+        field for field in value if field not in set(required_fields)
+    )
+    if unexpected_fields:
+        unexpected = ", ".join(unexpected_fields)
+        raise ValueError(f"{path} contains unsupported fields: {unexpected}.")
+    return dict(value)
+
+
+def _require_non_empty_string(value: Any, *, path: str) -> str:
+    if type(value) is not str or value == "":
+        raise ValueError(f"{path} must be a non-empty string.")
+    return value
+
+
+def _require_sha256_hex(value: Any, *, path: str) -> str:
+    digest = _require_non_empty_string(value, path=path)
+    if digest != digest.strip():
+        raise ValueError(
+            f"{path} must be lowercase hex with no leading or trailing whitespace."
+        )
+    if digest.startswith("0x"):
+        raise ValueError(f"{path} must not include a 0x prefix.")
+    if not _SHA256_HEX_RE.fullmatch(digest):
+        raise ValueError(f"{path} must be a lowercase SHA-256 hex digest.")
+    return digest
+
+
+def _canonicalise_json_like(value: Any, *, path: str) -> Any:
+    if type(value) is str:
+        return value
+    if type(value) is bool:
+        return value
+    if type(value) is int:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{path} must not contain non-finite float values.")
+        return value
+    if type(value) is list:
+        return [
+            _canonicalise_json_like(item, path=f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if type(value) is dict:
+        payload: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError(f"{path} must contain only string keys.")
+            payload[key] = _canonicalise_json_like(item, path=f"{path}.{key}")
+        return payload
+    if value is None:
+        raise ValueError(f"{path} must not contain null values.")
+    raise ValueError(
+        f"{path} contains unsupported value type {type(value).__name__!r}."
+    )
+
+
+def _sequence_family_vocabulary() -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                get_verification_profile(profile_name).sequence_family
+                for profile_name in list_verification_profiles()
+            }
+        )
+    )
+
+
+def _expected_sequence_family_from_state(state: Mapping[str, Any]) -> str:
+    profile_descriptor = state.get("verification_profile_descriptor")
+    if isinstance(profile_descriptor, Mapping):
+        try:
+            return verification_profile_descriptor_from_dict(
+                dict(profile_descriptor)
+            ).sequence_family
+        except ValueError:
+            profile_name = profile_descriptor.get("profile_name")
+            if isinstance(profile_name, str) and profile_name.strip():
+                return get_verification_profile(profile_name.strip()).sequence_family
+    resolved_profile_name = resolve_profile_name(profile_name=None, state=dict(state))
+    return get_verification_profile(resolved_profile_name).sequence_family
+
+
+def canonicalise_ai_stack_identity(state: Mapping[str, Any]) -> dict[str, Any] | None:
+    payload = state.get("ai_stack_identity")
+    if payload is None:
+        return None
+    ai_stack_identity = _require_object_shape(
+        payload,
+        path="ai_stack_identity",
+        required_fields=_AI_STACK_IDENTITY_FIELDS,
+    )
+    input_normalization = _require_object_shape(
+        ai_stack_identity["input_normalization"],
+        path="ai_stack_identity.input_normalization",
+        required_fields=_INPUT_NORMALIZATION_FIELDS,
+    )
+    sequence_model_compatibility = _require_object_shape(
+        ai_stack_identity["sequence_model_compatibility"],
+        path="ai_stack_identity.sequence_model_compatibility",
+        required_fields=_SEQUENCE_MODEL_COMPATIBILITY_FIELDS,
+    )
+    compatibility_type = _require_non_empty_string(
+        sequence_model_compatibility["compatibility_type"],
+        path="ai_stack_identity.sequence_model_compatibility.compatibility_type",
+    )
+    declared_value = _require_non_empty_string(
+        sequence_model_compatibility["declared_value"],
+        path="ai_stack_identity.sequence_model_compatibility.declared_value",
+    )
+    if compatibility_type not in {"exact_sequence_id", "sequence_family"}:
+        raise ValueError(
+            "ai_stack_identity.sequence_model_compatibility.compatibility_type "
+            "must be 'exact_sequence_id' or 'sequence_family'."
+        )
+    if compatibility_type == "exact_sequence_id":
+        sequence_id = _require_non_empty_string(
+            state.get("sequence_id"),
+            path="state.sequence_id",
+        )
+        if declared_value != sequence_id:
+            raise ValueError(
+                "ai_stack_identity.sequence_model_compatibility.declared_value "
+                "must exactly match state.sequence_id."
+            )
+    else:
+        allowed_values = _sequence_family_vocabulary()
+        expected_sequence_family = _expected_sequence_family_from_state(state)
+        if declared_value not in allowed_values:
+            raise ValueError(
+                "ai_stack_identity.sequence_model_compatibility.declared_value "
+                "must be a known verification-profile sequence_family."
+            )
+        if declared_value != expected_sequence_family:
+            raise ValueError(
+                "ai_stack_identity.sequence_model_compatibility.declared_value "
+                "must match the active case/profile sequence_family."
+            )
+    return {
+        "model_version_id": _require_non_empty_string(
+            ai_stack_identity["model_version_id"],
+            path="ai_stack_identity.model_version_id",
+        ),
+        "weights_sha256": _require_sha256_hex(
+            ai_stack_identity["weights_sha256"],
+            path="ai_stack_identity.weights_sha256",
+        ),
+        "preprocessing_pipeline_sha256": _require_sha256_hex(
+            ai_stack_identity["preprocessing_pipeline_sha256"],
+            path="ai_stack_identity.preprocessing_pipeline_sha256",
+        ),
+        "postprocessing_pipeline_sha256": _require_sha256_hex(
+            ai_stack_identity["postprocessing_pipeline_sha256"],
+            path="ai_stack_identity.postprocessing_pipeline_sha256",
+        ),
+        "input_normalization": {
+            "scheme": _require_non_empty_string(
+                input_normalization["scheme"],
+                path="ai_stack_identity.input_normalization.scheme",
+            ),
+            "parameters": _canonicalise_json_like(
+                input_normalization["parameters"],
+                path="ai_stack_identity.input_normalization.parameters",
+            ),
+        },
+        "sequence_model_compatibility": {
+            "compatibility_type": compatibility_type,
+            "declared_value": declared_value,
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -25,9 +232,10 @@ class AIClaimEnvelope:
     ai_reconstruction_hash: str
     ai_mask_hash: str
     claimed_tumor_volume_mm3: float
+    ai_stack_identity: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "interface_type": "AIClaimEnvelope",
             "interface_version": "2026.03",
             "claim_scope": "reconstruction_segmentation_volume",
@@ -36,14 +244,17 @@ class AIClaimEnvelope:
             "series_uid": self.series_uid,
             "patient_pseudonym": self.patient_pseudonym,
             "ai_model_id": self.ai_model_id,
-            "raw_kspace_hash": self.raw_kspace_hash,
-            "voxel_spacing_mm": self.voxel_spacing_mm,
-            "claimed_outputs": {
-                "ai_reconstruction_hash": self.ai_reconstruction_hash,
-                "ai_mask_hash": self.ai_mask_hash,
-                "claimed_tumor_volume_mm3": self.claimed_tumor_volume_mm3,
-            },
         }
+        if self.ai_stack_identity is not None:
+            payload["ai_stack_identity"] = deepcopy(self.ai_stack_identity)
+        payload["raw_kspace_hash"] = self.raw_kspace_hash
+        payload["voxel_spacing_mm"] = list(self.voxel_spacing_mm)
+        payload["claimed_outputs"] = {
+            "ai_reconstruction_hash": self.ai_reconstruction_hash,
+            "ai_mask_hash": self.ai_mask_hash,
+            "claimed_tumor_volume_mm3": self.claimed_tumor_volume_mm3,
+        }
+        return payload
 
 
 @dataclass(frozen=True)
@@ -315,6 +526,7 @@ def build_ai_claim_envelope(
         ai_reconstruction_hash=ai_reconstruction_hash,
         ai_mask_hash=ai_mask_hash,
         claimed_tumor_volume_mm3=float(claimed_tumor_volume_mm3),
+        ai_stack_identity=canonicalise_ai_stack_identity(state),
     ).to_dict()
 
 

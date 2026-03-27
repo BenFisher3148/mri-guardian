@@ -15,6 +15,7 @@ The base case state is the canonical input to the verification harness.
 | `scanner_id` | `str` | Scanner or acquisition source identifier. |
 | `sequence_id` | `str` | MRI acquisition or protocol name. |
 | `ai_model_id` | `str` | Identifier for the upstream AI model. |
+| `ai_stack_identity` | `dict | None` | Optional canonical declared AI stack identity bound into `AIClaimEnvelope` when present. This is claim provenance, not an independently verified physical invariant. |
 | `release_status` | `str` | `pending_verification` or `released_to_radiologist`. |
 | `raw_real` | `list[list[list[float]]]` | Real component of raw k-space. |
 | `raw_imag` | `list[list[list[float]]]` | Imaginary component of raw k-space. |
@@ -38,7 +39,7 @@ The base case state is the canonical input to the verification harness.
 | `study_uid` | `str` | Study identifier preserved across ingress and egress. |
 | `scanner_id` | `str` | Study-level scanner identifier. |
 | `release_status` | `str` | `pending_verification` or `released_to_radiologist`. |
-| `series` | `list[dict]` | Ordered payload series. Each entry contains a unique `series_id` plus the existing per-series raw, AI, mask, volume, and embedded profile fields. |
+| `series` | `list[dict]` | Ordered payload series. Each entry contains a unique `series_id` plus the existing per-series raw, AI, mask, volume, embedded profile fields, and optional per-series `ai_stack_identity`. |
 | `cross_series_policy` | `dict` | Study-level gate selecting `primary_series_id`, `supporting_series_ids`, `required_series_ids`, the geometry rule, and the corroboration rule. |
 | `verified_manifest` | `dict | None` | Released study manifest. Includes every payload series in proof-significant order. |
 | `workstation_payload` | `dict | None` | Released study payload. Includes only downstream-allowed series plus an explicit withheld-series summary. |
@@ -96,7 +97,7 @@ Defined in [`../mri_guardian/contracts.py`](../mri_guardian/contracts.py).
 | Interface | Purpose | Key fields |
 | --- | --- | --- |
 | `VerificationProfileDescriptor` | Canonical runtime profile contract | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, release semantics, canonical `mask_rules`, heuristics, performance expectations |
-| `AIClaimEnvelope` | AI-side claim over reconstruction, mask, and volume | case identity, `raw_kspace_hash`, AI output hashes, claimed volume |
+| `AIClaimEnvelope` | AI-side claim over reconstruction, mask, volume, and optional declared AI stack identity | case identity, `raw_kspace_hash`, AI output hashes, claimed volume, optional `ai_stack_identity` |
 | `MaskDerivationPolicy` | Deterministic mapping from raw-derived reconstruction to verified mask | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, proof-significant `algorithm`, and canonical resolved `parameters` |
 | `VerificationTolerancePolicy` | Explicit numeric tolerance contract | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, per-voxel, per-frequency, global-norm, imaginary leakage, and volume tolerances |
 | `VerifiedReconstructionTrace` | Proof trace from raw k-space to verified reconstruction, mask, and volume | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, raw hash, derived hash, verified mask hash, measurement metrics, claim comparison metrics |
@@ -104,6 +105,29 @@ Defined in [`../mri_guardian/contracts.py`](../mri_guardian/contracts.py).
 | `CrossSeriesVerificationTrace` | Study-level trace for geometry, corroboration, and merged release evaluation | `geometry_verification`, `lesion_corroboration`, `merged_release_evaluation` |
 | `MultiSeriesVerificationProfileDescriptorSet` | Ordered wrapper around per-series runtime profile descriptors | proof-significant ordered `series_descriptors` list |
 | `GuardianIntegrationNarrative` | Hospital-facing integration narrative | DICOM compliance story, hospital placement, fail-closed behaviour |
+
+### AI Stack Identity Shape
+
+- `ai_stack_identity` is optional as a whole, but mandatory in full when present.
+- It is canonical claim provenance: the Guardian canonicalizes and binds the producer declaration, but does not independently prove that the declared model stack is true.
+- Required fields:
+  - `model_version_id`
+  - `weights_sha256`
+  - `preprocessing_pipeline_sha256`
+  - `postprocessing_pipeline_sha256`
+  - `input_normalization`
+  - `sequence_model_compatibility`
+- SHA-256 fields must be lowercase hex with no leading/trailing whitespace and no `0x` prefix.
+- Empty strings are invalid for identifier and digest fields.
+- `input_normalization.parameters` must be `JsonLike`:
+  - scalar values: `str`, `bool`, `int`, finite `float`
+  - composite values: `list[JsonLike]`, `dict[str, JsonLike]`
+  - rejected values: `null`, non-finite floats, non-string keys, tuples, sets, bytes, numpy scalars, datetimes, and custom objects
+- Floating-point values are serialized only through the repository's canonical JSON encoder. Producers must not rely on language-specific float string representations outside that encoder.
+- Input dictionaries may be supplied in any order, but canonicalization relies on the repository serializer. Upstream ordering must not affect canonical output.
+- `sequence_model_compatibility` is mandatory inside `ai_stack_identity`:
+  - `compatibility_type = exact_sequence_id` requires exact equality with `state["sequence_id"]`
+  - `compatibility_type = sequence_family` requires one of the registry-backed `VerificationProfileDescriptor.sequence_family` values and must match the active case/profile context
 
 ### Mask Policy Shape
 

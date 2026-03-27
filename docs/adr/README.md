@@ -13,6 +13,7 @@ This directory records architecture decisions that materially affect invariants,
 - [`0007-connected-component-mask-policy-family.md`](0007-connected-component-mask-policy-family.md)
 - [`0008-slice-consistency-mask-policy-family.md`](0008-slice-consistency-mask-policy-family.md)
 - [`0009-multi-series-study-release-gating.md`](0009-multi-series-study-release-gating.md)
+- [`0010-canonical-ai-claim-provenance-split.md`](0010-canonical-ai-claim-provenance-split.md)
 
 ## ADR Rules
 

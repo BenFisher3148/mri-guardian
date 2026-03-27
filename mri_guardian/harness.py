@@ -26,6 +26,7 @@ from .contracts import (
     build_verification_profile_contract,
     build_verification_tolerance_policy,
     build_verified_reconstruction_trace,
+    canonicalise_ai_stack_identity,
 )
 from .mask_engine import (
     CONNECTED_COMPONENT_ALGORITHM,
@@ -980,7 +981,7 @@ def _build_multi_series_series_state(
     series_id: str,
 ) -> dict[str, Any]:
     entry = dict(context["series_by_id"][series_id])
-    return {
+    payload = {
         "case_id": context["case_id"],
         "patient_pseudonym": context["patient_pseudonym"],
         "study_uid": context["study_uid"],
@@ -999,6 +1000,9 @@ def _build_multi_series_series_state(
         "verified_manifest": None,
         "workstation_payload": None,
     }
+    if "ai_stack_identity" in entry:
+        payload["ai_stack_identity"] = deepcopy(entry["ai_stack_identity"])
+    return payload
 
 
 def _canonical_voxel_spacing_tuple(
@@ -1731,6 +1735,10 @@ def _build_release_transition(
                 check=_check_release_status,
             ),
             Invariant(
+                name="ai_stack_identity_valid",
+                check=_check_ai_stack_identity,
+            ),
+            Invariant(
                 name="raw_real_numeric",
                 check=NumbaBatchFieldInvariant(
                     field="raw_real",
@@ -1957,6 +1965,19 @@ def _check_release_status(state: Mapping[str, Any]) -> InvariantFailure | None:
         message="release_status must be a known MRI guardian state.",
         details={"release_status": value},
     )
+
+
+def _check_ai_stack_identity(state: Mapping[str, Any]) -> InvariantFailure | None:
+    try:
+        canonicalise_ai_stack_identity(state)
+    except ValueError as exc:
+        return InvariantFailure(
+            invariant="ai_stack_identity_valid",
+            code="invalid_ai_stack_identity",
+            message=str(exc),
+            details={"field": "ai_stack_identity"},
+        )
+    return None
 
 
 def _check_geometry_consistent(state: Mapping[str, Any]) -> InvariantFailure | None:
@@ -2599,6 +2620,14 @@ def _build_structural_validity_checks(
             label="Release status",
             failure=_check_release_status(state),
             success_message="release_status is a known guardian state.",
+        ),
+        _invariant_check_result(
+            code="invalid_ai_stack_identity",
+            label="Declared AI stack identity",
+            failure=_check_ai_stack_identity(state),
+            success_message=(
+                "Declared AI stack identity is absent or canonically valid for the active case context."
+            ),
         ),
     ]
     checks.extend(_numeric_field_checks(state))
