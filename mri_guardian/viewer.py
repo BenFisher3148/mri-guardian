@@ -29,10 +29,12 @@ def build_side_by_side_view_model(
     """Return a deterministic model for side-by-side AI versus verified review."""
     if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
         return _build_multi_series_view_model(state)
+    report = build_case_verification_report(state, profile_name=profile_name)
+    if _is_minimal_structural_report(report):
+        return _build_minimal_single_series_view_model(state, report)
     arrays, failure = _extract_arrays(state)
     if failure is not None:
         raise ValueError(failure.message)
-    report = build_case_verification_report(state, profile_name=profile_name)
     analysis = report["analysis"]
     manifest = report["manifest"]
     reasons = report["failure_reasons"]
@@ -133,6 +135,7 @@ def build_side_by_side_view_model(
         "ai_label": "AI Reconstruction + Proposed Tumour Mask",
         "verified_label": "Guardian Layer Reconstruction + Verified Mask",
         "release_eligible": bool(report["release_eligible"]),
+        "decision": report["decision"],
         "decision_summary": decision_summary,
         "verification": verification,
         "timing": timing,
@@ -185,6 +188,7 @@ def _build_multi_series_view_model(state: dict[str, Any]) -> dict[str, Any]:
         "title": "MRI Guardian Layer",
         "subtitle": "Study-level verification across multiple MRI series.",
         "release_eligible": bool(report["release_eligible"]),
+        "decision": report["decision"],
         "decision_summary": report["decision_summary"],
         "verification": {
             "headline": (
@@ -235,6 +239,110 @@ def _build_multi_series_view_model(state: dict[str, Any]) -> dict[str, Any]:
         "timing_profiles": timing_profiles,
         "primary_profile_name": primary_series["profile"]["profile_name"],
     }
+
+
+def _is_minimal_structural_report(report: dict[str, Any]) -> bool:
+    return (
+        report["decision"]["decision_class"] == "blocked_structural"
+        and report["analysis"].get("derived_reconstruction_hash") is None
+    )
+
+
+def _build_minimal_single_series_view_model(
+    state: dict[str, Any],
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    verification = _build_verification_summary(
+        report=report,
+        reasons=report["failure_reasons"],
+        tiers=report["verification_tiers"],
+        release_eligible=False,
+    )
+    case_id = state.get("case_id")
+    timing = build_timing_overlay_snapshot(report["profile"]["profile_name"])
+    claimed_volume = state.get("tumor_volume_mm3")
+    claimed_volume_display = (
+        _round_float(float(claimed_volume))
+        if isinstance(claimed_volume, (int, float))
+        else "Unavailable"
+    )
+    return {
+        "title": "MRI Guardian Layer",
+        "subtitle": "Verification proxy between the reconstruction AI and the PACS/workstation boundary.",
+        "profile_name": report["profile"]["profile_name"],
+        "profile_revision": report["profile"]["profile_revision"],
+        "profile_digest": report["profile"]["profile_digest"],
+        "icsd_policy_id": report["profile"]["icsd_policy_id"],
+        "icsd_policy_version": report["profile"]["icsd_policy_version"],
+        "ai_label": "AI Reconstruction + Proposed Tumour Mask",
+        "verified_label": "Guardian Layer Reconstruction + Verified Mask",
+        "release_eligible": False,
+        "decision": report["decision"],
+        "decision_summary": report["decision_summary"],
+        "verification": verification,
+        "timing": timing,
+        "findings": [
+            "Guardian structural intake blocked proof construction before physical consistency could be evaluated.",
+            *[reason["message"] for reason in report["decision"]["decision_reasons"]],
+        ],
+        "clinical_summary": {
+            "status_state": "blocked",
+            "status_label": "NOT VERIFIED",
+            "status_note": (
+                "Blocked before downstream handoff. "
+                f"Reason: {verification['primary_reason_summary']}."
+            ),
+            "tumor_volume_cm3": "Unavailable",
+            "tumor_volume_note": (
+                "Verified tumour volume was not computed because structural intake "
+                "did not allow proof construction."
+            ),
+            "confidence_label": "Structural intake block",
+            "confidence_note": (
+                "The Guardian Layer refused downstream release before physical proof "
+                "construction could begin."
+            ),
+            "audit_id": _short_audit_id(_minimal_structural_audit_hash(state, report)),
+            "audit_note": (
+                "Deterministic structural-block fingerprint for "
+                f"{case_id if isinstance(case_id, str) and case_id.strip() else 'the received case'}."
+            ),
+        },
+        "integration": _build_integration_summary(
+            release_eligible=False,
+            decision_class=report["decision_summary"]["decision_class"],
+            primary_reason=verification["primary_reason_summary"],
+        ),
+        "summary": {
+            "mask_voxel_delta": 0,
+            "rejected_region_count": 0,
+            "intensity_mismatch_voxel_count": 0,
+            "verified_mask_voxel_count": "Unavailable",
+            "claimed_tumor_volume_mm3": claimed_volume_display,
+            "verified_tumor_volume_mm3": "Unavailable",
+            "volume_verified": False,
+            "max_ai_abs_error": "Unavailable",
+            "max_measurement_abs_error": "Unavailable",
+        },
+        "intensity_window": {"min": 0.0, "max": 1.0},
+        "differences": {"rows": [], "omitted_count": 0},
+        "slices": [],
+    }
+
+
+def _minimal_structural_audit_hash(
+    state: dict[str, Any],
+    report: dict[str, Any],
+) -> str:
+    return hash_canonical_json(
+        {
+            "case_id": state.get("case_id"),
+            "study_uid": state.get("study_uid"),
+            "series_uid": state.get("series_uid"),
+            "input_state_hash": report["analysis"].get("input_state_hash"),
+            "decision": report["decision"],
+        }
+    ).upper()
 
 
 def _render_multi_series_report_html(
@@ -1496,7 +1604,22 @@ def _build_verification_summary(
 ) -> dict[str, Any]:
     ordered_tiers = _ordered_tiers(tiers)
     tier_view_models = [_tier_view_model(tier) for tier in ordered_tiers]
+    decision = report["decision"]
     decision_summary = report["decision_summary"]
+    if decision["decision_class"] == "blocked_structural":
+        primary_reason = reasons[0] if reasons else {
+            "summary": "structural_intake_block",
+            "message": "Guardian structural intake blocked proof construction.",
+        }
+        return {
+            "headline": "Structural BLOCKED",
+            "primary_reason_summary": primary_reason["summary"],
+            "reasons": [
+                {"code": reason["code"], "message": reason["message"]}
+                for reason in reasons
+            ],
+            "tiers": tier_view_models,
+        }
     if decision_summary["proof_status"] == "failed":
         primary_reason = reasons[0] if reasons else {
             "summary": "verification_blocked_by_structural_or_physical_gate",

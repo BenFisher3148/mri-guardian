@@ -36,6 +36,7 @@ The trust boundary sits at the Guardian Layer:
 - Explicit claim-to-proof interfaces with stable hashes.
 - Fail-closed Guardian release gate for blocking proof failures.
 - Distinct `proof_failure`, `heuristic_block`, and `profile_policy_block` outcomes in reports and bundles.
+- Additive canonical `decision` object with `blocked_structural`, `blocked_physical`, `blocked_policy`, `verified_clean`, `verified_boundary_hugging`, and `verified_with_advisory` monitoring classes.
 - Transparency log anchoring for evidence receipts.
 - Portable bundle integrity catalog.
 - Deterministic replay that verifies released state, evidence payload, and bundle members.
@@ -50,6 +51,8 @@ The Guardian Layer is fail-closed for the verified handoff:
 - If a runtime profile is non-final, proof may still pass, but no final released state or portable bundle is produced from the Guardian path.
 - If the Guardian service is unavailable, the Guardian path does not automatically pass AI outputs through.
 - Any operational fail-open workflow would need to be an explicit external process outside this repository's Guardian model.
+
+`blocked_policy` is intentionally narrow. It applies only when structure is valid, proof is valid, and downstream release is denied by explicit configured release policy such as a triage-only profile or a configured blocking clinical heuristic. Unexpected post-proof faults must not be reclassified as policy outcomes.
 
 ## Sensitive Data Assumptions
 

@@ -387,6 +387,7 @@ def _build_bundle_manifest(
         },
         "verification": {
             "release_eligible": bool(report["release_eligible"]),
+            "decision": report["decision"],
             "decision_summary": report["decision_summary"],
             "failure_reasons": report["failure_reasons"],
             "tiers": {
@@ -898,6 +899,7 @@ def _build_multi_series_bundle_manifest(
         },
         "verification": {
             "release_eligible": bool(report["release_eligible"]),
+            "decision": report["decision"],
             "decision_summary": report["decision_summary"],
             "failure_reasons": report["failure_reasons"],
             "tiers": {

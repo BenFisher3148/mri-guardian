@@ -295,6 +295,41 @@ Tolerance handling is also explicit rather than hand-wavy. The verifier now defi
 - a separate imaginary-leakage bound on the inverse FFT output
 - a deterministic guard band so near-threshold cases are marked as boundary-hugging rather than looking identical to comfortably passing cases
 
+Verification reports now expose two decision layers:
+
+- the hard handoff gate remains `release_eligible` plus the final released/blocked disposition
+- the additive canonical `decision` object carries the richer monitoring class used by new dashboards and summaries
+
+The canonical `decision` object fixes `evaluation_stage` to one of:
+
+- `intake_validation`
+- `structural_validity`
+- `physical_consistency`
+- `clinical_plausibility`
+- `policy_evaluation`
+- `multi_series_aggregation`
+- `release_control`
+
+The canonical `decision.decision_class` values are:
+
+- `verified_clean`
+- `verified_boundary_hugging`
+- `verified_with_advisory`
+- `blocked_structural`
+- `blocked_physical`
+- `blocked_policy`
+
+The report keeps `decision_summary` for compatibility, but that legacy block is no longer the canonical contract for new monitoring logic. New consumers should use `decision.decision_class`.
+
+Reason ordering inside `decision.reason_codes` and `decision.decision_reasons` is deterministic:
+
+- the primary class-determining reason appears first
+- same-stage supporting reasons follow
+- secondary modifiers follow after that
+- advisory and info reasons come last, with lexical tie-breaks inside each band
+
+`verified_boundary_hugging` is also pinned down explicitly: only passing proof metrics with `boundary_status = near_boundary` are eligible, and `near_boundary` means "within the configured guard band of the relevant failure threshold." The current eligible metrics are the measurement-consistency metrics, AI-reconstruction parity metrics, and the tumour-volume tolerance metric. Exact mask equality is still binary and does not participate in guard-band classification.
+
 The portable bundle pushes that one step further. Each accepted case now emits a shareable `.mri-guard-bundle` archive containing:
 
 - the ICSD evidence envelope

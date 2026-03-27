@@ -264,6 +264,7 @@ def build_mock_pacs_submission(
                 "case_kind": MULTI_SERIES_CASE_KIND,
                 "decision": "released",
                 "decision_class": report["decision_summary"]["decision_class"],
+                "canonical_decision": deepcopy(report["decision"]),
                 "primary_reason": _primary_reason_summary(report),
                 "tier_statuses": _tier_statuses(report),
                 "proof_status": report["decision_summary"]["proof_status"],
@@ -337,6 +338,7 @@ def build_mock_pacs_submission(
             "guardian_mode": "verification_proxy",
             "decision": "released",
             "decision_class": report["decision_summary"]["decision_class"],
+            "canonical_decision": deepcopy(report["decision"]),
             "primary_reason": _primary_reason_summary(report),
             "tier_statuses": _tier_statuses(report),
             "proof_status": report["decision_summary"]["proof_status"],
@@ -397,6 +399,7 @@ def build_mock_pacs_block_notice(
                 "case_kind": MULTI_SERIES_CASE_KIND,
                 "decision": "blocked",
                 "decision_class": report["decision_summary"]["decision_class"],
+                "canonical_decision": deepcopy(report["decision"]),
                 "tier_statuses": _tier_statuses(report),
                 "proof_status": report["decision_summary"]["proof_status"],
                 "profile_policy_status": report["decision_summary"]["profile_policy_status"],
@@ -432,9 +435,9 @@ def build_mock_pacs_block_notice(
             "destination_ae_title": destination_ae_title,
         },
         "study": {
-            "case_id": state["case_id"],
-            "study_uid": state["study_uid"],
-            "source_series_uid": state["series_uid"],
+            "case_id": _string_or_fallback(state.get("case_id"), "unknown-case"),
+            "study_uid": _string_or_fallback(state.get("study_uid"), "unknown-study"),
+            "source_series_uid": _string_or_fallback(state.get("series_uid"), "unknown-series"),
         },
         "submission_status": "blocked",
         "blocked_reason": _primary_reason_summary(report),
@@ -443,37 +446,17 @@ def build_mock_pacs_block_notice(
             "guardian_mode": "verification_proxy",
             "decision": "blocked",
             "decision_class": report["decision_summary"]["decision_class"],
+            "canonical_decision": deepcopy(report["decision"]),
             "tier_statuses": _tier_statuses(report),
             "proof_status": report["decision_summary"]["proof_status"],
             "profile_policy_status": report["decision_summary"]["profile_policy_status"],
-            "verified_tumor_volume_mm3": analysis["computed_tumor_volume_mm3"],
+            "verified_tumor_volume_mm3": analysis.get("computed_tumor_volume_mm3"),
             "profile_name": report["manifest"]["profile_name"],
             "profile_digest": report["manifest"]["profile_digest"],
         },
         "integration_narrative": integration_narrative,
-        "proof_contracts": {
-            "verification_profile_descriptor": contracts["verification_profile_descriptor"],
-            "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
-            "mask_derivation_policy": contracts["mask_derivation_policy"],
-            "verification_tolerance_policy": contracts["verification_tolerance_policy"],
-        },
-        "withheld_series": [
-            {
-                "role": "verified_reconstruction",
-                "series_description": "Guardian Layer Verified Reconstruction",
-                "expected_hash": analysis["derived_reconstruction_hash"],
-            },
-            {
-                "role": "verified_segmentation",
-                "series_description": "Guardian Layer Verified Tumour Mask",
-                "expected_hash": analysis["verified_mask_hash"],
-            },
-            {
-                "role": "verification_manifest",
-                "series_description": "Guardian Layer Verification Manifest",
-                "expected_hash": hash_canonical_json(report["manifest"]),
-            },
-        ],
+        "proof_contracts": _single_series_proof_contracts(report),
+        "withheld_series": _single_series_withheld_series(report),
     }
 
 
@@ -511,13 +494,14 @@ def build_mock_integration_trace(
                 {
                     "stage": "guardian_layer",
                     "label": "MRI Guardian Layer",
-                    "mode": "verification_proxy",
-                    "case_kind": MULTI_SERIES_CASE_KIND,
-                    "decision": pacs_output["submission_status"],
-                    "decision_class": report["decision_summary"]["decision_class"],
-                    "primary_reason": _primary_reason_summary(report),
-                    "tier_statuses": _tier_statuses(report),
-                },
+                "mode": "verification_proxy",
+                "case_kind": MULTI_SERIES_CASE_KIND,
+                "decision": pacs_output["submission_status"],
+                "decision_class": report["decision_summary"]["decision_class"],
+                "canonical_decision": deepcopy(report["decision"]),
+                "primary_reason": _primary_reason_summary(report),
+                "tier_statuses": _tier_statuses(report),
+            },
                 {
                     "stage": "pacs_egress",
                     "label": (
@@ -557,6 +541,7 @@ def build_mock_integration_trace(
                 "mode": "verification_proxy",
                 "decision": pacs_output["submission_status"],
                 "decision_class": report["decision_summary"]["decision_class"],
+                "canonical_decision": deepcopy(report["decision"]),
                 "primary_reason": _primary_reason_summary(report),
                 "tier_statuses": _tier_statuses(report),
             },
@@ -659,3 +644,55 @@ def _primary_reason_summary(report: dict[str, Any]) -> str:
     if report["decision_summary"]["operator_review_required"]:
         return "all_blocking_checks_passed; clinical_plausibility_review_recommended"
     return "all_blocking_checks_passed"
+
+
+def _string_or_fallback(value: Any, fallback: str) -> str:
+    if isinstance(value, str) and value.strip():
+        return value
+    return fallback
+
+
+def _single_series_proof_contracts(report: dict[str, Any]) -> dict[str, Any]:
+    contracts = report["contracts"]
+    payload = {
+        "verification_profile_descriptor": contracts["verification_profile_descriptor"],
+    }
+    for key in (
+        "verified_reconstruction_trace",
+        "mask_derivation_policy",
+        "verification_tolerance_policy",
+    ):
+        if key in contracts:
+            payload[key] = contracts[key]
+    return payload
+
+
+def _single_series_withheld_series(report: dict[str, Any]) -> list[dict[str, Any]]:
+    analysis = report["analysis"]
+    withheld: list[dict[str, Any]] = []
+    reconstruction_hash = analysis.get("derived_reconstruction_hash")
+    if reconstruction_hash is not None:
+        withheld.append(
+            {
+                "role": "verified_reconstruction",
+                "series_description": "Guardian Layer Verified Reconstruction",
+                "expected_hash": reconstruction_hash,
+            }
+        )
+    mask_hash = analysis.get("verified_mask_hash")
+    if mask_hash is not None:
+        withheld.append(
+            {
+                "role": "verified_segmentation",
+                "series_description": "Guardian Layer Verified Tumour Mask",
+                "expected_hash": mask_hash,
+            }
+        )
+    withheld.append(
+        {
+            "role": "verification_manifest",
+            "series_description": "Guardian Layer Verification Manifest",
+            "expected_hash": hash_canonical_json(report["manifest"]),
+        }
+    )
+    return withheld

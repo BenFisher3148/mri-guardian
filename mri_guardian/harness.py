@@ -58,6 +58,40 @@ MULTI_SERIES_CORROBORATION_RULE = (
 )
 _AUTHORITY_REQUIREMENT_MAP = build_authority_requirement_map()
 
+EVALUATION_STAGE_INTAKE_VALIDATION = "intake_validation"
+EVALUATION_STAGE_STRUCTURAL_VALIDITY = "structural_validity"
+EVALUATION_STAGE_PHYSICAL_CONSISTENCY = "physical_consistency"
+EVALUATION_STAGE_CLINICAL_PLAUSIBILITY = "clinical_plausibility"
+EVALUATION_STAGE_POLICY_EVALUATION = "policy_evaluation"
+EVALUATION_STAGE_MULTI_SERIES_AGGREGATION = "multi_series_aggregation"
+EVALUATION_STAGE_RELEASE_CONTROL = "release_control"
+
+DECISION_CLASS_VERIFIED_CLEAN = "verified_clean"
+DECISION_CLASS_VERIFIED_BOUNDARY_HUGGING = "verified_boundary_hugging"
+DECISION_CLASS_VERIFIED_WITH_ADVISORY = "verified_with_advisory"
+DECISION_CLASS_BLOCKED_STRUCTURAL = "blocked_structural"
+DECISION_CLASS_BLOCKED_PHYSICAL = "blocked_physical"
+DECISION_CLASS_BLOCKED_POLICY = "blocked_policy"
+
+DECISION_SEVERITY_INFO = "info"
+DECISION_SEVERITY_WARNING = "warning"
+DECISION_SEVERITY_ERROR = "error"
+DECISION_SEVERITY_CRITICAL = "critical"
+
+DECISION_REASON_BAND_PRIMARY = "primary"
+DECISION_REASON_BAND_SAME_STAGE = "same_stage"
+DECISION_REASON_BAND_SECONDARY_MODIFIER = "secondary_modifier"
+DECISION_REASON_BAND_ADVISORY_INFO = "advisory_info"
+
+STRUCTURAL_FAILURE_CATEGORY = "structural_failure"
+
+_DECISION_REASON_BAND_ORDER = {
+    DECISION_REASON_BAND_PRIMARY: 0,
+    DECISION_REASON_BAND_SAME_STAGE: 1,
+    DECISION_REASON_BAND_SECONDARY_MODIFIER: 2,
+    DECISION_REASON_BAND_ADVISORY_INFO: 3,
+}
+
 
 class MriGuardianHarness:
     """Verify MRI AI outputs before forwarding them downstream."""
@@ -164,8 +198,17 @@ def build_case_verification_report(
     """Return the deterministic verification envelope for one MRI case."""
     if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
         return build_multi_series_case_verification_report(state)
+    explicit_profile_name = isinstance(profile_name, str) and bool(profile_name.strip())
     resolved_profile_name = resolve_profile_name(profile_name=profile_name, state=dict(state))
-    descriptor = get_verification_profile(resolved_profile_name)
+    descriptor, structural_report = _prepare_single_series_report(
+        state,
+        profile_name=resolved_profile_name,
+        explicit_profile_name=explicit_profile_name,
+    )
+    if structural_report is not None:
+        return structural_report
+    if descriptor is None:
+        raise RuntimeError("Single-series report preparation did not resolve a descriptor.")
     profile_contract = build_verification_profile_contract(descriptor.profile_name)
     analysis = _analyse_case(state, descriptor)
     contracts = _build_claim_to_proof_contracts(state, analysis, descriptor)
@@ -173,7 +216,7 @@ def build_case_verification_report(
     reasons = _build_failure_reasons(state, analysis, manifest)
     tiers = manifest["verification_tiers"]
     decision_summary = manifest["decision_summary"]
-    return {
+    report = {
         "profile": profile_contract,
         "analysis": analysis,
         "contracts": contracts,
@@ -183,6 +226,10 @@ def build_case_verification_report(
         "decision_summary": decision_summary,
         "release_eligible": bool(decision_summary["final_release_allowed"]),
     }
+    decision = _build_single_series_decision(report)
+    report["decision"] = decision
+    report["manifest"]["decision"] = deepcopy(decision)
+    return report
 
 
 def build_multi_series_case_verification_report(
@@ -375,6 +422,385 @@ def verification_profile_descriptor_from_state(state: Mapping[str, Any]) -> Any:
     if isinstance(payload, Mapping):
         return verification_profile_descriptor_from_dict(dict(payload))
     return get_verification_profile(resolve_profile_name(profile_name=None, state=dict(state)))
+
+
+def _normalise_hashable_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalise_hashable_value(value[key])
+            for key in sorted(value, key=lambda item: str(item))
+        }
+    if isinstance(value, np.ndarray):
+        return _normalise_hashable_value(value.tolist())
+    if isinstance(value, (list, tuple)):
+        return [_normalise_hashable_value(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return repr(value)
+
+
+def _safe_input_state_hash(state: Mapping[str, Any]) -> str | None:
+    try:
+        return hash_canonical_json(_normalise_hashable_value(dict(state)))
+    except Exception:
+        return None
+
+
+def _default_success_modifiers() -> dict[str, Any]:
+    return {
+        "near_proof_threshold": False,
+        "has_non_blocking_advisory": False,
+        "near_boundary_metrics": [],
+        "advisory_reason_codes": [],
+        "near_boundary_series_ids": [],
+        "advisory_series_ids": [],
+    }
+
+
+def _decision_lineage_entry(stage: str, outcome: str) -> dict[str, str]:
+    return {"stage": stage, "outcome": outcome}
+
+
+def _decision_reason(
+    *,
+    code: str,
+    stage: str,
+    severity: str,
+    message: str,
+    band: str,
+) -> dict[str, Any]:
+    return {
+        "code": code,
+        "stage": stage,
+        "severity": severity,
+        "message": message,
+        "_band": band,
+    }
+
+
+def _decision_reason_sort_key(reason: Mapping[str, Any]) -> tuple[int, str, str, str]:
+    return (
+        _DECISION_REASON_BAND_ORDER[str(reason["_band"])],
+        str(reason["code"]),
+        str(reason["stage"]),
+        str(reason["message"]),
+    )
+
+
+def _strip_decision_reason_metadata(reason: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "code": str(reason["code"]),
+        "stage": str(reason["stage"]),
+        "severity": str(reason["severity"]),
+        "message": str(reason["message"]),
+    }
+
+
+def _ordered_unique_reason_codes(reasons: list[dict[str, str]]) -> list[str]:
+    ordered: list[str] = []
+    for reason in reasons:
+        code = str(reason["code"])
+        if code not in ordered:
+            ordered.append(code)
+    return ordered
+
+
+def _build_decision(
+    *,
+    final_disposition: str,
+    decision_class: str,
+    severity: str,
+    evaluation_stage: str,
+    reasons: list[dict[str, Any]],
+    success_modifiers: dict[str, Any],
+    decision_lineage: list[dict[str, str]],
+) -> dict[str, Any]:
+    ordered_reasons = [
+        _strip_decision_reason_metadata(reason)
+        for reason in sorted(reasons, key=_decision_reason_sort_key)
+    ]
+    return {
+        "final_disposition": final_disposition,
+        "decision_class": decision_class,
+        "severity": severity,
+        "evaluation_stage": evaluation_stage,
+        "reason_codes": _ordered_unique_reason_codes(ordered_reasons),
+        "decision_reasons": ordered_reasons,
+        "success_modifiers": deepcopy(success_modifiers),
+        "decision_lineage": deepcopy(decision_lineage),
+    }
+
+
+def _resolve_report_descriptor(
+    state: Mapping[str, Any],
+    *,
+    profile_name: str,
+    explicit_profile_name: bool,
+) -> tuple[Any, dict[str, Any] | None]:
+    try:
+        descriptor = get_verification_profile(profile_name)
+    except ValueError as exc:
+        if explicit_profile_name:
+            raise
+        descriptor = get_verification_profile(DEFAULT_PROFILE_NAME)
+        return descriptor, _decision_reason(
+            code="unknown_runtime_profile",
+            stage=EVALUATION_STAGE_INTAKE_VALIDATION,
+            severity=DECISION_SEVERITY_ERROR,
+            message=str(exc),
+            band=DECISION_REASON_BAND_PRIMARY,
+        )
+    if explicit_profile_name:
+        return descriptor, None
+    payload = state.get("verification_profile_descriptor")
+    if not isinstance(payload, Mapping):
+        return descriptor, None
+    try:
+        return verification_profile_descriptor_from_dict(dict(payload)), None
+    except ValueError as exc:
+        return descriptor, _decision_reason(
+            code="invalid_profile_descriptor",
+            stage=EVALUATION_STAGE_INTAKE_VALIDATION,
+            severity=DECISION_SEVERITY_ERROR,
+            message=str(exc),
+            band=DECISION_REASON_BAND_PRIMARY,
+        )
+
+
+def _structural_profile_contract(descriptor: Any) -> dict[str, Any]:
+    return build_verification_profile_contract(descriptor.profile_name)
+
+
+def _build_structural_verification_tiers(
+    structural_checks: list[dict[str, Any]],
+    *,
+    intake_blocked: bool,
+) -> dict[str, Any]:
+    structural_status = _tier_status_from_checks(structural_checks)
+    gating_message = (
+        "Intake validation blocked proof construction before physical consistency could be evaluated."
+        if intake_blocked
+        else "Structural validity failed before physical consistency could be evaluated."
+    )
+    return {
+        "level_1": {
+            "level": 1,
+            "title": "Level 1: Structural Validity",
+            "subtitle": "ICSD envelope",
+            "blocking": True,
+            "status": structural_status,
+            "summary": (
+                "ICSD structural checks passed for identifiers, numeric fields, voxel geometry, "
+                "and release payload shape."
+                if structural_status == "passed"
+                else "ICSD structural checks failed before mathematical verification can be trusted."
+            ),
+            "checks": structural_checks,
+        },
+        "level_2": {
+            "level": 2,
+            "title": "Level 2: Physical Consistency",
+            "subtitle": "k-space reconstruction",
+            "blocking": True,
+            "status": "not_evaluated",
+            "summary": gating_message,
+            "checks": [],
+        },
+        "level_3": {
+            "level": 3,
+            "title": "Level 3: Clinical Plausibility",
+            "subtitle": "Runtime profile heuristics",
+            "blocking": False,
+            "status": "not_evaluated",
+            "summary": "Clinical plausibility was not evaluated because the case did not clear structural intake checks.",
+            "checks": [],
+        },
+    }
+
+
+def _build_minimal_structural_analysis(state: Mapping[str, Any]) -> dict[str, Any]:
+    case_id = state.get("case_id")
+    return {
+        "case_id": case_id if isinstance(case_id, str) and case_id.strip() else None,
+        "input_state_hash": _safe_input_state_hash(state),
+        "raw_hash": None,
+        "ai_reconstruction_hash": None,
+        "derived_reconstruction_hash": None,
+        "ai_mask_hash": None,
+        "verified_mask_hash": None,
+        "computed_tumor_volume_mm3": None,
+        "mask_voxel_delta": 0,
+        "rejected_region_count": 0,
+        "reconstruction_mismatch_voxel_count": 0,
+        "verified_mask_voxel_count": 0,
+        "max_ai_abs_error": None,
+        "max_measurement_abs_error": None,
+    }
+
+
+def _build_structural_failure_reasons(
+    decision: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "code": reason["code"],
+            "category": STRUCTURAL_FAILURE_CATEGORY,
+            "summary": reason["message"],
+            "delta": None,
+            "message": reason["message"],
+            "details": {"stage": reason["stage"]},
+        }
+        for reason in decision["decision_reasons"]
+    ]
+
+
+def _build_structural_block_lineage(
+    structural_checks: list[dict[str, Any]],
+    *,
+    evaluation_stage: str,
+) -> list[dict[str, str]]:
+    structural_outcome = _tier_status_from_checks(structural_checks)
+    intake_outcome = "failed" if evaluation_stage == EVALUATION_STAGE_INTAKE_VALIDATION else "passed"
+    return [
+        _decision_lineage_entry(EVALUATION_STAGE_INTAKE_VALIDATION, intake_outcome),
+        _decision_lineage_entry(
+            EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+            "not_evaluated"
+            if evaluation_stage == EVALUATION_STAGE_INTAKE_VALIDATION and structural_outcome == "passed"
+            else structural_outcome,
+        ),
+        _decision_lineage_entry(EVALUATION_STAGE_PHYSICAL_CONSISTENCY, "not_evaluated"),
+        _decision_lineage_entry(EVALUATION_STAGE_CLINICAL_PLAUSIBILITY, "not_evaluated"),
+        _decision_lineage_entry(EVALUATION_STAGE_POLICY_EVALUATION, "not_evaluated"),
+        _decision_lineage_entry(EVALUATION_STAGE_RELEASE_CONTROL, "blocked"),
+    ]
+
+
+def _build_structural_block_report(
+    state: Mapping[str, Any],
+    *,
+    descriptor: Any,
+    structural_checks: list[dict[str, Any]],
+    evaluation_stage: str,
+    primary_reason: dict[str, Any],
+    secondary_reasons: list[dict[str, Any]],
+) -> dict[str, Any]:
+    reasons = [primary_reason, *secondary_reasons]
+    decision_summary = {
+        "proof_status": "failed",
+        "profile_policy_status": "blocked",
+        "decision_class": "blocked",
+        "block_category": STRUCTURAL_FAILURE_CATEGORY,
+        "final_release_allowed": False,
+        "operator_review_required": False,
+    }
+    tiers = _build_structural_verification_tiers(
+        structural_checks,
+        intake_blocked=evaluation_stage == EVALUATION_STAGE_INTAKE_VALIDATION,
+    )
+    decision = _build_decision(
+        final_disposition="blocked",
+        decision_class=DECISION_CLASS_BLOCKED_STRUCTURAL,
+        severity=DECISION_SEVERITY_ERROR,
+        evaluation_stage=evaluation_stage,
+        reasons=reasons,
+        success_modifiers=_default_success_modifiers(),
+        decision_lineage=_build_structural_block_lineage(
+            structural_checks,
+            evaluation_stage=evaluation_stage,
+        ),
+    )
+    profile_contract = _structural_profile_contract(descriptor)
+    analysis = _build_minimal_structural_analysis(state)
+    manifest = {
+        "profile_name": profile_contract["profile_name"],
+        "profile_revision": profile_contract["profile_revision"],
+        "profile_digest": profile_contract["profile_digest"],
+        "icsd_policy_id": profile_contract["icsd_policy_id"],
+        "icsd_policy_version": profile_contract["icsd_policy_version"],
+        "verification_profile_descriptor": profile_contract,
+        "performance_expectations": profile_contract["performance_expectations"],
+        "input_state_hash": analysis["input_state_hash"],
+        "decision_summary": deepcopy(decision_summary),
+        "decision": deepcopy(decision),
+        "verification_tiers": deepcopy(tiers),
+    }
+    failure_reasons = _build_structural_failure_reasons(decision)
+    return {
+        "profile": profile_contract,
+        "analysis": analysis,
+        "contracts": {
+            "verification_profile_descriptor": profile_contract,
+        },
+        "manifest": manifest,
+        "verification_tiers": tiers,
+        "failure_reasons": failure_reasons,
+        "decision_summary": decision_summary,
+        "decision": decision,
+        "release_eligible": False,
+    }
+
+
+def _prepare_single_series_report(
+    state: Mapping[str, Any],
+    *,
+    profile_name: str,
+    explicit_profile_name: bool,
+) -> tuple[Any | None, dict[str, Any] | None]:
+    descriptor, intake_reason = _resolve_report_descriptor(
+        state,
+        profile_name=profile_name,
+        explicit_profile_name=explicit_profile_name,
+    )
+    structural_checks = _build_structural_validity_checks(state)
+    if intake_reason is not None:
+        failed_structural_checks = [
+            _decision_reason(
+                code=str(check["code"]),
+                stage=EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+                severity=DECISION_SEVERITY_ERROR,
+                message=str(check["message"]),
+                band=DECISION_REASON_BAND_SECONDARY_MODIFIER,
+            )
+            for check in structural_checks
+            if check["status"] == "failed"
+        ]
+        return descriptor, _build_structural_block_report(
+            state,
+            descriptor=descriptor,
+            structural_checks=structural_checks,
+            evaluation_stage=EVALUATION_STAGE_INTAKE_VALIDATION,
+            primary_reason=intake_reason,
+            secondary_reasons=failed_structural_checks,
+        )
+    failed_checks = [check for check in structural_checks if check["status"] == "failed"]
+    if failed_checks:
+        primary_check = failed_checks[0]
+        secondary_checks = sorted(failed_checks[1:], key=lambda item: str(item["code"]))
+        return descriptor, _build_structural_block_report(
+            state,
+            descriptor=descriptor,
+            structural_checks=structural_checks,
+            evaluation_stage=EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+            primary_reason=_decision_reason(
+                code=str(primary_check["code"]),
+                stage=EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+                severity=DECISION_SEVERITY_ERROR,
+                message=str(primary_check["message"]),
+                band=DECISION_REASON_BAND_PRIMARY,
+            ),
+            secondary_reasons=[
+                _decision_reason(
+                    code=str(check["code"]),
+                    stage=EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+                    severity=DECISION_SEVERITY_ERROR,
+                    message=str(check["message"]),
+                    band=DECISION_REASON_BAND_SAME_STAGE,
+                )
+                for check in secondary_checks
+            ],
+        )
+    return descriptor, None
 
 
 def _reconstruction_with_hot_voxels(
@@ -585,7 +1011,11 @@ def _canonical_voxel_spacing_tuple(
 
 
 def _grid_signature_for_series_report(series_report: Mapping[str, Any]) -> dict[str, Any]:
-    shape = tuple(np.asarray(series_report["analysis"]["derived_reconstruction"]).shape)
+    analysis = series_report["analysis"]
+    if analysis.get("derived_reconstruction") is not None:
+        shape = tuple(np.asarray(analysis["derived_reconstruction"]).shape)
+    else:
+        shape = tuple(np.asarray(series_report["series_state"].get("ai_reconstruction", [])).shape)
     spacing = _canonical_voxel_spacing_tuple(series_report["series_state"]["voxel_spacing_mm"])
     payload = {
         "shape": list(shape),
@@ -610,12 +1040,14 @@ def _build_multi_series_series_report(
     elif series_id in set(context["supporting_series_ids"]):
         resolved_role = "supporting"
     gating_status = "required" if series_id in set(context["required_series_ids"]) else "auxiliary"
-    descriptor = verification_profile_descriptor_from_state(series_state)
-    expected_payload = _build_workstation_payload(
-        series_state,
-        single_report["analysis"],
-        descriptor,
-    )
+    descriptor = verification_profile_descriptor_from_dict(dict(single_report["profile"]))
+    expected_payload = None
+    if single_report["release_eligible"]:
+        expected_payload = _build_workstation_payload(
+            series_state,
+            single_report["analysis"],
+            descriptor,
+        )
     primary_reason = "all_blocking_checks_passed"
     if single_report["failure_reasons"]:
         primary_reason = str(single_report["failure_reasons"][0]["summary"])
@@ -722,6 +1154,24 @@ def _build_multi_series_lesion_corroboration(
             "supporting_series": [],
             "message": "Positive-lesion corroboration was not evaluated because required-series geometry did not verify.",
         }
+    if any(
+        series_reports[series_id]["analysis"].get("verified_mask") is None
+        for series_id in required_series_ids
+    ):
+        return {
+            "evaluated": False,
+            "verified": False,
+            "rule": MULTI_SERIES_CORROBORATION_RULE,
+            "primary_series_id": primary_series_id,
+            "supporting_series_ids": list(supporting_series_ids),
+            "required_series_ids": list(required_series_ids),
+            "required_verified_mask_voxel_counts": required_counts,
+            "supporting_series": [],
+            "message": (
+                "Positive-lesion corroboration was not evaluated because at least one "
+                "required series did not produce a verified mask."
+            ),
+        }
     primary_mask = np.asarray(
         series_reports[primary_series_id]["analysis"]["verified_mask"],
         dtype=np.int64,
@@ -797,6 +1247,7 @@ def _build_multi_series_series_manifest(series_report: Mapping[str, Any]) -> dic
             "downstream_release_allowed": series_report["downstream_release_allowed"],
             "primary_reason_summary": series_report["primary_reason_summary"],
             "grid_signature": deepcopy(series_report["grid_signature"]),
+            "decision": deepcopy(series_report["decision"]),
         }
     )
     return manifest
@@ -1066,7 +1517,7 @@ def _build_multi_series_study_report(
         "decision_summary": decision_summary,
         "verification_tiers": verification_tiers,
     }
-    return {
+    report = {
         "case_kind": MULTI_SERIES_CASE_KIND,
         "profile": verification_profile_descriptor,
         "analysis": {
@@ -1107,6 +1558,10 @@ def _build_multi_series_study_report(
         "decision_summary": decision_summary,
         "release_eligible": final_release_allowed,
     }
+    decision = _build_multi_series_decision(report)
+    report["decision"] = decision
+    report["manifest"]["decision"] = deepcopy(decision)
+    return report
 
 
 def _build_multi_series_workstation_payload(
@@ -1393,10 +1848,13 @@ def _release_to_radiologist(state: dict[str, Any]) -> None:
     state["verification_profile_descriptor"] = build_verification_profile_contract(
         descriptor.profile_name
     )
-    analysis = _analyse_case(state, descriptor)
-    contracts = _build_claim_to_proof_contracts(state, analysis, descriptor)
-    state["verified_manifest"] = _build_verified_manifest(state, analysis, contracts, descriptor)
-    state["workstation_payload"] = _build_workstation_payload(state, analysis, descriptor)
+    report = build_case_verification_report(state, profile_name=descriptor.profile_name)
+    state["verified_manifest"] = deepcopy(report["manifest"])
+    state["workstation_payload"] = _build_workstation_payload(
+        state,
+        report["analysis"],
+        descriptor,
+    )
     state["release_status"] = RELEASE_STATUS_RELEASED
 
 
@@ -2637,6 +3095,641 @@ def _build_failure_reasons(
             }
         )
     return reasons
+
+
+def _decision_reasons_from_failure_reasons(
+    failure_reasons: list[dict[str, Any]],
+    *,
+    stage: str,
+    severity: str,
+    primary_code: str | None = None,
+    primary_message: str | None = None,
+) -> list[dict[str, Any]]:
+    if not failure_reasons and primary_code is None:
+        return []
+    reasons: list[dict[str, Any]] = []
+    if primary_code is not None and primary_message is not None:
+        reasons.append(
+            _decision_reason(
+                code=primary_code,
+                stage=stage,
+                severity=severity,
+                message=primary_message,
+                band=DECISION_REASON_BAND_PRIMARY,
+            )
+        )
+        supporting = sorted(failure_reasons, key=lambda item: str(item["code"]))
+    else:
+        primary = failure_reasons[0]
+        reasons.append(
+            _decision_reason(
+                code=str(primary["code"]),
+                stage=stage,
+                severity=severity,
+                message=str(primary["message"]),
+                band=DECISION_REASON_BAND_PRIMARY,
+            )
+        )
+        supporting = sorted(failure_reasons[1:], key=lambda item: str(item["code"]))
+    reasons.extend(
+        _decision_reason(
+            code=str(item["code"]),
+            stage=stage,
+            severity=severity,
+            message=str(item["message"]),
+            band=DECISION_REASON_BAND_SAME_STAGE,
+        )
+        for item in supporting
+    )
+    return reasons
+
+
+def _collect_near_boundary_metric_reasons(manifest: Mapping[str, Any]) -> list[dict[str, str]]:
+    metric_specs = (
+        (
+            "measurement_consistency",
+            "per_frequency_complex_abs_error",
+            "measurement_per_frequency_complex_abs_error_near_boundary",
+            "The frequency-domain per-coefficient absolute error remained within tolerance but inside the configured guard band.",
+        ),
+        (
+            "measurement_consistency",
+            "global_relative_l2_error",
+            "measurement_global_relative_l2_error_near_boundary",
+            "The frequency-domain global relative L2 error remained within tolerance but inside the configured guard band.",
+        ),
+        (
+            "measurement_consistency",
+            "spatial_imaginary_leakage",
+            "measurement_spatial_imaginary_leakage_near_boundary",
+            "The inverse-FFT imaginary leakage remained within tolerance but inside the configured guard band.",
+        ),
+        (
+            "ai_reconstruction_match",
+            "per_voxel_abs_error",
+            "ai_reconstruction_per_voxel_abs_error_near_boundary",
+            "The AI reconstruction per-voxel absolute error remained within tolerance but inside the configured guard band.",
+        ),
+        (
+            "ai_reconstruction_match",
+            "global_relative_l2_error",
+            "ai_reconstruction_global_relative_l2_error_near_boundary",
+            "The AI reconstruction global relative L2 error remained within tolerance but inside the configured guard band.",
+        ),
+    )
+    reasons: list[dict[str, str]] = []
+    for section_name, metric_name, code, message in metric_specs:
+        metric = manifest[section_name]["metrics"][metric_name]
+        if metric["within_tolerance"] and metric["boundary_status"] == "near_boundary":
+            reasons.append({"code": code, "message": message})
+    volume_metric = manifest["tumor_volume_proof"]["tolerance_metric"]
+    if volume_metric["within_tolerance"] and volume_metric["boundary_status"] == "near_boundary":
+        reasons.append(
+            {
+                "code": "tumor_volume_absolute_error_near_boundary",
+                "message": "The tumour-volume absolute error remained within tolerance but inside the configured guard band.",
+            }
+        )
+    return reasons
+
+
+def _collect_non_blocking_clinical_reasons(
+    manifest: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    reasons: list[dict[str, str]] = []
+    for entry in manifest["clinical_plausibility"]["heuristics"]:
+        if entry["status"] not in {"warning", "advisory"}:
+            continue
+        reasons.append(
+            {
+                "code": str(entry["code"]),
+                "message": str(entry["message"]),
+                "severity": (
+                    DECISION_SEVERITY_WARNING
+                    if entry["status"] == "warning"
+                    else DECISION_SEVERITY_INFO
+                ),
+            }
+        )
+    return reasons
+
+
+def _build_single_series_decision_lineage(report: Mapping[str, Any]) -> list[dict[str, str]]:
+    decision_summary = report["decision_summary"]
+    tiers = report["verification_tiers"]
+    return [
+        _decision_lineage_entry(EVALUATION_STAGE_INTAKE_VALIDATION, "passed"),
+        _decision_lineage_entry(
+            EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+            str(tiers["level_1"]["status"]),
+        ),
+        _decision_lineage_entry(
+            EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
+            str(tiers["level_2"]["status"]),
+        ),
+        _decision_lineage_entry(
+            EVALUATION_STAGE_CLINICAL_PLAUSIBILITY,
+            str(tiers["level_3"]["status"]),
+        ),
+        _decision_lineage_entry(
+            EVALUATION_STAGE_POLICY_EVALUATION,
+            "blocked" if decision_summary["profile_policy_status"] == "blocked" else "passed",
+        ),
+        _decision_lineage_entry(
+            EVALUATION_STAGE_RELEASE_CONTROL,
+            "released" if report["release_eligible"] else "blocked",
+        ),
+    ]
+
+
+def _build_single_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
+    manifest = report["manifest"]
+    failure_reasons = list(report["failure_reasons"])
+    decision_summary = report["decision_summary"]
+    boundary_reasons = _collect_near_boundary_metric_reasons(manifest)
+    advisory_reasons = _collect_non_blocking_clinical_reasons(manifest)
+    success_modifiers = _default_success_modifiers()
+    success_modifiers["near_proof_threshold"] = bool(boundary_reasons)
+    success_modifiers["has_non_blocking_advisory"] = bool(advisory_reasons)
+    success_modifiers["near_boundary_metrics"] = [item["code"] for item in boundary_reasons]
+    success_modifiers["advisory_reason_codes"] = [item["code"] for item in advisory_reasons]
+
+    if report["release_eligible"]:
+        if advisory_reasons:
+            reasons = [
+                _decision_reason(
+                    code="clinical_plausibility_non_blocking_finding",
+                    stage=EVALUATION_STAGE_CLINICAL_PLAUSIBILITY,
+                    severity=DECISION_SEVERITY_WARNING,
+                    message=manifest["clinical_plausibility"]["summary"],
+                    band=DECISION_REASON_BAND_PRIMARY,
+                )
+            ]
+            reasons.extend(
+                _decision_reason(
+                    code=item["code"],
+                    stage=EVALUATION_STAGE_CLINICAL_PLAUSIBILITY,
+                    severity=item["severity"],
+                    message=item["message"],
+                    band=DECISION_REASON_BAND_SAME_STAGE,
+                )
+                for item in sorted(advisory_reasons, key=lambda entry: entry["code"])
+            )
+            reasons.extend(
+                _decision_reason(
+                    code=item["code"],
+                    stage=EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
+                    severity=DECISION_SEVERITY_WARNING,
+                    message=item["message"],
+                    band=DECISION_REASON_BAND_SECONDARY_MODIFIER,
+                )
+                for item in sorted(boundary_reasons, key=lambda entry: entry["code"])
+            )
+            return _build_decision(
+                final_disposition="released",
+                decision_class=DECISION_CLASS_VERIFIED_WITH_ADVISORY,
+                severity=DECISION_SEVERITY_WARNING,
+                evaluation_stage=EVALUATION_STAGE_CLINICAL_PLAUSIBILITY,
+                reasons=reasons,
+                success_modifiers=success_modifiers,
+                decision_lineage=_build_single_series_decision_lineage(report),
+            )
+        if boundary_reasons:
+            reasons = [
+                _decision_reason(
+                    code="proof_metric_near_boundary",
+                    stage=EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
+                    severity=DECISION_SEVERITY_WARNING,
+                    message=(
+                        "The deterministic proof passed, but at least one eligible proof metric "
+                        "fell within the configured guard band of a failure threshold."
+                    ),
+                    band=DECISION_REASON_BAND_PRIMARY,
+                )
+            ]
+            reasons.extend(
+                _decision_reason(
+                    code=item["code"],
+                    stage=EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
+                    severity=DECISION_SEVERITY_WARNING,
+                    message=item["message"],
+                    band=DECISION_REASON_BAND_SAME_STAGE,
+                )
+                for item in sorted(boundary_reasons, key=lambda entry: entry["code"])
+            )
+            return _build_decision(
+                final_disposition="released",
+                decision_class=DECISION_CLASS_VERIFIED_BOUNDARY_HUGGING,
+                severity=DECISION_SEVERITY_WARNING,
+                evaluation_stage=EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
+                reasons=reasons,
+                success_modifiers=success_modifiers,
+                decision_lineage=_build_single_series_decision_lineage(report),
+            )
+        return _build_decision(
+            final_disposition="released",
+            decision_class=DECISION_CLASS_VERIFIED_CLEAN,
+            severity=DECISION_SEVERITY_INFO,
+            evaluation_stage=EVALUATION_STAGE_RELEASE_CONTROL,
+            reasons=[
+                _decision_reason(
+                    code="final_release_authorized",
+                    stage=EVALUATION_STAGE_RELEASE_CONTROL,
+                    severity=DECISION_SEVERITY_INFO,
+                    message=(
+                        "All structural, physical, clinical, and release-control checks passed "
+                        "without advisory findings or near-boundary proof metrics."
+                    ),
+                    band=DECISION_REASON_BAND_PRIMARY,
+                )
+            ],
+            success_modifiers=success_modifiers,
+            decision_lineage=_build_single_series_decision_lineage(report),
+        )
+
+    if failure_reasons and failure_reasons[0]["category"] == STRUCTURAL_FAILURE_CATEGORY:
+        primary_stage = str(
+            failure_reasons[0].get("details", {}).get(
+                "stage",
+                EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+            )
+        )
+        return _build_decision(
+            final_disposition="blocked",
+            decision_class=DECISION_CLASS_BLOCKED_STRUCTURAL,
+            severity=DECISION_SEVERITY_ERROR,
+            evaluation_stage=primary_stage,
+            reasons=[
+                _decision_reason(
+                    code=str(item["code"]),
+                    stage=str(
+                        item.get("details", {}).get(
+                            "stage",
+                            EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+                        )
+                    ),
+                    severity=DECISION_SEVERITY_ERROR,
+                    message=str(item["message"]),
+                    band=(
+                        DECISION_REASON_BAND_PRIMARY
+                        if index == 0
+                        else DECISION_REASON_BAND_SAME_STAGE
+                    ),
+                )
+                for index, item in enumerate(failure_reasons)
+            ],
+            success_modifiers=success_modifiers,
+            decision_lineage=_build_single_series_decision_lineage(report),
+        )
+
+    if decision_summary["proof_status"] == "failed":
+        physical_reasons = [
+            reason for reason in failure_reasons if reason["category"] == "proof_failure"
+        ]
+        return _build_decision(
+            final_disposition="blocked",
+            decision_class=DECISION_CLASS_BLOCKED_PHYSICAL,
+            severity=DECISION_SEVERITY_CRITICAL,
+            evaluation_stage=EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
+            reasons=_decision_reasons_from_failure_reasons(
+                physical_reasons,
+                stage=EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
+                severity=DECISION_SEVERITY_CRITICAL,
+            ),
+            success_modifiers=success_modifiers,
+            decision_lineage=_build_single_series_decision_lineage(report),
+        )
+
+    if decision_summary["decision_class"] == DECISION_CLASS_TRIAGE_ONLY:
+        reasons = _decision_reasons_from_failure_reasons(
+            [
+                reason
+                for reason in failure_reasons
+                if reason["category"] == "profile_policy_block"
+            ],
+            stage=EVALUATION_STAGE_POLICY_EVALUATION,
+            severity=DECISION_SEVERITY_ERROR,
+        )
+    else:
+        heuristic_block_reasons = [
+            reason
+            for reason in failure_reasons
+            if reason["category"] == "heuristic_block"
+        ]
+        reasons = [
+            _decision_reason(
+                code="policy_blocked_by_clinical_plausibility",
+                stage=EVALUATION_STAGE_POLICY_EVALUATION,
+                severity=DECISION_SEVERITY_ERROR,
+                message=(
+                    "Structure and proof passed, but a configured blocking clinical policy prevented final release."
+                ),
+                band=DECISION_REASON_BAND_PRIMARY,
+            )
+        ]
+        reasons.extend(
+            _decision_reason(
+                code=str(item["code"]),
+                stage=EVALUATION_STAGE_CLINICAL_PLAUSIBILITY,
+                severity=DECISION_SEVERITY_ERROR,
+                message=str(item["message"]),
+                band=DECISION_REASON_BAND_SECONDARY_MODIFIER,
+            )
+            for item in sorted(heuristic_block_reasons, key=lambda entry: str(entry["code"]))
+        )
+    return _build_decision(
+        final_disposition="blocked",
+        decision_class=DECISION_CLASS_BLOCKED_POLICY,
+        severity=DECISION_SEVERITY_ERROR,
+        evaluation_stage=EVALUATION_STAGE_POLICY_EVALUATION,
+        reasons=reasons,
+        success_modifiers=success_modifiers,
+        decision_lineage=_build_single_series_decision_lineage(report),
+    )
+
+
+def _decision_block_precedence(decision_class: str) -> int:
+    order = {
+        DECISION_CLASS_BLOCKED_STRUCTURAL: 0,
+        DECISION_CLASS_BLOCKED_PHYSICAL: 1,
+        DECISION_CLASS_BLOCKED_POLICY: 2,
+    }
+    return order.get(decision_class, 3)
+
+
+def _aggregate_status(statuses: list[str]) -> str:
+    if not statuses:
+        return "not_evaluated"
+    priority = {"failed": 0, "warning": 1, "advisory": 2, "passed": 3, "not_evaluated": 4}
+    return min(statuses, key=lambda item: priority.get(item, 5))
+
+
+def _build_multi_series_decision_lineage(report: Mapping[str, Any]) -> list[dict[str, str]]:
+    required_reports = [
+        item for item in report["series_reports"] if item["gating_status"] == "required"
+    ]
+    downstream_reports = [
+        item for item in report["series_reports"] if item["downstream_release_allowed"]
+    ]
+    lineage_reports = downstream_reports or required_reports
+    block_category = str(report["decision_summary"]["block_category"])
+    structural_outcome = "failed" if (
+        block_category in {"missing_required_series", "required_series_geometry_mismatch"}
+        or any(
+            item["decision"]["decision_class"] == DECISION_CLASS_BLOCKED_STRUCTURAL
+            for item in required_reports
+        )
+    ) else "passed"
+    physical_outcome = "failed" if (
+        block_category == "positive_lesion_corroboration_failed"
+        or any(
+            item["decision"]["decision_class"] == DECISION_CLASS_BLOCKED_PHYSICAL
+            for item in required_reports
+        )
+    ) else "passed"
+    policy_outcome = "blocked" if any(
+        item["decision"]["decision_class"] == DECISION_CLASS_BLOCKED_POLICY
+        for item in required_reports
+    ) else "passed"
+    clinical_outcome = _aggregate_status(
+        [item["verification_tiers"]["level_3"]["status"] for item in lineage_reports]
+    )
+    return [
+        _decision_lineage_entry(EVALUATION_STAGE_INTAKE_VALIDATION, "passed"),
+        _decision_lineage_entry(EVALUATION_STAGE_STRUCTURAL_VALIDITY, structural_outcome),
+        _decision_lineage_entry(EVALUATION_STAGE_PHYSICAL_CONSISTENCY, physical_outcome),
+        _decision_lineage_entry(EVALUATION_STAGE_CLINICAL_PLAUSIBILITY, clinical_outcome),
+        _decision_lineage_entry(EVALUATION_STAGE_POLICY_EVALUATION, policy_outcome),
+        _decision_lineage_entry(
+            EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+            str(report["verification_tiers"]["merged_release"]["status"]),
+        ),
+        _decision_lineage_entry(
+            EVALUATION_STAGE_RELEASE_CONTROL,
+            "released" if report["release_eligible"] else "blocked",
+        ),
+    ]
+
+
+def _build_multi_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
+    downstream_reports = [
+        item for item in report["series_reports"] if item["downstream_release_allowed"]
+    ]
+    success_modifiers = _default_success_modifiers()
+    success_modifiers["near_boundary_series_ids"] = [
+        item["series_id"]
+        for item in downstream_reports
+        if item["decision"]["success_modifiers"]["near_proof_threshold"]
+    ]
+    success_modifiers["advisory_series_ids"] = [
+        item["series_id"]
+        for item in downstream_reports
+        if item["decision"]["success_modifiers"]["has_non_blocking_advisory"]
+    ]
+    success_modifiers["near_proof_threshold"] = bool(
+        success_modifiers["near_boundary_series_ids"]
+    )
+    success_modifiers["has_non_blocking_advisory"] = bool(
+        success_modifiers["advisory_series_ids"]
+    )
+    success_modifiers["near_boundary_metrics"] = [
+        f"{item['series_id']}:{metric_code}"
+        for item in downstream_reports
+        for metric_code in item["decision"]["success_modifiers"]["near_boundary_metrics"]
+    ]
+    success_modifiers["advisory_reason_codes"] = [
+        f"{item['series_id']}:{reason_code}"
+        for item in downstream_reports
+        for reason_code in item["decision"]["success_modifiers"]["advisory_reason_codes"]
+    ]
+
+    if report["release_eligible"]:
+        if success_modifiers["has_non_blocking_advisory"]:
+            reasons = [
+                _decision_reason(
+                    code="study_contains_non_blocking_advisory",
+                    stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                    severity=DECISION_SEVERITY_WARNING,
+                    message=(
+                        "At least one downstream-released series carried non-blocking advisory or warning findings."
+                    ),
+                    band=DECISION_REASON_BAND_PRIMARY,
+                )
+            ]
+            reasons.extend(
+                _decision_reason(
+                    code=f"downstream_series_{series_id}_with_advisory",
+                    stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                    severity=DECISION_SEVERITY_WARNING,
+                    message=(
+                        f"Downstream-released series {series_id!r} carries non-blocking advisory findings."
+                    ),
+                    band=DECISION_REASON_BAND_SAME_STAGE,
+                )
+                for series_id in sorted(success_modifiers["advisory_series_ids"])
+            )
+            reasons.extend(
+                _decision_reason(
+                    code=f"downstream_series_{series_id}_near_boundary",
+                    stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                    severity=DECISION_SEVERITY_WARNING,
+                    message=(
+                        f"Downstream-released series {series_id!r} also passed with guard-band boundary proximity."
+                    ),
+                    band=DECISION_REASON_BAND_SECONDARY_MODIFIER,
+                )
+                for series_id in sorted(success_modifiers["near_boundary_series_ids"])
+            )
+            return _build_decision(
+                final_disposition="released",
+                decision_class=DECISION_CLASS_VERIFIED_WITH_ADVISORY,
+                severity=DECISION_SEVERITY_WARNING,
+                evaluation_stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                reasons=reasons,
+                success_modifiers=success_modifiers,
+                decision_lineage=_build_multi_series_decision_lineage(report),
+            )
+        if success_modifiers["near_proof_threshold"]:
+            reasons = [
+                _decision_reason(
+                    code="study_contains_near_boundary_series",
+                    stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                    severity=DECISION_SEVERITY_WARNING,
+                    message=(
+                        "At least one downstream-released series passed inside the configured proof guard band."
+                    ),
+                    band=DECISION_REASON_BAND_PRIMARY,
+                )
+            ]
+            reasons.extend(
+                _decision_reason(
+                    code=f"downstream_series_{series_id}_near_boundary",
+                    stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                    severity=DECISION_SEVERITY_WARNING,
+                    message=(
+                        f"Downstream-released series {series_id!r} passed with guard-band boundary proximity."
+                    ),
+                    band=DECISION_REASON_BAND_SAME_STAGE,
+                )
+                for series_id in sorted(success_modifiers["near_boundary_series_ids"])
+            )
+            return _build_decision(
+                final_disposition="released",
+                decision_class=DECISION_CLASS_VERIFIED_BOUNDARY_HUGGING,
+                severity=DECISION_SEVERITY_WARNING,
+                evaluation_stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                reasons=reasons,
+                success_modifiers=success_modifiers,
+                decision_lineage=_build_multi_series_decision_lineage(report),
+            )
+        return _build_decision(
+            final_disposition="released",
+            decision_class=DECISION_CLASS_VERIFIED_CLEAN,
+            severity=DECISION_SEVERITY_INFO,
+            evaluation_stage=EVALUATION_STAGE_RELEASE_CONTROL,
+            reasons=[
+                _decision_reason(
+                    code="study_final_release_authorized",
+                    stage=EVALUATION_STAGE_RELEASE_CONTROL,
+                    severity=DECISION_SEVERITY_INFO,
+                    message=(
+                        "Every release-gating series passed, study-level aggregation verified, and no downstream-released series carried advisory or guard-band boundary signals."
+                    ),
+                    band=DECISION_REASON_BAND_PRIMARY,
+                )
+            ],
+            success_modifiers=success_modifiers,
+            decision_lineage=_build_multi_series_decision_lineage(report),
+        )
+
+    block_category = str(report["decision_summary"]["block_category"])
+    matching_reason = next(
+        (
+            item
+            for item in report["failure_reasons"]
+            if str(item["code"]) == block_category
+        ),
+        report["failure_reasons"][0],
+    )
+    required_reports = {
+        item["series_id"]: item
+        for item in report["series_reports"]
+        if item["gating_status"] == "required"
+    }
+
+    if block_category in {"missing_required_series", "required_series_geometry_mismatch"}:
+        decision_class = DECISION_CLASS_BLOCKED_STRUCTURAL
+        severity = DECISION_SEVERITY_ERROR
+    elif block_category == "positive_lesion_corroboration_failed":
+        decision_class = DECISION_CLASS_BLOCKED_PHYSICAL
+        severity = DECISION_SEVERITY_CRITICAL
+    elif block_category == "required_series_not_release_eligible":
+        inherited_class = min(
+            (
+                required_reports[series_id]["decision"]["decision_class"]
+                for series_id in report["analysis"]["required_series_ids"]
+                if not required_reports[series_id]["series_release_eligible"]
+            ),
+            key=_decision_block_precedence,
+        )
+        decision_class = inherited_class
+        severity = {
+            DECISION_CLASS_BLOCKED_STRUCTURAL: DECISION_SEVERITY_ERROR,
+            DECISION_CLASS_BLOCKED_PHYSICAL: DECISION_SEVERITY_CRITICAL,
+            DECISION_CLASS_BLOCKED_POLICY: DECISION_SEVERITY_ERROR,
+        }[decision_class]
+    else:
+        decision_class = DECISION_CLASS_BLOCKED_POLICY
+        severity = DECISION_SEVERITY_ERROR
+
+    reasons = [
+        _decision_reason(
+            code=str(matching_reason["code"]),
+            stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+            severity=severity,
+            message=str(matching_reason["message"]),
+            band=DECISION_REASON_BAND_PRIMARY,
+        )
+    ]
+    if block_category == "required_series_not_release_eligible":
+        blocked_series_ids = sorted(
+            series_id
+            for series_id in report["analysis"]["required_series_ids"]
+            if not required_reports[series_id]["series_release_eligible"]
+        )
+        reasons.extend(
+            _decision_reason(
+                code=f"required_series_{series_id}_{required_reports[series_id]['decision']['decision_class']}",
+                stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                severity=severity,
+                message=(
+                    f"Required series {series_id!r} carried child decision class "
+                    f"{required_reports[series_id]['decision']['decision_class']}."
+                ),
+                band=DECISION_REASON_BAND_SAME_STAGE,
+            )
+            for series_id in blocked_series_ids
+        )
+    else:
+        reasons.extend(
+            _decision_reason(
+                code=str(item["code"]),
+                stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                severity=severity,
+                message=str(item["message"]),
+                band=DECISION_REASON_BAND_SAME_STAGE,
+            )
+            for item in sorted(report["failure_reasons"][1:], key=lambda entry: str(entry["code"]))
+        )
+    return _build_decision(
+        final_disposition="blocked",
+        decision_class=decision_class,
+        severity=severity,
+        evaluation_stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+        reasons=reasons,
+        success_modifiers=success_modifiers,
+        decision_lineage=_build_multi_series_decision_lineage(report),
+    )
 
 
 def _derive_verified_mask(

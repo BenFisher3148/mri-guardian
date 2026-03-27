@@ -33,6 +33,7 @@ The Guardian Layer is intentionally non-invasive. It does not replace the MRI sc
 - Release is fail-closed for the Guardian handoff. If blocking proof fails, nothing verified is forwarded downstream.
 - Identical inputs must produce identical released state, evidence, bundle members, and replay hashes.
 - The replay path must bind to the embedded runtime profile descriptor by `profile_name`, `profile_revision`, and `profile_digest`, not the process default.
+- New monitoring logic must treat the additive `decision` object as canonical; `decision_summary` remains compatibility-only.
 - In `multi_series_v2`, all payload series are individually verified and reported, but only `required_series_ids` participate in merged release gating.
 - In `multi_series_v2`, study order is proof-significant for canonical serialization, stable diffs, and deterministic replay.
 
@@ -90,6 +91,33 @@ The verified-mask layer uses a fixed approved algorithm catalogue and canonical 
    - transparency receipt
    - portable bundle
 9. If proof fails, a blocking heuristic fails, or the profile is non-final, block the Guardian handoff and emit explicit failure reasons with separate `proof_failure`, `heuristic_block`, or `profile_policy_block` categories.
+
+## Decision Contract
+
+The report contract now separates hard release semantics from richer monitoring semantics.
+
+- `release_eligible` and the released/blocked handoff remain the only downstream release gate.
+- `decision.decision_class` is the canonical semantic class for dashboards, summaries, and trend analysis.
+- `decision_summary` remains available for compatibility, but it should not be the source of truth for new logic.
+
+Fixed `decision.evaluation_stage` values:
+
+- `intake_validation`
+- `structural_validity`
+- `physical_consistency`
+- `clinical_plausibility`
+- `policy_evaluation`
+- `multi_series_aggregation`
+- `release_control`
+
+Deterministic reason ordering:
+
+- primary class-determining reason
+- same-stage supporting reasons
+- secondary modifiers
+- advisory/info reasons, then lexical tie-breaks
+
+`verified_boundary_hugging` is restricted to passing proof metrics that land within the configured guard band of a failure threshold. The current eligible metrics are the measurement-consistency metrics, AI-reconstruction parity metrics, and the tumour-volume tolerance metric. Exact mask parity remains binary.
 
 ## Multi-Series V2
 

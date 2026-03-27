@@ -751,8 +751,12 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(report["decision_summary"]["decision_class"], "final_release_candidate")
         self.assertEqual(report["decision_summary"]["block_category"], "none")
         self.assertTrue(report["decision_summary"]["operator_review_required"])
+        self.assertEqual(report["decision"]["decision_class"], "verified_with_advisory")
+        self.assertEqual(report["decision"]["evaluation_stage"], "clinical_plausibility")
+        self.assertTrue(report["decision"]["success_modifiers"]["has_non_blocking_advisory"])
         self.assertEqual(report["manifest"]["clinical_plausibility"]["warning_count"], 2)
         self.assertEqual(report["manifest"]["clinical_plausibility"]["status"], "warning")
+        self.assertEqual(view_model["decision"]["decision_class"], "verified_with_advisory")
         self.assertEqual(
             view_model["verification"]["primary_reason_summary"],
             "all_blocking_checks_passed; clinical_plausibility_review_recommended",
@@ -766,6 +770,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
         self.assertTrue(report["release_eligible"])
         self.assertTrue(report["decision_summary"]["operator_review_required"])
+        self.assertEqual(report["decision"]["decision_class"], "verified_with_advisory")
         self.assertEqual(report["verification_tiers"]["level_3"]["status"], "warning")
         self.assertEqual(report["manifest"]["clinical_plausibility"]["warning_count"], 1)
         self.assertEqual(view_model["verification"]["headline"], "Verification PASSED")
@@ -779,6 +784,8 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(report["decision_summary"]["proof_status"], "passed")
         self.assertEqual(report["decision_summary"]["profile_policy_status"], "blocked")
         self.assertEqual(report["decision_summary"]["block_category"], "heuristic_block")
+        self.assertEqual(report["decision"]["decision_class"], "blocked_policy")
+        self.assertEqual(report["decision"]["evaluation_stage"], "policy_evaluation")
         self.assertEqual(report["failure_reasons"][0]["category"], "heuristic_block")
         self.assertEqual(report["failure_reasons"][0]["code"], "slice_span")
         self.assertEqual(report["manifest"]["clinical_plausibility"]["blocking_failure_count"], 1)
@@ -794,6 +801,8 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(report["decision_summary"]["profile_policy_status"], "blocked")
         self.assertEqual(report["decision_summary"]["decision_class"], "triage_only")
         self.assertEqual(report["decision_summary"]["block_category"], "profile_policy_block")
+        self.assertEqual(report["decision"]["decision_class"], "blocked_policy")
+        self.assertEqual(report["decision"]["reason_codes"][0], "non_final_profile_selected")
         self.assertEqual(report["failure_reasons"][0]["code"], "non_final_profile_selected")
         self.assertEqual(view_model["verification"]["headline"], "TRIAGE ONLY")
         self.assertEqual(view_model["clinical_summary"]["status_label"], "TRIAGE ONLY")
@@ -857,6 +866,9 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertFalse(report["release_eligible"])
         self.assertEqual(report["decision_summary"]["proof_status"], "failed")
         self.assertEqual(report["decision_summary"]["block_category"], "proof_failure")
+        self.assertEqual(report["decision"]["decision_class"], "blocked_physical")
+        self.assertEqual(report["decision"]["evaluation_stage"], "physical_consistency")
+        self.assertTrue(report["decision"]["success_modifiers"]["near_proof_threshold"])
         self.assertEqual(report["failure_reasons"][0]["code"], "intensity_manipulation_detected")
         self.assertEqual(report["analysis"]["reconstruction_mismatch_voxel_count"], 0)
         self.assertLess(report["analysis"]["max_ai_abs_error"], 1e-9)
@@ -880,6 +892,83 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 authority_sources=build_demo_authority_sources(case_id=state["case_id"]),
                 timestamp="2026-03-26T00:00:00Z",
             )
+
+    def test_near_boundary_release_uses_boundary_hugging_class(self) -> None:
+        state = build_demo_case()
+        state["tumor_volume_mm3"] = round(float(state["tumor_volume_mm3"]) + 8.5e-10, 9)
+
+        report = build_case_verification_report(state)
+
+        self.assertTrue(report["release_eligible"])
+        self.assertEqual(report["decision"]["decision_class"], "verified_boundary_hugging")
+        self.assertEqual(report["decision"]["evaluation_stage"], "physical_consistency")
+        self.assertTrue(report["decision"]["success_modifiers"]["near_proof_threshold"])
+        self.assertFalse(report["decision"]["success_modifiers"]["has_non_blocking_advisory"])
+        self.assertIn(
+            "tumor_volume_absolute_error_near_boundary",
+            report["decision"]["reason_codes"],
+        )
+
+    def test_advisory_precedence_wins_over_near_boundary_release(self) -> None:
+        state = self._build_warning_stack_case()
+        state["tumor_volume_mm3"] = round(float(state["tumor_volume_mm3"]) + 8.5e-10, 9)
+
+        report = build_case_verification_report(state)
+
+        self.assertTrue(report["release_eligible"])
+        self.assertEqual(report["decision"]["decision_class"], "verified_with_advisory")
+        self.assertEqual(report["decision"]["reason_codes"][0], "clinical_plausibility_non_blocking_finding")
+        self.assertTrue(report["decision"]["success_modifiers"]["near_proof_threshold"])
+        self.assertTrue(report["decision"]["success_modifiers"]["has_non_blocking_advisory"])
+        self.assertIn(
+            "tumor_volume_absolute_error_near_boundary",
+            report["decision"]["reason_codes"],
+        )
+
+    def test_invalid_embedded_profile_descriptor_returns_structural_block_report(self) -> None:
+        state = build_demo_case()
+        state["verification_profile_descriptor"]["profile_digest"] = "bad-digest"
+
+        report = build_case_verification_report(state)
+        view_model = build_side_by_side_view_model(state)
+        pacs_block = build_mock_pacs_block_notice(state)
+
+        self.assertFalse(report["release_eligible"])
+        self.assertEqual(report["decision"]["decision_class"], "blocked_structural")
+        self.assertEqual(report["decision"]["evaluation_stage"], "intake_validation")
+        self.assertEqual(report["decision_summary"]["block_category"], "structural_failure")
+        self.assertIsNotNone(report["analysis"]["input_state_hash"])
+        self.assertEqual(view_model["verification"]["headline"], "Structural BLOCKED")
+        self.assertEqual(view_model["slices"], [])
+        self.assertEqual(
+            pacs_block["verification_summary"]["canonical_decision"]["decision_class"],
+            "blocked_structural",
+        )
+
+    def test_structural_validity_failure_uses_minimal_report_floor(self) -> None:
+        state = build_demo_case()
+        state["case_id"] = ""
+
+        report = build_case_verification_report(state)
+        pacs_block = build_mock_pacs_block_notice(state)
+
+        self.assertFalse(report["release_eligible"])
+        self.assertEqual(report["decision"]["decision_class"], "blocked_structural")
+        self.assertEqual(report["decision"]["evaluation_stage"], "structural_validity")
+        self.assertEqual(report["verification_tiers"]["level_2"]["status"], "not_evaluated")
+        self.assertEqual(pacs_block["study"]["case_id"], "unknown-case")
+        self.assertEqual(
+            pacs_block["verification_summary"]["canonical_decision"]["decision_class"],
+            "blocked_structural",
+        )
+
+    def test_internal_exception_during_structural_block_construction_still_raises(self) -> None:
+        state = build_demo_case()
+        state["case_id"] = ""
+
+        with patch("mri_guardian.harness._build_structural_block_report", side_effect=RuntimeError("boom")):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                build_case_verification_report(state)
 
     def test_morphology_engine_edge_cases_are_deterministic(self) -> None:
         morphology_rules = {
@@ -1356,6 +1445,10 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(pacs_block["verification_summary"]["proof_status"], "failed")
         self.assertEqual(pacs_block["verification_summary"]["profile_policy_status"], "passed")
         self.assertEqual(
+            pacs_block["verification_summary"]["canonical_decision"]["decision_class"],
+            "blocked_physical",
+        )
+        self.assertEqual(
             pacs_block["proof_contracts"]["verification_profile_descriptor"]["profile_name"],
             DEFAULT_PROFILE_NAME,
         )
@@ -1438,6 +1531,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
         self.assertFalse(report["release_eligible"])
         self.assertEqual(report["decision_summary"]["block_category"], "missing_required_series")
+        self.assertEqual(report["decision"]["decision_class"], "blocked_structural")
         self.assertEqual(
             report["failure_reasons"][0]["details"]["missing_required_series_ids"],
             ["missing-support"],
@@ -1460,6 +1554,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
             report["decision_summary"]["block_category"],
             "required_series_not_release_eligible",
         )
+        self.assertEqual(report["decision"]["decision_class"], "blocked_physical")
         self.assertIn("t2-supporting", report["failure_reasons"][0]["details"]["series_ids"])
 
     def test_multi_series_primary_positive_requires_at_least_one_supporting_overlap(self) -> None:
@@ -1490,6 +1585,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
             report["decision_summary"]["block_category"],
             "positive_lesion_corroboration_failed",
         )
+        self.assertEqual(report["decision"]["decision_class"], "blocked_physical")
         supporting = report["analysis"]["lesion_corroboration"]["supporting_series"]
         self.assertTrue(report["analysis"]["lesion_corroboration"]["evaluated"])
         self.assertTrue(all(item["intersection_voxel_count"] == 0 for item in supporting))
@@ -1538,6 +1634,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         _, result = self._release_multi_series_demo_case(state=state)
 
         self.assertTrue(report["release_eligible"])
+        self.assertEqual(report["decision"]["decision_class"], "verified_with_advisory")
         auxiliary_report = next(
             item for item in report["series_reports"] if item["series_id"] == "derived-auxiliary"
         )
@@ -1564,6 +1661,28 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
         self.assertEqual(auxiliary_report["resolved_role"], "auxiliary")
         self.assertTrue(auxiliary_report["series_release_eligible"])
+
+    def test_multi_series_required_child_class_precedence_prefers_structural_over_policy(self) -> None:
+        state = build_multi_series_demo_case()
+        primary = self._series_entry(state, "t1-primary")
+        primary["raw_real"] = [0.0]
+        supporting = self._series_entry(state, "t2-supporting")
+        supporting["verification_profile_descriptor"] = build_verification_profile_descriptor(
+            "fast_triage_mode"
+        )
+
+        report = build_multi_series_case_verification_report(state)
+
+        self.assertFalse(report["release_eligible"])
+        self.assertEqual(
+            report["decision_summary"]["block_category"],
+            "required_series_not_release_eligible",
+        )
+        self.assertEqual(report["decision"]["decision_class"], "blocked_structural")
+        self.assertIn(
+            "required_series_t1-primary_blocked_structural",
+            report["decision"]["reason_codes"],
+        )
 
     def test_multi_series_viewer_preserves_ordered_role_annotations(self) -> None:
         state = build_multi_series_demo_case()
@@ -1598,6 +1717,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
             ["passed", "passed", "passed"],
         )
         self.assertEqual(view_model["decision_summary"]["decision_class"], "final_release_candidate")
+        self.assertEqual(view_model["decision"]["decision_class"], "verified_clean")
         self.assertGreater(view_model["timing"]["reconstruction_ms"], 0)
         self.assertGreaterEqual(view_model["timing"]["verification_ms"], 0)
         self.assertGreaterEqual(view_model["timing"]["overhead_percent"], 0)

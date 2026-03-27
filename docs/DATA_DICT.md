@@ -142,6 +142,46 @@ Flat compatibility aliases may still appear during the transition, but future no
 - If every required verified mask is empty, corroboration passes; lesion absence is not separately cross-series corroborated in this milestone.
 - `series_manifests` includes all payload series in proof-significant order; `series_payloads` includes only downstream-allowed series and `withheld_series` records explicit omissions.
 
+## Decision Object
+
+`verification_report.json` now includes an additive canonical `decision` object alongside the legacy `decision_summary`.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `final_disposition` | `str` | `released` or `blocked`. Mirrors the hard handoff outcome and does not replace `release_eligible`. |
+| `decision_class` | `str` | Canonical semantic class: `verified_clean`, `verified_boundary_hugging`, `verified_with_advisory`, `blocked_structural`, `blocked_physical`, or `blocked_policy`. |
+| `severity` | `str` | `info`, `warning`, `error`, or `critical`. |
+| `evaluation_stage` | `str` | Fixed stage enum: `intake_validation`, `structural_validity`, `physical_consistency`, `clinical_plausibility`, `policy_evaluation`, `multi_series_aggregation`, or `release_control`. |
+| `reason_codes` | `list[str]` | Deterministically ordered machine-readable reason codes. |
+| `decision_reasons` | `list[dict]` | Structured reasons with `code`, `stage`, `severity`, and `message`. |
+| `success_modifiers` | `dict` | Secondary flags such as `near_proof_threshold` and `has_non_blocking_advisory`, plus supporting code/id lists. |
+| `decision_lineage` | `list[dict]` | Ordered stage/outcome trace used for replay, debugging, and viewer summaries. |
+
+Ordering rule for `reason_codes` and `decision_reasons`:
+
+- primary class-determining reason first
+- same-stage supporting reasons next
+- secondary modifiers after that
+- advisory/info reasons last, with lexical tie-breaks inside each band
+
+Near-boundary classification is also fixed: only passing measurement-consistency metrics, AI-reconstruction parity metrics, and the tumour-volume tolerance metric participate, and `near_boundary` means "inside the configured guard band of the relevant failure threshold." Exact mask parity remains binary.
+
+For compatibility:
+
+- `decision_summary` remains available
+- new logic should use `decision.decision_class`
+
+Minimal structural block reports guarantee at least:
+
+- `decision`
+- `decision_summary`
+- `release_eligible`
+- available case identifiers
+- `analysis.input_state_hash` when it can be computed
+- structural verification tiers
+
+They do not guarantee full proof artifacts such as reconstruction traces or verified-mask hashes.
+
 ## Integration Artifacts
 
 | Artifact | Purpose |
