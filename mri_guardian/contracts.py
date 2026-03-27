@@ -39,19 +39,20 @@ def _require_object_shape(
     path: str,
     required_fields: tuple[str, ...],
 ) -> dict[str, Any]:
-    if type(value) is not dict:
+    if not isinstance(value, Mapping):
         raise ValueError(f"{path} must be an object.")
-    missing_fields = [field for field in required_fields if field not in value]
+    payload = dict(value)
+    missing_fields = [field for field in required_fields if field not in payload]
     if missing_fields:
         missing = ", ".join(missing_fields)
         raise ValueError(f"{path} is missing required fields: {missing}.")
     unexpected_fields = sorted(
-        field for field in value if field not in set(required_fields)
+        field for field in payload if field not in set(required_fields)
     )
     if unexpected_fields:
         unexpected = ", ".join(unexpected_fields)
         raise ValueError(f"{path} contains unsupported fields: {unexpected}.")
-    return dict(value)
+    return payload
 
 
 def _require_non_empty_string(value: Any, *, path: str) -> str:
@@ -60,12 +61,17 @@ def _require_non_empty_string(value: Any, *, path: str) -> str:
     return value
 
 
-def _require_sha256_hex(value: Any, *, path: str) -> str:
-    digest = _require_non_empty_string(value, path=path)
-    if digest != digest.strip():
+def _require_trimmed_non_empty_string(value: Any, *, path: str) -> str:
+    text = _require_non_empty_string(value, path=path)
+    if text != text.strip():
         raise ValueError(
-            f"{path} must be lowercase hex with no leading or trailing whitespace."
+            f"{path} must not include leading or trailing whitespace."
         )
+    return text
+
+
+def _require_sha256_hex(value: Any, *, path: str) -> str:
+    digest = _require_trimmed_non_empty_string(value, path=path)
     if digest.startswith("0x"):
         raise ValueError(f"{path} must not include a 0x prefix.")
     if not _SHA256_HEX_RE.fullmatch(digest):
@@ -89,7 +95,7 @@ def _canonicalise_json_like(value: Any, *, path: str) -> Any:
             _canonicalise_json_like(item, path=f"{path}[{index}]")
             for index, item in enumerate(value)
         ]
-    if type(value) is dict:
+    if isinstance(value, Mapping):
         payload: dict[str, Any] = {}
         for key, item in value.items():
             if type(key) is not str:
@@ -148,11 +154,11 @@ def canonicalise_ai_stack_identity(state: Mapping[str, Any]) -> dict[str, Any] |
         path="ai_stack_identity.sequence_model_compatibility",
         required_fields=_SEQUENCE_MODEL_COMPATIBILITY_FIELDS,
     )
-    compatibility_type = _require_non_empty_string(
+    compatibility_type = _require_trimmed_non_empty_string(
         sequence_model_compatibility["compatibility_type"],
         path="ai_stack_identity.sequence_model_compatibility.compatibility_type",
     )
-    declared_value = _require_non_empty_string(
+    declared_value = _require_trimmed_non_empty_string(
         sequence_model_compatibility["declared_value"],
         path="ai_stack_identity.sequence_model_compatibility.declared_value",
     )
@@ -185,7 +191,7 @@ def canonicalise_ai_stack_identity(state: Mapping[str, Any]) -> dict[str, Any] |
                 "must match the active case/profile sequence_family."
             )
     return {
-        "model_version_id": _require_non_empty_string(
+        "model_version_id": _require_trimmed_non_empty_string(
             ai_stack_identity["model_version_id"],
             path="ai_stack_identity.model_version_id",
         ),
@@ -202,7 +208,7 @@ def canonicalise_ai_stack_identity(state: Mapping[str, Any]) -> dict[str, Any] |
             path="ai_stack_identity.postprocessing_pipeline_sha256",
         ),
         "input_normalization": {
-            "scheme": _require_non_empty_string(
+            "scheme": _require_trimmed_non_empty_string(
                 input_normalization["scheme"],
                 path="ai_stack_identity.input_normalization.scheme",
             ),

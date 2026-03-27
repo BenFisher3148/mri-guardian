@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -773,6 +774,94 @@ class MriGuardianHarnessTests(unittest.TestCase):
             with self.subTest(field_name=field_name):
                 state = self._attach_ai_stack_identity(build_demo_case())
                 state["ai_stack_identity"][field_name] = invalid_value
+                report = build_case_verification_report(state)
+
+                self.assertFalse(report["release_eligible"])
+                self.assertEqual(report["decision"]["decision_class"], "blocked_structural")
+                self.assertEqual(
+                    report["failure_reasons"][0]["code"],
+                    "invalid_ai_stack_identity",
+                )
+
+    def test_ai_stack_identity_preserves_type_differences_and_mapping_order_independence(self) -> None:
+        first_parameters = OrderedDict(
+            [
+                ("bool_flag", True),
+                ("int_value", 1),
+                ("float_value", 1.0),
+                ("string_value", "1"),
+                (
+                    "nested",
+                    OrderedDict(
+                        [
+                            (
+                                "secondary",
+                                OrderedDict([("beta", 2), ("alpha", 1)]),
+                            ),
+                            ("primary", [True, 1, 1.0, "1"]),
+                        ]
+                    ),
+                ),
+            ]
+        )
+        second_parameters = OrderedDict(
+            [
+                (
+                    "nested",
+                    OrderedDict(
+                        [
+                            ("primary", [True, 1, 1.0, "1"]),
+                            (
+                                "secondary",
+                                OrderedDict([("alpha", 1), ("beta", 2)]),
+                            ),
+                        ]
+                    ),
+                ),
+                ("string_value", "1"),
+                ("float_value", 1.0),
+                ("int_value", 1),
+                ("bool_flag", True),
+            ]
+        )
+
+        first_report = build_case_verification_report(
+            self._attach_ai_stack_identity(
+                build_demo_case(),
+                parameters=first_parameters,
+            )
+        )
+        second_report = build_case_verification_report(
+            self._attach_ai_stack_identity(
+                build_demo_case(),
+                parameters=second_parameters,
+            )
+        )
+
+        first_claim = first_report["contracts"]["ai_claim_envelope"]
+        second_claim = second_report["contracts"]["ai_claim_envelope"]
+        parameters = first_claim["ai_stack_identity"]["input_normalization"]["parameters"]
+
+        self.assertIs(type(parameters["bool_flag"]), bool)
+        self.assertIs(type(parameters["int_value"]), int)
+        self.assertIs(type(parameters["float_value"]), float)
+        self.assertIs(type(parameters["string_value"]), str)
+        self.assertEqual(canonical_json_dumps(first_claim), canonical_json_dumps(second_claim))
+        self.assertEqual(hash_canonical_json(first_claim), hash_canonical_json(second_claim))
+
+    def test_ai_stack_identity_rejects_padded_declared_string_fields(self) -> None:
+        def _set_model_version(state: dict[str, object]) -> None:
+            state["ai_stack_identity"]["model_version_id"] = " raw-mri-ai-v4.1.0 "
+
+        def _set_scheme(state: dict[str, object]) -> None:
+            state["ai_stack_identity"]["input_normalization"]["scheme"] = " zscore_per_channel "
+
+        invalid_mutations = (_set_model_version, _set_scheme)
+
+        for mutate in invalid_mutations:
+            with self.subTest(mutation=mutate.__name__):
+                state = self._attach_ai_stack_identity(build_demo_case())
+                mutate(state)
                 report = build_case_verification_report(state)
 
                 self.assertFalse(report["release_eligible"])
@@ -1730,6 +1819,35 @@ class MriGuardianHarnessTests(unittest.TestCase):
                         ai_runtime_context=invalid_context,
                     )
 
+    def test_ai_runtime_context_accepts_mapping_inputs_on_blocked_pacs_flow(self) -> None:
+        runtime_context = OrderedDict(
+            [
+                ("inference_device_class", "cuda_sm80"),
+                ("inference_runtime_version", "guardian-runtime/2.3.4"),
+            ]
+        )
+        structural_block_state = build_demo_case()
+        structural_block_state["verification_profile_descriptor"] = {
+            "profile_name": "does_not_exist"
+        }
+
+        dicom_input = build_mock_dicom_input(
+            structural_block_state,
+            ai_runtime_context=runtime_context,
+        )
+        pacs_block = build_mock_pacs_block_notice(
+            structural_block_state,
+            ai_runtime_context=runtime_context,
+        )
+        integration_trace = build_mock_integration_trace(
+            dicom_input=dicom_input,
+            pacs_output=pacs_block,
+        )
+
+        self.assertEqual(pacs_block["ai_runtime_context"], self._ai_runtime_context())
+        self.assertEqual(integration_trace["ai_runtime_context"], self._ai_runtime_context())
+        self.assertNotIn("ai_runtime_context", pacs_block["proof_contracts"])
+
     def test_boundary_release_surfaces_canonical_reason_in_viewer_and_pacs(self) -> None:
         state = build_demo_case()
         state["tumor_volume_mm3"] = round(float(state["tumor_volume_mm3"]) + 8.5e-10, 9)
@@ -2262,6 +2380,57 @@ class MriGuardianHarnessTests(unittest.TestCase):
             hash_canonical_json(profile_descriptor),
         )
         self.assertEqual(signatures["members"][0]["algorithm"], "sha256")
+
+    def test_ai_stack_identity_changes_bundle_and_replay_hash_surfaces(self) -> None:
+        _, baseline_result = self._release_demo_case()
+        provenance_state = self._attach_ai_stack_identity(build_demo_case())
+        provenance_result = self._build_harness().release_case(
+            state=provenance_state,
+            actor="guardian:test",
+            authority_sources=build_demo_authority_sources(case_id=provenance_state["case_id"]),
+            timestamp="2026-03-26T00:00:00Z",
+        )
+        baseline_bundle_path = self.runtime_root / f"baseline-provenance{MRI_GUARD_BUNDLE_EXTENSION}"
+        provenance_bundle_path = self.runtime_root / f"declared-provenance{MRI_GUARD_BUNDLE_EXTENSION}"
+        transparency_log_path = self.runtime_root / "transparency-log.jsonl"
+
+        write_portable_evidence_bundle(
+            result=baseline_result,
+            transparency_log_path=transparency_log_path,
+            output_path=baseline_bundle_path,
+        )
+        write_portable_evidence_bundle(
+            result=provenance_result,
+            transparency_log_path=transparency_log_path,
+            output_path=provenance_bundle_path,
+        )
+        verification = verify_bundle(provenance_bundle_path)
+
+        self.assertTrue(verification["verified"])
+        self.assertTrue(verification["details"]["replay_verified"])
+        with ZipFile(baseline_bundle_path, mode="r") as baseline_archive:
+            baseline_bundle = self._read_bundle_json(baseline_archive, "bundle.json")
+            baseline_replay = self._read_bundle_json(baseline_archive, "replay.json")
+        with ZipFile(provenance_bundle_path, mode="r") as provenance_archive:
+            provenance_bundle = self._read_bundle_json(provenance_archive, "bundle.json")
+            provenance_replay = self._read_bundle_json(provenance_archive, "replay.json")
+
+        self.assertNotEqual(
+            baseline_bundle["hashes"]["ai_claim_envelope_hash"],
+            provenance_bundle["hashes"]["ai_claim_envelope_hash"],
+        )
+        self.assertNotEqual(
+            baseline_bundle["hashes"]["released_state_hash"],
+            provenance_bundle["hashes"]["released_state_hash"],
+        )
+        self.assertNotEqual(
+            baseline_replay["expected_hashes"]["released_state_hash"],
+            provenance_replay["expected_hashes"]["released_state_hash"],
+        )
+        self.assertNotEqual(
+            baseline_replay["expected_hashes"]["verification_report_hash"],
+            provenance_replay["expected_hashes"]["verification_report_hash"],
+        )
 
     def test_non_default_profile_bundle_replays_identically(self) -> None:
         _, result = self._release_demo_case(profile_name="contrast_enhanced_review")

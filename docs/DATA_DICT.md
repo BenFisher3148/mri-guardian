@@ -117,6 +117,7 @@ Defined in [`../mri_guardian/contracts.py`](../mri_guardian/contracts.py).
   - `postprocessing_pipeline_sha256`
   - `input_normalization`
   - `sequence_model_compatibility`
+- Declared `ai_stack_identity` string fields must be non-empty and must not carry leading or trailing whitespace.
 - SHA-256 fields must be lowercase hex with no leading/trailing whitespace and no `0x` prefix.
 - Empty strings are invalid for identifier and digest fields.
 - `input_normalization.parameters` must be `JsonLike`:

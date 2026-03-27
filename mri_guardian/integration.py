@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
@@ -48,16 +49,17 @@ def _canonical_ai_runtime_context(
 ) -> dict[str, str] | None:
     if value is None:
         return None
-    if type(value) is not dict:
+    if not isinstance(value, Mapping):
         raise ValueError("ai_runtime_context must be an object.")
+    payload = dict(value)
     missing_fields = [
-        field for field in _AI_RUNTIME_CONTEXT_FIELDS if field not in value
+        field for field in _AI_RUNTIME_CONTEXT_FIELDS if field not in payload
     ]
     if missing_fields:
         missing = ", ".join(missing_fields)
         raise ValueError(f"ai_runtime_context is missing required fields: {missing}.")
     unexpected_fields = sorted(
-        field for field in value if field not in set(_AI_RUNTIME_CONTEXT_FIELDS)
+        field for field in payload if field not in set(_AI_RUNTIME_CONTEXT_FIELDS)
     )
     if unexpected_fields:
         unexpected = ", ".join(unexpected_fields)
@@ -66,11 +68,11 @@ def _canonical_ai_runtime_context(
         )
     return {
         "inference_runtime_version": _require_runtime_string(
-            value["inference_runtime_version"],
+            payload["inference_runtime_version"],
             path="ai_runtime_context.inference_runtime_version",
         ),
         "inference_device_class": _require_runtime_string(
-            value["inference_device_class"],
+            payload["inference_device_class"],
             path="ai_runtime_context.inference_device_class",
         ),
     }

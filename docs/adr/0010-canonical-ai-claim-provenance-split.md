@@ -64,7 +64,8 @@ Field semantics:
 
 Canonical value-domain rules:
 
-- Identifier and digest fields must be non-empty strings.
+- Declared `ai_stack_identity` string fields must be non-empty and must not
+  carry leading or trailing whitespace.
 - Empty strings are invalid for identifier and digest fields.
 - SHA-256 fields must be lowercase hex with no leading/trailing whitespace and
   no `0x` prefix.
