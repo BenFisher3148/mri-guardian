@@ -31,7 +31,7 @@ Timestamp trust is explicit:
 
 - current-case input accepts `trusted_study_metadata`, `missing`, or `untrusted`
 - prior context accepts `verified_bundle`, `trusted_study_metadata`, `missing`, or `untrusted`
-- pair provenance is derived deterministically with `untrusted` dominating `missing`
+- pair provenance is derived deterministically with `untrusted` dominating `missing`, identical trusted classes mapping to `verified_bundle_pair` or `trusted_metadata_pair`, and mixed trusted classes mapping to `mixed_provenance`
 
 Temporal outputs must expose:
 

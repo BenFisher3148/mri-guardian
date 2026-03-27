@@ -40,6 +40,7 @@ from mri_guardian.harness import (
     build_multi_series_case_verification_report,
     build_multi_series_demo_authority_sources,
     build_multi_series_demo_case,
+    _temporal_pair_provenance,
 )
 from mri_guardian.integration import (
     build_guardian_integration_narrative,
@@ -703,70 +704,55 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
 
     def test_temporal_pair_provenance_derivation_uses_deterministic_precedence(self) -> None:
-        prior_state = self._attach_temporal_metadata(
-            build_demo_case(),
-            study_acquired_at="2025-03-01T00:00:00Z",
-            study_timestamp_provenance="trusted_study_metadata",
-        )
-        _, prior_result = self._release_demo_case_with_state(prior_state)
-        prior_report = build_case_verification_report(prior_result.after_state)
-
         cases = (
             (
-                "trusted_plus_verified_bundle",
-                "2025-09-01T00:00:00Z",
+                "metadata_pair",
                 "trusted_study_metadata",
-                "verified_bundle",
+                "trusted_study_metadata",
                 "trusted_metadata_pair",
             ),
             (
+                "verified_bundle_pair",
+                "verified_bundle",
+                "verified_bundle",
+                "verified_bundle_pair",
+            ),
+            (
+                "trusted_plus_verified_bundle_is_mixed",
+                "trusted_study_metadata",
+                "verified_bundle",
+                "mixed_provenance",
+            ),
+            (
+                "verified_bundle_plus_trusted_is_mixed",
+                "verified_bundle",
+                "trusted_study_metadata",
+                "mixed_provenance",
+            ),
+            (
                 "missing_plus_trusted",
-                None,
                 "missing",
                 "trusted_study_metadata",
                 "timestamp_missing",
             ),
             (
                 "untrusted_dominates_verified_bundle",
-                "2025-09-01T00:00:00Z",
                 "untrusted",
                 "verified_bundle",
                 "timestamp_untrusted",
             ),
             (
                 "untrusted_dominates_missing",
-                None,
                 "missing",
                 "untrusted",
                 "timestamp_untrusted",
             ),
         )
 
-        for (
-            label,
-            current_timestamp,
-            current_provenance,
-            prior_provenance,
-            expected_pair_provenance,
-        ) in cases:
+        for label, current_provenance, prior_provenance, expected_pair_provenance in cases:
             with self.subTest(case=label):
-                current_state = self._attach_temporal_metadata(
-                    build_demo_case(),
-                    study_acquired_at=current_timestamp,
-                    study_timestamp_provenance=current_provenance,
-                )
-                current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
-                    released_state=prior_result.after_state,
-                    released_report=prior_report,
-                    timestamp_provenance=prior_provenance,
-                )
-
-                report = build_case_verification_report(current_state)
-
                 self.assertEqual(
-                    report["contracts"]["temporal_consistency_trace"]["chronology_assessment"][
-                        "pair_provenance"
-                    ],
+                    _temporal_pair_provenance(current_provenance, prior_provenance),
                     expected_pair_provenance,
                 )
 
@@ -786,7 +772,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
             released_state=prior_result.after_state,
             released_report=prior_report,
-            timestamp_provenance="verified_bundle",
+            timestamp_provenance="trusted_study_metadata",
         )
 
         report = build_case_verification_report(current_state)
@@ -811,6 +797,44 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertTrue(view_model["longitudinal"]["overlay_enabled"])
         self.assertIn("Longitudinal Summary", html)
         self.assertIn("Prior verified overlay", html)
+
+    def test_temporal_mixed_provenance_degrades_but_keeps_full_comparison(self) -> None:
+        prior_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-01-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_result = self._release_demo_case_with_state(prior_state)
+        prior_report = build_case_verification_report(prior_result.after_state)
+        current_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-07-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
+            released_state=prior_result.after_state,
+            released_report=prior_report,
+            timestamp_provenance="verified_bundle",
+        )
+
+        report = build_case_verification_report(current_state)
+        temporal_trace = report["contracts"]["temporal_consistency_trace"]
+
+        self.assertEqual(temporal_trace["comparison_status"], "degraded")
+        self.assertEqual(temporal_trace["comparison_scope"], "full")
+        self.assertEqual(
+            temporal_trace["chronology_assessment"]["pair_provenance"],
+            "mixed_provenance",
+        )
+        self.assertEqual(
+            temporal_trace["chronology_assessment"]["reason_code"],
+            "mixed_provenance",
+        )
+        self.assertTrue(temporal_trace["chronology_assessment"]["time_metrics_available"])
+        self.assertEqual(
+            temporal_trace["computed_metrics"]["normalized_rate_direction"],
+            "stable_band",
+        )
 
     def test_temporal_missing_current_timestamp_degrades_but_keeps_full_spatial_comparison(self) -> None:
         prior_state = self._attach_temporal_metadata(
@@ -855,6 +879,37 @@ class MriGuardianHarnessTests(unittest.TestCase):
             temporal_trace["computed_metrics"]["global_centroid_shift_mm"],
             0.0,
         )
+
+    def test_temporal_missing_prior_bundle_identity_is_inadmissible_but_non_blocking(self) -> None:
+        prior_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-03-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_result = self._release_demo_case_with_state(prior_state)
+        prior_report = build_case_verification_report(prior_result.after_state)
+        current_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-09-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
+            released_state=prior_result.after_state,
+            released_report=prior_report,
+        )
+        current_state["prior_verified_context"]["prior_bundle_sha256"] = ""
+
+        report = build_case_verification_report(current_state)
+        temporal_trace = report["contracts"]["temporal_consistency_trace"]
+
+        self.assertEqual(temporal_trace["comparison_status"], "unsuitable")
+        self.assertEqual(temporal_trace["comparison_scope"], "none")
+        self.assertEqual(
+            temporal_trace["prior_admissibility"]["reason_code"],
+            "prior_bundle_identity_missing",
+        )
+        self.assertEqual(report["decision"]["final_disposition"], "released")
+        self.assertNotEqual(report["decision"]["decision_class"], "blocked_structural")
 
     def test_temporal_equal_timestamps_degrade_and_skip_normalized_rate(self) -> None:
         prior_state = self._attach_temporal_metadata(
@@ -1008,6 +1063,10 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 "reason_code": "zero_prior_volume",
             },
             temporal_trace["skipped_metrics"],
+        )
+        self.assertEqual(
+            temporal_trace["computed_metrics"]["volume_change_direction"],
+            "not_evaluated",
         )
 
     def test_temporal_prior_with_advisory_release_is_admissible_and_bundle_surfaces_contracts(self) -> None:

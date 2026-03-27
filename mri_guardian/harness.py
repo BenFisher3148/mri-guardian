@@ -2446,14 +2446,13 @@ def _temporal_pair_provenance(
     current_provenance: str,
     prior_provenance: str,
 ) -> str:
-    trusted_classes = {"verified_bundle", "trusted_study_metadata"}
     if "untrusted" in {current_provenance, prior_provenance}:
         return TEMPORAL_PAIR_PROVENANCE_UNTRUSTED
     if "missing" in {current_provenance, prior_provenance}:
         return TEMPORAL_PAIR_PROVENANCE_MISSING
     if current_provenance == prior_provenance == "verified_bundle":
         return TEMPORAL_PAIR_PROVENANCE_VERIFIED_BUNDLE
-    if current_provenance in trusted_classes and prior_provenance in trusted_classes:
+    if current_provenance == prior_provenance == "trusted_study_metadata":
         return TEMPORAL_PAIR_PROVENANCE_TRUSTED_METADATA
     return TEMPORAL_PAIR_PROVENANCE_MIXED
 
@@ -2468,6 +2467,20 @@ def _temporal_metric_direction(value: float | None) -> str:
 
 def _temporal_skipped_metric(metric: str, reason_code: str) -> dict[str, str]:
     return {"metric": metric, "reason_code": reason_code}
+
+
+def _temporal_prior_identity_fields_present(prior_context: Mapping[str, Any]) -> bool:
+    for field_name in (
+        "prior_bundle_sha256",
+        "prior_case_id",
+        "prior_study_uid",
+        "prior_series_uid",
+        "prior_released_state_hash",
+        "prior_verification_report_hash",
+    ):
+        if not str(prior_context.get(field_name, "")):
+            return False
+    return True
 
 
 def _temporal_exact_geometry_match(
@@ -2617,7 +2630,7 @@ def _build_temporal_consistency_section(
     prior_context = build_prior_verified_context(dict(prior_payload))
     prior_admissibility_status = TEMPORAL_PRIOR_ADMISSIBLE
     prior_admissibility_reason = "admissible"
-    if not prior_context["prior_bundle_sha256"]:
+    if not _temporal_prior_identity_fields_present(prior_context):
         prior_admissibility_status = TEMPORAL_PRIOR_INADMISSIBLE
         prior_admissibility_reason = TEMPORAL_SKIPPED_PRIOR_BUNDLE_IDENTITY_MISSING
     elif prior_context["prior_release"]["release_status"] != RELEASE_STATUS_RELEASED:
@@ -2856,7 +2869,7 @@ def _build_temporal_consistency_section(
         "absolute_volume_delta_mm3": absolute_volume_delta_mm3,
         "signed_volume_change_percent": signed_volume_change_percent,
         "signed_normalized_percent_change_per_30d": signed_normalized_percent_change_per_30d,
-        "volume_change_direction": _temporal_metric_direction(signed_volume_delta_mm3),
+        "volume_change_direction": _temporal_metric_direction(signed_volume_change_percent),
         "normalized_rate_direction": _temporal_metric_direction(
             signed_normalized_percent_change_per_30d
         ),

@@ -168,7 +168,9 @@ Flat compatibility aliases may still appear during the transition, but future no
 - Pair timestamp provenance is derived deterministically:
   - any `untrusted` side dominates to `timestamp_untrusted`
   - otherwise any `missing` side dominates to `timestamp_missing`
-  - both trusted-structured sides collapse to `verified_bundle_pair` or `trusted_metadata_pair`
+  - both `verified_bundle` sides yield `verified_bundle_pair`
+  - both `trusted_study_metadata` sides yield `trusted_metadata_pair`
+  - otherwise mixed trusted classes yield `mixed_provenance`
 - `comparison_status` is one of `not_evaluated`, `aligned`, `degraded`, or `unsuitable`.
 - `comparison_scope` is one of `not_evaluated`, `full`, `volume_only`, or `none`.
 - Interval bands are policy comparability bands, not clinical expectation bands:

@@ -78,8 +78,29 @@ def _require_trimmed_non_empty_string(value: Any, *, path: str) -> str:
     return text
 
 
+def _require_trimmed_string_allow_empty(value: Any, *, path: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{path} must be a string.")
+    if value != value.strip():
+        raise ValueError(
+            f"{path} must not include leading or trailing whitespace."
+        )
+    return value
+
+
 def _require_sha256_hex(value: Any, *, path: str) -> str:
     digest = _require_trimmed_non_empty_string(value, path=path)
+    if digest.startswith("0x"):
+        raise ValueError(f"{path} must not include a 0x prefix.")
+    if not _SHA256_HEX_RE.fullmatch(digest):
+        raise ValueError(f"{path} must be a lowercase SHA-256 hex digest.")
+    return digest
+
+
+def _require_sha256_hex_or_empty(value: Any, *, path: str) -> str:
+    digest = _require_trimmed_string_allow_empty(value, path=path)
+    if digest == "":
+        return ""
     if digest.startswith("0x"):
         raise ValueError(f"{path} must not include a 0x prefix.")
     if not _SHA256_HEX_RE.fullmatch(digest):
@@ -771,27 +792,27 @@ def canonicalise_prior_verified_context(
             "prior_verified_context.verified_volume_mm3 must match voxel count and spacing."
         )
     return PriorVerifiedContext(
-        prior_bundle_sha256=_require_sha256_hex(
+        prior_bundle_sha256=_require_sha256_hex_or_empty(
             prior["prior_bundle_sha256"],
             path="prior_verified_context.prior_bundle_sha256",
         ),
-        prior_case_id=_require_trimmed_non_empty_string(
+        prior_case_id=_require_trimmed_string_allow_empty(
             prior["prior_case_id"],
             path="prior_verified_context.prior_case_id",
         ),
-        prior_study_uid=_require_trimmed_non_empty_string(
+        prior_study_uid=_require_trimmed_string_allow_empty(
             prior["prior_study_uid"],
             path="prior_verified_context.prior_study_uid",
         ),
-        prior_series_uid=_require_trimmed_non_empty_string(
+        prior_series_uid=_require_trimmed_string_allow_empty(
             prior["prior_series_uid"],
             path="prior_verified_context.prior_series_uid",
         ),
-        prior_released_state_hash=_require_sha256_hex(
+        prior_released_state_hash=_require_sha256_hex_or_empty(
             prior["prior_released_state_hash"],
             path="prior_verified_context.prior_released_state_hash",
         ),
-        prior_verification_report_hash=_require_sha256_hex(
+        prior_verification_report_hash=_require_sha256_hex_or_empty(
             prior["prior_verification_report_hash"],
             path="prior_verified_context.prior_verification_report_hash",
         ),
