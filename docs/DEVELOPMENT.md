@@ -128,6 +128,7 @@ When modifying code or schemas:
 - update documentation when interfaces, guarantees, or workflows change
 - avoid unrelated cleanup
 - keep commits narrow and attributable
+- treat timestamp trust classes, pair-provenance derivation, geometry comparability, and interval-band semantics as replay-sensitive contracts rather than UI copy
 
 The repository-level process is defined in [`../AGENTS.md`](../AGENTS.md).
 
@@ -172,6 +173,7 @@ Take extra care when touching:
 - canonical hashes and serialised outputs
 - runtime profile descriptor identity and digesting
 - tolerance policy and verification semantics
+- longitudinal timestamp trust classes, pair provenance, and geometry comparability matrices
 - released state shape
 - bundle member ordering and replayability
 - integration envelopes and PACS handoff behaviour

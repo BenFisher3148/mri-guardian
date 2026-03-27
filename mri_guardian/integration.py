@@ -31,7 +31,13 @@ _STATE_FIELDS = (
     "verified_manifest",
     "workstation_payload",
 )
-_OPTIONAL_STATE_FIELDS = ("ai_stack_identity",)
+_OPTIONAL_STATE_FIELDS = (
+    "ai_stack_identity",
+    "study_acquired_at",
+    "study_timestamp_provenance",
+    "spatial_geometry",
+    "prior_verified_context",
+)
 _AI_RUNTIME_CONTEXT_FIELDS = (
     "inference_runtime_version",
     "inference_device_class",
@@ -481,6 +487,7 @@ def build_mock_pacs_submission(
             "evidence_hash": evidence_hash,
             "profile_name": report["manifest"]["profile_name"],
             "profile_digest": report["manifest"]["profile_digest"],
+            **_single_series_temporal_summary(report),
         },
         "integration_narrative": integration_narrative,
         "proof_contracts": _single_series_proof_contracts(report),
@@ -587,6 +594,7 @@ def build_mock_pacs_block_notice(
             "verified_tumor_volume_mm3": analysis.get("computed_tumor_volume_mm3"),
             "profile_name": report["manifest"]["profile_name"],
             "profile_digest": report["manifest"]["profile_digest"],
+            **_single_series_temporal_summary(report),
         },
         "integration_narrative": integration_narrative,
         "proof_contracts": _single_series_proof_contracts(report),
@@ -690,6 +698,7 @@ def build_mock_integration_trace(
                 "canonical_decision": deepcopy(report["decision"]),
                 "primary_reason": _primary_reason_summary(report),
                 "tier_statuses": _tier_statuses(report),
+                **_single_series_temporal_summary(report),
             },
             {
                 "stage": "pacs_egress",
@@ -811,10 +820,33 @@ def _single_series_proof_contracts(report: dict[str, Any]) -> dict[str, Any]:
         "verified_reconstruction_trace",
         "mask_derivation_policy",
         "verification_tolerance_policy",
+        "temporal_consistency_trace",
     ):
         if key in contracts:
             payload[key] = contracts[key]
+    prior_verified_context = contracts.get("prior_verified_context")
+    if prior_verified_context is not None:
+        payload["prior_verified_context"] = prior_verified_context
     return payload
+
+
+def _single_series_temporal_summary(report: dict[str, Any]) -> dict[str, Any]:
+    temporal_trace = report["contracts"].get("temporal_consistency_trace")
+    if not isinstance(temporal_trace, Mapping):
+        return {}
+    temporal_reason_codes = sorted(
+        {
+            str(item.get("code"))
+            for item in report["manifest"]["clinical_plausibility"]["heuristics"]
+            if isinstance(item, Mapping) and str(item.get("code", "")).startswith("temporal_")
+        }
+    )
+    return {
+        "temporal_comparison_status": temporal_trace["comparison_status"],
+        "temporal_comparison_scope": temporal_trace["comparison_scope"],
+        "temporal_top_flags": list(temporal_trace["flags"]),
+        "temporal_top_reason_codes": temporal_reason_codes,
+    }
 
 
 def _single_series_withheld_series(report: dict[str, Any]) -> list[dict[str, Any]]:

@@ -44,6 +44,8 @@ _PROFILE_DESCRIPTOR_NAME = "verification_profile_descriptor.json"
 _TRANSCRIPT_NAME = "transcript.json"
 _REPLAY_DESCRIPTOR_NAME = "replay.json"
 _TRANSPARENCY_LOG_NAME = "transparency-log.jsonl"
+_PRIOR_VERIFIED_CONTEXT_NAME = "prior_verified_context.json"
+_TEMPORAL_CONSISTENCY_TRACE_NAME = "temporal_consistency_trace.json"
 _REQUIRED_BUNDLE_MEMBERS = (
     _BUNDLE_MANIFEST_NAME,
     _SIGNATURES_NAME,
@@ -56,6 +58,10 @@ _REQUIRED_BUNDLE_MEMBERS = (
     _TRANSCRIPT_NAME,
     _REPLAY_DESCRIPTOR_NAME,
     _TRANSPARENCY_LOG_NAME,
+)
+_OPTIONAL_BUNDLE_MEMBERS = (
+    _PRIOR_VERIFIED_CONTEXT_NAME,
+    _TEMPORAL_CONSISTENCY_TRACE_NAME,
 )
 
 
@@ -130,13 +136,14 @@ def write_portable_evidence_bundle(
         _REPLAY_DESCRIPTOR_NAME: _json_bytes(replay_descriptor),
         _TRANSPARENCY_LOG_NAME: log_snapshot["bytes"],
     }
+    members.update(_build_single_series_optional_bundle_members(report))
     signatures = _build_signature_catalog(members)
     members[_SIGNATURES_NAME] = _json_bytes(signatures)
 
     bundle_path = Path(output_path)
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
     with ZipFile(bundle_path, mode="w") as archive:
-        for member_name in _REQUIRED_BUNDLE_MEMBERS:
+        for member_name in _ordered_bundle_member_names(members):
             _write_bundle_member(archive, member_name, members[member_name])
 
     return {
@@ -208,6 +215,11 @@ def verify_portable_evidence_bundle(bundle_path: Path | str) -> dict[str, Any]:
         if not expected_report["release_eligible"]:
             failures.append("released_state.json is not release-eligible.")
 
+        expected_optional_members = _build_single_series_optional_bundle_members(expected_report)
+        for member_name in expected_optional_members:
+            if member_name not in member_bytes:
+                failures.append(f"Bundle is missing expected optional member {member_name!r}.")
+
         trace_failures = _check_released_state_matches_trace(state)
         if trace_failures:
             failures.extend(failure.message for failure in trace_failures)
@@ -278,7 +290,7 @@ def verify_portable_evidence_bundle(bundle_path: Path | str) -> dict[str, Any]:
         expected_signatures = _build_signature_catalog(
             {
                 name: member_bytes[name]
-                for name in _REQUIRED_BUNDLE_MEMBERS
+                for name in _ordered_bundle_member_names(member_bytes)
                 if name != _SIGNATURES_NAME
             }
         )
@@ -339,6 +351,46 @@ def _build_bundle_manifest(
         )
     analysis = report["analysis"]
     contracts = report["contracts"]
+    members = list(_REQUIRED_BUNDLE_MEMBERS)
+    if contracts.get("prior_verified_context") is not None:
+        members.extend(_OPTIONAL_BUNDLE_MEMBERS)
+    hashes = {
+        "verification_profile_descriptor_hash": hash_canonical_json(
+            contracts["verification_profile_descriptor"]
+        ),
+        "raw_kspace_hash": analysis["raw_hash"],
+        "ai_claim_envelope_hash": hash_canonical_json(contracts["ai_claim_envelope"]),
+        "mask_derivation_policy_hash": hash_canonical_json(
+            contracts["mask_derivation_policy"]
+        ),
+        "verification_tolerance_policy_hash": hash_canonical_json(
+            contracts["verification_tolerance_policy"]
+        ),
+        "verified_reconstruction_trace_hash": hash_canonical_json(
+            contracts["verified_reconstruction_trace"]
+        ),
+        "temporal_consistency_trace_hash": hash_canonical_json(
+            contracts["temporal_consistency_trace"]
+        ),
+        "reconstruction_hash": analysis["derived_reconstruction_hash"],
+        "ai_mask_hash": analysis["ai_mask_hash"],
+        "verified_mask_hash": analysis["verified_mask_hash"],
+        "input_state_hash": replay_descriptor["expected_hashes"]["input_state_hash"],
+        "verified_manifest_hash": hash_canonical_json(state["verified_manifest"]),
+        "workstation_payload_hash": hash_canonical_json(state["workstation_payload"]),
+        "released_state_hash": hash_canonical_json(state),
+        "evidence_hash": hash_canonical_json(evidence_payload),
+        "anchored_evidence_hash": hash_canonical_json(anchored_evidence_payload),
+        "verification_report_hash": hash_canonical_json(report),
+        "transcript_hash": hash_canonical_json(transcript),
+        "transparency_log_hash": _sha256_hex(log_snapshot["bytes"]),
+        "transparency_prefix_hash": replay_descriptor["expected_hashes"][
+            "transparency_prefix_hash"
+        ],
+    }
+    prior_verified_context = contracts.get("prior_verified_context")
+    if prior_verified_context is not None:
+        hashes["prior_verified_context_hash"] = hash_canonical_json(prior_verified_context)
     return {
         "schema_version": _BUNDLE_SCHEMA_VERSION,
         "bundle_type": "mri_guard_bundle",
@@ -354,37 +406,7 @@ def _build_bundle_manifest(
         "icsd_policy_id": report["profile"]["icsd_policy_id"],
         "icsd_policy_version": report["profile"]["icsd_policy_version"],
         "verdict": "This scan is verifiably correct.",
-        "hashes": {
-            "verification_profile_descriptor_hash": hash_canonical_json(
-                contracts["verification_profile_descriptor"]
-            ),
-            "raw_kspace_hash": analysis["raw_hash"],
-            "ai_claim_envelope_hash": hash_canonical_json(contracts["ai_claim_envelope"]),
-            "mask_derivation_policy_hash": hash_canonical_json(
-                contracts["mask_derivation_policy"]
-            ),
-            "verification_tolerance_policy_hash": hash_canonical_json(
-                contracts["verification_tolerance_policy"]
-            ),
-            "verified_reconstruction_trace_hash": hash_canonical_json(
-                contracts["verified_reconstruction_trace"]
-            ),
-            "reconstruction_hash": analysis["derived_reconstruction_hash"],
-            "ai_mask_hash": analysis["ai_mask_hash"],
-            "verified_mask_hash": analysis["verified_mask_hash"],
-            "input_state_hash": replay_descriptor["expected_hashes"]["input_state_hash"],
-            "verified_manifest_hash": hash_canonical_json(state["verified_manifest"]),
-            "workstation_payload_hash": hash_canonical_json(state["workstation_payload"]),
-            "released_state_hash": hash_canonical_json(state),
-            "evidence_hash": hash_canonical_json(evidence_payload),
-            "anchored_evidence_hash": hash_canonical_json(anchored_evidence_payload),
-            "verification_report_hash": hash_canonical_json(report),
-            "transcript_hash": hash_canonical_json(transcript),
-            "transparency_log_hash": _sha256_hex(log_snapshot["bytes"]),
-            "transparency_prefix_hash": replay_descriptor["expected_hashes"][
-                "transparency_prefix_hash"
-            ],
-        },
+        "hashes": hashes,
         "verification": {
             "release_eligible": bool(report["release_eligible"]),
             "decision": report["decision"],
@@ -410,7 +432,7 @@ def _build_bundle_manifest(
             "entry_index": receipt_entry["index"],
             "log_length": len(log_snapshot["entries"]),
         },
-        "members": list(_REQUIRED_BUNDLE_MEMBERS),
+        "members": members,
         "signatures_member": _SIGNATURES_NAME,
     }
 
@@ -586,6 +608,30 @@ def _build_signature_catalog(member_bytes: dict[str, bytes]) -> dict[str, Any]:
     }
 
 
+def _build_single_series_optional_bundle_members(
+    report: Mapping[str, Any],
+) -> dict[str, bytes]:
+    if report.get("analysis", {}).get("series") is not None:
+        return {}
+    contracts = report["contracts"]
+    prior_verified_context = contracts.get("prior_verified_context")
+    if prior_verified_context is None:
+        return {}
+    return {
+        _PRIOR_VERIFIED_CONTEXT_NAME: _json_bytes(prior_verified_context),
+        _TEMPORAL_CONSISTENCY_TRACE_NAME: _json_bytes(
+            contracts["temporal_consistency_trace"]
+        ),
+    }
+
+
+def _ordered_bundle_member_names(member_names: Mapping[str, Any] | set[str] | tuple[str, ...]) -> list[str]:
+    names = set(member_names)
+    ordered = list(_REQUIRED_BUNDLE_MEMBERS)
+    ordered.extend(name for name in _OPTIONAL_BUNDLE_MEMBERS if name in names)
+    return ordered
+
+
 def _load_bundle_source(path: Path) -> dict[str, Any]:
     if path.suffix.lower() == ".json":
         return _read_extracted_bundle_members(path)
@@ -602,7 +648,7 @@ def _read_bundle_archive_members(path: Path) -> dict[str, Any]:
         if missing_members:
             missing = ", ".join(missing_members)
             raise ValueError(f"Bundle is missing required members: {missing}.")
-        for member_name in _REQUIRED_BUNDLE_MEMBERS:
+        for member_name in _ordered_bundle_member_names(names):
             payload = archive.read(member_name)
             member_bytes[member_name] = payload
             if member_name.endswith(".json"):
@@ -622,7 +668,14 @@ def _read_extracted_bundle_members(bundle_json_path: Path) -> dict[str, Any]:
     root = bundle_json_path.parent
     member_bytes: dict[str, bytes] = {}
     payloads: dict[str, Any] = {}
-    for member_name in _REQUIRED_BUNDLE_MEMBERS:
+    for member_name in _ordered_bundle_member_names(
+        _REQUIRED_BUNDLE_MEMBERS
+        + tuple(
+            member_name
+            for member_name in _OPTIONAL_BUNDLE_MEMBERS
+            if (root / member_name).exists()
+        )
+    ):
         member_path = root / member_name
         if not member_path.exists():
             msg = f"Extracted bundle is missing required member {member_name!r}."
@@ -780,7 +833,7 @@ def _verify_deterministic_replay(
             output_path=replay_bundle_path,
         )
         replay_source = _load_bundle_source(replay_bundle_path)
-        for member_name in _REQUIRED_BUNDLE_MEMBERS:
+        for member_name in _ordered_bundle_member_names(expected_member_bytes):
             if replay_source["member_bytes"][member_name] == expected_member_bytes[member_name]:
                 continue
             failures.append(

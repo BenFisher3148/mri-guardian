@@ -8,7 +8,7 @@ It is intentionally non-invasive. The reconstruction AI and the PACS/workstation
 
 - What it is: a verification layer between a raw MRI AI and PACS/workstation handoff.
 - What it prevents: invented pixels, unsupported tumour masks, and incorrect tumour-volume claims moving through the Guardian path.
-- What the demo shows: accepted verification, live tamper detection, portable evidence bundles, mocked DICOM/PACS integration, bounded performance, and additive `multi_series_v2` study gating.
+- What the demo shows: accepted verification, live tamper detection, portable evidence bundles, mocked DICOM/PACS integration, bounded performance, additive `multi_series_v2` study gating, and optional Level 3 longitudinal verification against one prior Guardian-verified comparator.
 - What it is not: a replacement PACS, scanner, or reporting workstation.
 
 ## Quick Review Path
@@ -65,6 +65,21 @@ The repository now also supports an additive `multi_series_v2` study container. 
 - duplicate payload `series_id` values and empty `supporting_series_ids` are hard study-shape failures; the path does not auto-downgrade to single-series
 - same-grid geometry uses exact equality over canonicalized voxel spacing plus voxel shape
 - positive-lesion corroboration uses exact coordinate intersection count `> 0`
+
+Single-series Level 3 now also supports an optional longitudinal layer. When callers supply one admissible `prior_verified_context`, the report emits a canonical `TemporalConsistencyTrace` with explicit:
+
+- timestamp trust classes and deterministic pair-provenance derivation
+- `comparison_status` (`not_evaluated`, `aligned`, `degraded`, `unsuitable`)
+- `comparison_scope` (`not_evaluated`, `full`, `volume_only`, `none`)
+- chronology, geometry, metric, flag, and skipped-metric detail
+
+V1 longitudinal rules are intentionally narrow:
+
+- temporal findings are advisory only and do not change the hard release gate
+- exactly one prior comparator is supported
+- `<= 730` days is the preferred aligned band, `731-3650` days is degraded-but-usable, and `> 3650` days suppresses temporal comparison by policy
+- these interval bands express comparability confidence only, not clinical expectation
+- missing or untrusted timestamps suppress only time-dependent metrics; exact-geometry or scalar-volume comparison may still run as degraded
 
 ## Runtime Profiles
 
@@ -140,7 +155,7 @@ in a qualifying no-gap run of consecutive slices, not by label rank.
 ## Structure
 
 - [mri_guardian/bundle.py](mri_guardian/bundle.py) builds and verifies portable `.mri-guard-bundle` proof artifacts.
-- [mri_guardian/contracts.py](mri_guardian/contracts.py) defines the reusable `AIClaimEnvelope`, `VerifiedReconstructionTrace`, and `MaskDerivationPolicy` interfaces.
+- [mri_guardian/contracts.py](mri_guardian/contracts.py) defines the reusable claim/proof and longitudinal interfaces, including `AIClaimEnvelope`, `VerifiedReconstructionTrace`, `PriorVerifiedContext`, and `TemporalConsistencyTrace`.
 - [mri_guardian/harness.py](mri_guardian/harness.py) defines the release transition, invariants, deterministic reconstruction checks, and manifest generation.
 - [mri_guardian/integration.py](mri_guardian/integration.py) mocks the DICOM ingress and PACS egress contracts around the verification proxy.
 - [mri_guardian/mask_engine.py](mri_guardian/mask_engine.py) defines the fixed approved mask-algorithm catalogue, canonical parameter resolution, and deterministic dispatcher.
@@ -231,6 +246,8 @@ Inspect the explicit claim-to-proof interfaces:
 - `demo_artifacts/verified_reconstruction_trace.json`
 - `demo_artifacts/mask_derivation_policy.json`
 - `demo_artifacts/verification_tolerance_policy.json`
+- `demo_artifacts/prior_verified_context.json` when a prior comparator is supplied
+- `demo_artifacts/temporal_consistency_trace.json` when a prior comparator is supplied
 
 Inspect the performance evidence:
 
@@ -287,6 +304,8 @@ That interface is now explicit rather than implied. The harness emits:
 - `VerificationTolerancePolicy`: the attack-aware tolerance contract that states which metrics are per-voxel, global-norm, and frequency-domain
 - `VerificationProfileDescriptor`: the canonical runtime profile contract with `profile_name`, `profile_revision`, `profile_digest`, release semantics, authority requirements, heuristics, and performance expectations
 - `VerifiedReconstructionTrace`: the proof object that links the raw measurements, derived reconstruction, mask policy, and verified volume back to the original claim
+- `PriorVerifiedContext`: the compact canonical summary of one admissible prior Guardian-verified comparator
+- `TemporalConsistencyTrace`: the deterministic Level 3 longitudinal trace with chronology, geometry, signed change metrics, flags, and skipped-metric reasons
 
 When present, `ai_stack_identity` is canonical claim provenance rather than a new physical proof. Guardian canonicalizes and hashes the producer declaration into the claim identity, but it does not independently verify that the declared model stack itself is true.
 
@@ -357,8 +376,10 @@ The added viewer makes that boundary human-visible. It renders the verification 
 - left: AI reconstruction plus the AI tumour mask proposed for downstream handoff
 - right: Guardian Layer reconstruction plus the admissible verified mask
 - Level 1 / Level 2 / Level 3 verification cards so reviewers can see which trust layer passed, failed, or only warned
+- a longitudinal summary card with comparison status, comparison scope, signed change, normalized rate, IoU, and centroid shift when prior context is available
 - highlighted mismatched voxels
 - highlighted rejected mask regions where the AI overlay rests on unsupported pixels
+- a faded prior-mask overlay on the verified panel only when exact geometry comparability passed
 - a timing overlay that measures representative reconstruction latency, verification latency, total overhead, and a profiled worst-case bound
 
 The tamper-mode reports make failure detection explicit:

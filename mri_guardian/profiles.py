@@ -54,6 +54,7 @@ class VerificationProfileDescriptor:
     tolerance_rules: dict[str, Any]
     authority_requirements: dict[str, Any]
     heuristic_rules: dict[str, Any]
+    temporal_rules: dict[str, Any]
     performance_expectations: dict[str, Any]
 
     @property
@@ -96,6 +97,9 @@ class VerificationProfileDescriptor:
     def heuristic(self, code: str) -> dict[str, Any]:
         return deepcopy(self.heuristic_rules[code])
 
+    def temporal_rule(self, code: str) -> dict[str, Any]:
+        return deepcopy(self.temporal_rules[code])
+
     def digestable_dict(self) -> dict[str, Any]:
         return {
             "profile_schema_version": PROFILE_SCHEMA_VERSION,
@@ -114,6 +118,7 @@ class VerificationProfileDescriptor:
             "tolerance_rules": deepcopy(self.tolerance_rules),
             "authority_requirements": deepcopy(self.authority_requirements),
             "heuristic_rules": deepcopy(self.heuristic_rules),
+            "temporal_rules": deepcopy(self.temporal_rules),
             "performance_expectations": deepcopy(self.performance_expectations),
         }
 
@@ -177,6 +182,7 @@ def verification_profile_descriptor_from_dict(
         "tolerance_rules",
         "authority_requirements",
         "heuristic_rules",
+        "temporal_rules",
         "performance_expectations",
     )
     missing_fields = [field_name for field_name in required_fields if field_name not in payload]
@@ -226,6 +232,7 @@ def verification_profile_descriptor_from_dict(
         tolerance_rules=deepcopy(dict(payload["tolerance_rules"])),
         authority_requirements=deepcopy(dict(payload["authority_requirements"])),
         heuristic_rules=deepcopy(dict(payload["heuristic_rules"])),
+        temporal_rules=deepcopy(dict(payload["temporal_rules"])),
         performance_expectations=deepcopy(dict(payload["performance_expectations"])),
     )
     expected_digest = descriptor.profile_digest()
@@ -323,6 +330,7 @@ def _profile(
     volume_absolute_error: float,
     required_authority_source_types: tuple[str, ...],
     heuristic_rules: dict[str, Any],
+    temporal_rules: dict[str, Any],
     representative_total_ms_budget: float,
     worst_case_total_ms_budget: float,
     final_release_allowed: bool,
@@ -364,6 +372,7 @@ def _profile(
             "required_source_types": list(required_authority_source_types),
         },
         heuristic_rules=deepcopy(heuristic_rules),
+        temporal_rules=deepcopy(temporal_rules),
         performance_expectations={
             "normative": False,
             "representative_total_ms_budget": float(representative_total_ms_budget),
@@ -386,6 +395,52 @@ def _heuristic(
         "severity": severity,
         "comparison": comparison,
         "threshold": float(threshold),
+    }
+
+
+def _temporal_rules(
+    *,
+    enabled: bool = True,
+    aligned_interval_max_days: int = 730,
+    degraded_interval_max_days: int = 3650,
+    signed_volume_change_percent_advisory: float = 30.0,
+    signed_volume_change_percent_warning: float = 50.0,
+    signed_normalized_percent_change_per_30d_advisory: float = 15.0,
+    signed_normalized_percent_change_per_30d_warning: float = 30.0,
+    intersection_over_union_advisory_floor: float = 0.75,
+    intersection_over_union_warning_floor: float = 0.50,
+    global_centroid_shift_mm_advisory: float = 5.0,
+    global_centroid_shift_mm_warning: float = 10.0,
+) -> dict[str, Any]:
+    return {
+        "enabled": bool(enabled),
+        "same_sequence_family_required": True,
+        "allow_multiple_priors": False,
+        "allow_blocking": False,
+        "aligned_interval_max_days": int(aligned_interval_max_days),
+        "degraded_interval_max_days": int(degraded_interval_max_days),
+        "metrics": {
+            "signed_volume_change_percent": {
+                "advisory_abs_threshold": float(signed_volume_change_percent_advisory),
+                "warning_abs_threshold": float(signed_volume_change_percent_warning),
+            },
+            "signed_normalized_percent_change_per_30d": {
+                "advisory_abs_threshold": float(
+                    signed_normalized_percent_change_per_30d_advisory
+                ),
+                "warning_abs_threshold": float(
+                    signed_normalized_percent_change_per_30d_warning
+                ),
+            },
+            "intersection_over_union": {
+                "advisory_floor": float(intersection_over_union_advisory_floor),
+                "warning_floor": float(intersection_over_union_warning_floor),
+            },
+            "global_centroid_shift_mm": {
+                "advisory_threshold": float(global_centroid_shift_mm_advisory),
+                "warning_threshold": float(global_centroid_shift_mm_warning),
+            },
+        },
     }
 
 
@@ -512,6 +567,7 @@ _PROFILES = {
                 threshold=2.0,
             ),
         },
+        temporal_rules=_temporal_rules(),
         representative_total_ms_budget=80.0,
         worst_case_total_ms_budget=180.0,
         final_release_allowed=True,
@@ -555,6 +611,7 @@ _PROFILES = {
                 threshold=2.0,
             ),
         },
+        temporal_rules=_temporal_rules(),
         representative_total_ms_budget=90.0,
         worst_case_total_ms_budget=190.0,
         final_release_allowed=True,
@@ -601,6 +658,7 @@ _PROFILES = {
                 threshold=2.0,
             ),
         },
+        temporal_rules=_temporal_rules(),
         representative_total_ms_budget=95.0,
         worst_case_total_ms_budget=200.0,
         final_release_allowed=True,
@@ -647,6 +705,7 @@ _PROFILES = {
                 threshold=2.0,
             ),
         },
+        temporal_rules=_temporal_rules(),
         representative_total_ms_budget=100.0,
         worst_case_total_ms_budget=210.0,
         final_release_allowed=True,
@@ -687,6 +746,7 @@ _PROFILES = {
                 threshold=2.0,
             ),
         },
+        temporal_rules=_temporal_rules(),
         representative_total_ms_budget=80.0,
         worst_case_total_ms_budget=180.0,
         final_release_allowed=True,
@@ -727,6 +787,7 @@ _PROFILES = {
                 threshold=2.0,
             ),
         },
+        temporal_rules=_temporal_rules(),
         representative_total_ms_budget=90.0,
         worst_case_total_ms_budget=190.0,
         final_release_allowed=True,
@@ -769,6 +830,7 @@ _PROFILES = {
                 threshold=3.0,
             ),
         },
+        temporal_rules=_temporal_rules(),
         representative_total_ms_budget=95.0,
         worst_case_total_ms_budget=200.0,
         final_release_allowed=True,
@@ -820,6 +882,7 @@ _PROFILES = {
                 enabled=False,
             ),
         },
+        temporal_rules=_temporal_rules(),
         representative_total_ms_budget=60.0,
         worst_case_total_ms_budget=140.0,
         final_release_allowed=False,

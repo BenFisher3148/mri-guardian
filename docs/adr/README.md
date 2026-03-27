@@ -14,6 +14,7 @@ This directory records architecture decisions that materially affect invariants,
 - [`0008-slice-consistency-mask-policy-family.md`](0008-slice-consistency-mask-policy-family.md)
 - [`0009-multi-series-study-release-gating.md`](0009-multi-series-study-release-gating.md)
 - [`0010-canonical-ai-claim-provenance-split.md`](0010-canonical-ai-claim-provenance-split.md)
+- [`0011-longitudinal-temporal-consistency-v1.md`](0011-longitudinal-temporal-consistency-v1.md)
 
 ## ADR Rules
 

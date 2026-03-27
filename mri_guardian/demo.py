@@ -52,6 +52,8 @@ def run_demo(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     (output_path / "comparison_rejected_candidate.html").unlink(missing_ok=True)
+    (output_path / "prior_verified_context.json").unlink(missing_ok=True)
+    (output_path / "temporal_consistency_trace.json").unlink(missing_ok=True)
     descriptor = get_verification_profile(profile_name)
     if case_kind == MULTI_SERIES_CASE_KIND:
         case_state = build_multi_series_demo_case()
@@ -65,6 +67,7 @@ def run_demo(
         f"{canonical_json_dumps(pending_report)}\n",
         encoding="utf-8",
     )
+    _write_single_series_temporal_artifacts(output_path, pending_report)
     (output_path / "performance_profile.json").write_text(
         f"{canonical_json_dumps(_build_demo_performance_profile(case_state, pending_report, descriptor.profile_name))}\n",
         encoding="utf-8",
@@ -132,6 +135,7 @@ def run_demo(
         f"{canonical_json_dumps(report)}\n",
         encoding="utf-8",
     )
+    _write_single_series_temporal_artifacts(output_path, report)
     if result.after_state.get("case_kind") == MULTI_SERIES_CASE_KIND:
         _write_multi_series_contract_artifacts(output_path, report)
     else:
@@ -292,6 +296,24 @@ def _write_multi_series_contract_artifacts(
     }
     (output_path / "series_contracts.json").write_text(
         f"{canonical_json_dumps(series_contracts)}\n",
+        encoding="utf-8",
+    )
+
+
+def _write_single_series_temporal_artifacts(
+    output_path: Path,
+    report: dict[str, Any],
+) -> None:
+    contracts = report["contracts"]
+    prior_verified_context = contracts.get("prior_verified_context")
+    if prior_verified_context is None:
+        return
+    (output_path / "prior_verified_context.json").write_text(
+        f"{canonical_json_dumps(prior_verified_context)}\n",
+        encoding="utf-8",
+    )
+    (output_path / "temporal_consistency_trace.json").write_text(
+        f"{canonical_json_dumps(contracts['temporal_consistency_trace'])}\n",
         encoding="utf-8",
     )
 

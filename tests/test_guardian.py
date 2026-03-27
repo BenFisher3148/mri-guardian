@@ -7,6 +7,7 @@ import subprocess
 import sys
 import unittest
 from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -683,6 +684,406 @@ class MriGuardianHarnessTests(unittest.TestCase):
             hash_canonical_json(report["contracts"]["verification_tolerance_policy"]),
         )
         self.assertEqual(state["verification_profile_descriptor"], report["profile"])
+
+    def test_temporal_trace_is_not_evaluated_without_prior_context(self) -> None:
+        state = build_demo_case()
+
+        report = build_case_verification_report(state)
+        temporal_trace = report["contracts"]["temporal_consistency_trace"]
+
+        self.assertEqual(temporal_trace["comparison_status"], "not_evaluated")
+        self.assertEqual(temporal_trace["comparison_scope"], "not_evaluated")
+        self.assertEqual(
+            temporal_trace["prior_admissibility"]["reason_code"],
+            "no_prior_context",
+        )
+        self.assertEqual(
+            report["manifest"]["clinical_plausibility"]["temporal_consistency"],
+            temporal_trace,
+        )
+
+    def test_temporal_pair_provenance_derivation_uses_deterministic_precedence(self) -> None:
+        prior_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-03-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_result = self._release_demo_case_with_state(prior_state)
+        prior_report = build_case_verification_report(prior_result.after_state)
+
+        cases = (
+            (
+                "trusted_plus_verified_bundle",
+                "2025-09-01T00:00:00Z",
+                "trusted_study_metadata",
+                "verified_bundle",
+                "trusted_metadata_pair",
+            ),
+            (
+                "missing_plus_trusted",
+                None,
+                "missing",
+                "trusted_study_metadata",
+                "timestamp_missing",
+            ),
+            (
+                "untrusted_dominates_verified_bundle",
+                "2025-09-01T00:00:00Z",
+                "untrusted",
+                "verified_bundle",
+                "timestamp_untrusted",
+            ),
+            (
+                "untrusted_dominates_missing",
+                None,
+                "missing",
+                "untrusted",
+                "timestamp_untrusted",
+            ),
+        )
+
+        for (
+            label,
+            current_timestamp,
+            current_provenance,
+            prior_provenance,
+            expected_pair_provenance,
+        ) in cases:
+            with self.subTest(case=label):
+                current_state = self._attach_temporal_metadata(
+                    build_demo_case(),
+                    study_acquired_at=current_timestamp,
+                    study_timestamp_provenance=current_provenance,
+                )
+                current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
+                    released_state=prior_result.after_state,
+                    released_report=prior_report,
+                    timestamp_provenance=prior_provenance,
+                )
+
+                report = build_case_verification_report(current_state)
+
+                self.assertEqual(
+                    report["contracts"]["temporal_consistency_trace"]["chronology_assessment"][
+                        "pair_provenance"
+                    ],
+                    expected_pair_provenance,
+                )
+
+    def test_temporal_aligned_full_comparison_supports_trusted_metadata_pair(self) -> None:
+        prior_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-01-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_result = self._release_demo_case_with_state(prior_state)
+        prior_report = build_case_verification_report(prior_result.after_state)
+        current_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-07-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
+            released_state=prior_result.after_state,
+            released_report=prior_report,
+            timestamp_provenance="verified_bundle",
+        )
+
+        report = build_case_verification_report(current_state)
+        temporal_trace = report["contracts"]["temporal_consistency_trace"]
+        view_model = build_side_by_side_view_model(current_state)
+        html = render_side_by_side_report_html(current_state)
+
+        self.assertEqual(temporal_trace["comparison_status"], "aligned")
+        self.assertEqual(temporal_trace["comparison_scope"], "full")
+        self.assertEqual(
+            temporal_trace["chronology_assessment"]["pair_provenance"],
+            "trusted_metadata_pair",
+        )
+        self.assertEqual(
+            temporal_trace["computed_metrics"]["volume_change_direction"],
+            "stable_band",
+        )
+        self.assertEqual(
+            temporal_trace["computed_metrics"]["normalized_rate_direction"],
+            "stable_band",
+        )
+        self.assertTrue(view_model["longitudinal"]["overlay_enabled"])
+        self.assertIn("Longitudinal Summary", html)
+        self.assertIn("Prior verified overlay", html)
+
+    def test_temporal_missing_current_timestamp_degrades_but_keeps_full_spatial_comparison(self) -> None:
+        prior_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-03-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_result = self._release_demo_case_with_state(prior_state)
+        prior_report = build_case_verification_report(prior_result.after_state)
+        current_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at=None,
+            study_timestamp_provenance="missing",
+        )
+        current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
+            released_state=prior_result.after_state,
+            released_report=prior_report,
+        )
+
+        report = build_case_verification_report(current_state)
+        temporal_trace = report["contracts"]["temporal_consistency_trace"]
+        skipped_by_metric = {
+            item["metric"]: item["reason_code"] for item in temporal_trace["skipped_metrics"]
+        }
+
+        self.assertEqual(temporal_trace["comparison_status"], "degraded")
+        self.assertEqual(temporal_trace["comparison_scope"], "full")
+        self.assertEqual(
+            temporal_trace["chronology_assessment"]["reason_code"],
+            "timestamp_missing",
+        )
+        self.assertIn("temporal_rate_not_evaluated", temporal_trace["flags"])
+        self.assertEqual(
+            skipped_by_metric["signed_normalized_percent_change_per_30d"],
+            "timestamp_missing",
+        )
+        self.assertEqual(
+            temporal_trace["computed_metrics"]["intersection_over_union"],
+            1.0,
+        )
+        self.assertEqual(
+            temporal_trace["computed_metrics"]["global_centroid_shift_mm"],
+            0.0,
+        )
+
+    def test_temporal_equal_timestamps_degrade_and_skip_normalized_rate(self) -> None:
+        prior_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-04-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_result = self._release_demo_case_with_state(prior_state)
+        prior_report = build_case_verification_report(prior_result.after_state)
+        current_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-04-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
+            released_state=prior_result.after_state,
+            released_report=prior_report,
+            timestamp_provenance="trusted_study_metadata",
+        )
+
+        report = build_case_verification_report(current_state)
+        temporal_trace = report["contracts"]["temporal_consistency_trace"]
+
+        self.assertEqual(temporal_trace["comparison_status"], "degraded")
+        self.assertEqual(temporal_trace["comparison_scope"], "full")
+        self.assertEqual(temporal_trace["chronology_assessment"]["interval_days"], 0.0)
+        self.assertEqual(
+            temporal_trace["chronology_assessment"]["reason_code"],
+            "zero_interval_days",
+        )
+        self.assertIn(
+            {
+                "metric": "signed_normalized_percent_change_per_30d",
+                "reason_code": "zero_interval_days",
+            },
+            temporal_trace["skipped_metrics"],
+        )
+
+    def test_temporal_geometry_mismatch_falls_back_to_volume_only_comparison(self) -> None:
+        prior_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-02-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_result = self._release_demo_case_with_state(prior_state)
+        prior_report = build_case_verification_report(prior_result.after_state)
+        geometry_shifted = self._base_spatial_geometry()
+        geometry_shifted["affine_ijk_to_mm"][0][3] = 1.0
+        current_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-08-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+            spatial_geometry=geometry_shifted,
+        )
+        current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
+            released_state=prior_result.after_state,
+            released_report=prior_report,
+        )
+
+        report = build_case_verification_report(current_state)
+        temporal_trace = report["contracts"]["temporal_consistency_trace"]
+
+        self.assertEqual(temporal_trace["comparison_status"], "degraded")
+        self.assertEqual(temporal_trace["comparison_scope"], "volume_only")
+        self.assertEqual(
+            temporal_trace["geometry_assessment"]["reason_code"],
+            "geometry_not_exactly_comparable",
+        )
+        self.assertIn(
+            {
+                "metric": "intersection_over_union",
+                "reason_code": "geometry_not_exactly_comparable",
+            },
+            temporal_trace["skipped_metrics"],
+        )
+        self.assertIn(
+            {
+                "metric": "global_centroid_shift_mm",
+                "reason_code": "geometry_not_exactly_comparable",
+            },
+            temporal_trace["skipped_metrics"],
+        )
+
+    def test_temporal_interval_beyond_v1_max_suppresses_all_comparison(self) -> None:
+        prior_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2010-01-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_result = self._release_demo_case_with_state(prior_state)
+        prior_report = build_case_verification_report(prior_result.after_state)
+        current_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2026-03-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
+            released_state=prior_result.after_state,
+            released_report=prior_report,
+        )
+
+        report = build_case_verification_report(current_state)
+        temporal_trace = report["contracts"]["temporal_consistency_trace"]
+
+        self.assertEqual(temporal_trace["comparison_status"], "unsuitable")
+        self.assertEqual(temporal_trace["comparison_scope"], "none")
+        self.assertEqual(
+            temporal_trace["chronology_assessment"]["reason_code"],
+            "interval_exceeds_max_days",
+        )
+
+    def test_temporal_empty_masks_skip_iou_and_centroid_deterministically(self) -> None:
+        prior_state = self._attach_temporal_metadata(
+            self._build_zero_mask_case(),
+            study_acquired_at="2025-01-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_result = self._release_demo_case_with_state(prior_state)
+        prior_report = build_case_verification_report(prior_result.after_state)
+        current_state = self._attach_temporal_metadata(
+            self._build_zero_mask_case(),
+            study_acquired_at="2025-06-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
+            released_state=prior_result.after_state,
+            released_report=prior_report,
+        )
+
+        report = build_case_verification_report(current_state)
+        temporal_trace = report["contracts"]["temporal_consistency_trace"]
+
+        self.assertEqual(temporal_trace["comparison_scope"], "full")
+        self.assertIn(
+            {
+                "metric": "intersection_over_union",
+                "reason_code": "both_masks_empty",
+            },
+            temporal_trace["skipped_metrics"],
+        )
+        self.assertIn(
+            {
+                "metric": "global_centroid_shift_mm",
+                "reason_code": "empty_prior_mask",
+            },
+            temporal_trace["skipped_metrics"],
+        )
+        self.assertIn(
+            {
+                "metric": "signed_volume_change_percent",
+                "reason_code": "zero_prior_volume",
+            },
+            temporal_trace["skipped_metrics"],
+        )
+
+    def test_temporal_prior_with_advisory_release_is_admissible_and_bundle_surfaces_contracts(self) -> None:
+        prior_state = self._attach_temporal_metadata(
+            self._build_warning_stack_case(),
+            study_acquired_at="2025-01-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_result = self._release_demo_case_with_state(prior_state)
+        prior_report = build_case_verification_report(prior_result.after_state)
+        self.assertEqual(prior_report["decision"]["decision_class"], "verified_with_advisory")
+
+        current_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-06-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
+            released_state=prior_result.after_state,
+            released_report=prior_report,
+        )
+        harness = self._build_harness()
+        result = harness.release_case(
+            state=current_state,
+            actor="guardian:test",
+            authority_sources=build_demo_authority_sources(case_id=current_state["case_id"]),
+            timestamp="2026-03-26T00:00:00Z",
+        )
+        report = build_case_verification_report(result.after_state)
+        temporal_trace = report["contracts"]["temporal_consistency_trace"]
+        bundle_path = self.runtime_root / f"temporal{MRI_GUARD_BUNDLE_EXTENSION}"
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        verification = verify_bundle(bundle_path)
+        pacs_submission = build_mock_pacs_submission(
+            result,
+            bundle_reference=bundle_path.name,
+        )
+        integration_trace = build_mock_integration_trace(
+            dicom_input=build_mock_dicom_input(result.before_state),
+            pacs_output=pacs_submission,
+        )
+
+        self.assertTrue(result.after_state["release_status"] == RELEASE_STATUS_RELEASED)
+        self.assertTrue(verification["verified"])
+        self.assertEqual(temporal_trace["prior_admissibility"]["status"], "admissible")
+        self.assertIn("prior_verified_context", pacs_submission["proof_contracts"])
+        self.assertIn("temporal_consistency_trace", pacs_submission["proof_contracts"])
+        self.assertEqual(
+            pacs_submission["verification_summary"]["temporal_comparison_status"],
+            temporal_trace["comparison_status"],
+        )
+        self.assertEqual(
+            integration_trace["pipeline"][1]["temporal_comparison_scope"],
+            temporal_trace["comparison_scope"],
+        )
+        with ZipFile(bundle_path, mode="r") as archive:
+            member_names = set(archive.namelist())
+            manifest = self._read_bundle_json(archive, "bundle.json")
+            prior_context = self._read_bundle_json(archive, "prior_verified_context.json")
+            temporal_contract = self._read_bundle_json(archive, "temporal_consistency_trace.json")
+        self.assertIn("prior_verified_context.json", member_names)
+        self.assertIn("temporal_consistency_trace.json", member_names)
+        self.assertEqual(
+            manifest["hashes"]["prior_verified_context_hash"],
+            hash_canonical_json(prior_context),
+        )
+        self.assertEqual(
+            manifest["hashes"]["temporal_consistency_trace_hash"],
+            hash_canonical_json(temporal_contract),
+        )
+
 
     def test_ai_claim_envelope_preserves_legacy_shape_when_ai_stack_identity_is_absent(self) -> None:
         state = build_demo_case()
@@ -2966,12 +3367,109 @@ class MriGuardianHarnessTests(unittest.TestCase):
             default_profile_name=default_profile_name,
         )
 
+    def _base_spatial_geometry(self) -> dict[str, object]:
+        return {
+            "frame_of_reference_uid": "for-0001",
+            "affine_ijk_to_mm": [
+                [0.8, 0.0, 0.0, 0.0],
+                [0.0, 0.8, 0.0, 0.0],
+                [0.0, 0.0, 2.5, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        }
+
+    def _attach_temporal_metadata(
+        self,
+        state: dict[str, object],
+        *,
+        study_acquired_at: str | None,
+        study_timestamp_provenance: str,
+        spatial_geometry: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        if study_acquired_at is None:
+            state.pop("study_acquired_at", None)
+        else:
+            state["study_acquired_at"] = study_acquired_at
+        state["study_timestamp_provenance"] = study_timestamp_provenance
+        state["spatial_geometry"] = deepcopy(
+            self._base_spatial_geometry() if spatial_geometry is None else spatial_geometry
+        )
+        return state
+
+    def _build_prior_verified_context_from_release(
+        self,
+        *,
+        released_state: dict[str, object],
+        released_report: dict[str, object],
+        timestamp_provenance: str = "verified_bundle",
+        spatial_geometry: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "prior_bundle_sha256": hashlib.sha256(
+                canonical_json_dumps(
+                    {
+                        "case_id": released_state["case_id"],
+                        "released_state_hash": hash_canonical_json(released_state),
+                        "verification_report_hash": hash_canonical_json(released_report),
+                    }
+                ).encode("utf-8")
+            ).hexdigest(),
+            "prior_case_id": released_state["case_id"],
+            "prior_study_uid": released_state["study_uid"],
+            "prior_series_uid": released_state["series_uid"],
+            "prior_released_state_hash": hash_canonical_json(released_state),
+            "prior_verification_report_hash": hash_canonical_json(released_report),
+            "prior_profile": {
+                "profile_name": released_report["profile"]["profile_name"],
+                "profile_revision": released_report["profile"]["profile_revision"],
+                "profile_digest": released_report["profile"]["profile_digest"],
+                "sequence_family": released_report["profile"]["sequence_family"],
+            },
+            "prior_release": {
+                "release_status": released_state["release_status"],
+                "final_disposition": released_report["decision"]["final_disposition"],
+                "decision_class": released_report["decision"]["decision_class"],
+            },
+            "study_acquired_at": released_state.get("study_acquired_at"),
+            "timestamp_provenance": timestamp_provenance,
+            "verified_mask": deepcopy(released_report["analysis"]["verified_mask"]),
+            "verified_mask_hash": released_report["analysis"]["verified_mask_hash"],
+            "verified_volume_mm3": released_report["analysis"]["computed_tumor_volume_mm3"],
+            "verified_mask_voxel_count": int(
+                released_report["analysis"]["verified_mask_voxel_count"]
+            ),
+            "voxel_spacing_mm": deepcopy(released_report["analysis"]["voxel_spacing_mm"]),
+            "spatial_geometry": deepcopy(
+                released_report["analysis"]["spatial_geometry"]
+                if spatial_geometry is None
+                else spatial_geometry
+            ),
+        }
+
     def _release_demo_case(
         self,
         *,
         profile_name: str = DEFAULT_PROFILE_NAME,
     ) -> tuple[dict[str, object], object]:
         state = build_demo_case(profile_name=profile_name)
+        result = self._build_harness(default_profile_name=profile_name).release_case(
+            state=state,
+            actor="guardian:test",
+            authority_sources=build_demo_authority_sources(
+                case_id=state["case_id"],
+                profile_name=profile_name,
+            ),
+            profile_name=profile_name,
+            timestamp="2026-03-26T00:00:00Z",
+        )
+        return state, result
+
+    def _release_demo_case_with_state(
+        self,
+        state: dict[str, object],
+        *,
+        profile_name: str = DEFAULT_PROFILE_NAME,
+    ) -> tuple[dict[str, object], object]:
         result = self._build_harness(default_profile_name=profile_name).release_case(
             state=state,
             actor="guardian:test",
@@ -3047,6 +3545,18 @@ class MriGuardianHarnessTests(unittest.TestCase):
         state["ai_reconstruction"] = reconstruction.tolist()
         state["tumor_mask"] = mask.tolist()
         state["tumor_volume_mm3"] = round(float(mask.sum() * np.prod(voxel_spacing)), 9)
+        return state
+
+    def _build_zero_mask_case(self) -> dict[str, object]:
+        state = build_demo_case()
+        reconstruction = np.zeros_like(np.asarray(state["ai_reconstruction"], dtype=np.float64))
+        raw_kspace = np.fft.fft2(reconstruction, axes=(-2, -1))
+        zero_mask = np.zeros_like(reconstruction, dtype=np.int64)
+        state["raw_real"] = raw_kspace.real.tolist()
+        state["raw_imag"] = raw_kspace.imag.tolist()
+        state["ai_reconstruction"] = reconstruction.tolist()
+        state["tumor_mask"] = zero_mask.tolist()
+        state["tumor_volume_mm3"] = 0.0
         return state
 
     def _read_bundle_json(self, archive: ZipFile, member_name: str) -> dict[str, object]:

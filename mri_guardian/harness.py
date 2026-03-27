@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from collections.abc import Iterable, Mapping
+from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -23,10 +24,16 @@ from .contracts import (
     build_cross_series_verification_trace,
     build_mask_derivation_policy,
     build_multi_series_verification_profile_descriptor_set,
+    build_prior_verified_context,
+    build_temporal_consistency_trace,
     build_verification_profile_contract,
     build_verification_tolerance_policy,
     build_verified_reconstruction_trace,
+    canonicalise_prior_verified_context,
     canonicalise_ai_stack_identity,
+    canonicalise_spatial_geometry,
+    canonicalise_study_acquired_at,
+    canonicalise_timestamp_provenance,
 )
 from .mask_engine import (
     CONNECTED_COMPONENT_ALGORITHM,
@@ -92,6 +99,61 @@ _DECISION_REASON_BAND_ORDER = {
     DECISION_REASON_BAND_SECONDARY_MODIFIER: 2,
     DECISION_REASON_BAND_ADVISORY_INFO: 3,
 }
+
+TEMPORAL_STATUS_NOT_EVALUATED = "not_evaluated"
+TEMPORAL_STATUS_ALIGNED = "aligned"
+TEMPORAL_STATUS_DEGRADED = "degraded"
+TEMPORAL_STATUS_UNSUITABLE = "unsuitable"
+
+TEMPORAL_SCOPE_NOT_EVALUATED = "not_evaluated"
+TEMPORAL_SCOPE_FULL = "full"
+TEMPORAL_SCOPE_VOLUME_ONLY = "volume_only"
+TEMPORAL_SCOPE_NONE = "none"
+
+TEMPORAL_PAIR_PROVENANCE_VERIFIED_BUNDLE = "verified_bundle_pair"
+TEMPORAL_PAIR_PROVENANCE_TRUSTED_METADATA = "trusted_metadata_pair"
+TEMPORAL_PAIR_PROVENANCE_MIXED = "mixed_provenance"
+TEMPORAL_PAIR_PROVENANCE_MISSING = "timestamp_missing"
+TEMPORAL_PAIR_PROVENANCE_UNTRUSTED = "timestamp_untrusted"
+
+TEMPORAL_GEOMETRY_EXACT_MATCH = "exact_match"
+TEMPORAL_GEOMETRY_VOLUME_ONLY = "volume_basis_only"
+TEMPORAL_GEOMETRY_INSUFFICIENT = "insufficient_geometry_trust"
+TEMPORAL_GEOMETRY_REASON_EXACT_MATCH = "geometry_exact_match"
+TEMPORAL_GEOMETRY_REASON_NOT_EXACT = "geometry_not_exactly_comparable"
+TEMPORAL_GEOMETRY_REASON_NOT_SUFFICIENT = "geometry_not_sufficient_for_volume_only"
+
+TEMPORAL_PRIOR_ADMISSIBLE = "admissible"
+TEMPORAL_PRIOR_INADMISSIBLE = "inadmissible"
+
+TEMPORAL_REASON_TEMPORAL_PRIOR_UNSUITABLE = "temporal_prior_unsuitable"
+TEMPORAL_REASON_INTERVAL_DEGRADED = "temporal_interval_degraded"
+TEMPORAL_REASON_GEOMETRY_LIMITED = "temporal_geometry_limited"
+TEMPORAL_REASON_TIMESTAMP_REVERSED = "temporal_timestamp_reversed"
+TEMPORAL_REASON_VOLUME_WARNING = "temporal_volume_change_warning"
+TEMPORAL_REASON_RATE_WARNING = "temporal_growth_rate_warning"
+TEMPORAL_REASON_IOU_WARNING = "temporal_intersection_over_union_warning"
+TEMPORAL_REASON_CENTROID_WARNING = "temporal_centroid_shift_warning"
+
+TEMPORAL_FLAG_COMPONENT_COUNT_CHANGED = "component_count_changed"
+TEMPORAL_FLAG_RATE_NOT_EVALUATED = "temporal_rate_not_evaluated"
+
+TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT = "no_prior_context"
+TEMPORAL_SKIPPED_PRIOR_BUNDLE_IDENTITY_MISSING = "prior_bundle_identity_missing"
+TEMPORAL_SKIPPED_PRIOR_NOT_RELEASED = "prior_not_released"
+TEMPORAL_SKIPPED_SEQUENCE_FAMILY_MISMATCH = "sequence_family_mismatch"
+TEMPORAL_SKIPPED_TIMESTAMP_MISSING = "timestamp_missing"
+TEMPORAL_SKIPPED_TIMESTAMP_UNTRUSTED = "timestamp_untrusted"
+TEMPORAL_SKIPPED_MIXED_PROVENANCE = "mixed_provenance"
+TEMPORAL_SKIPPED_TIMESTAMP_REVERSED = "timestamp_reversed"
+TEMPORAL_SKIPPED_ZERO_INTERVAL = "zero_interval_days"
+TEMPORAL_SKIPPED_INTERVAL_EXCEEDS_MAX = "interval_exceeds_max_days"
+TEMPORAL_SKIPPED_GEOMETRY_NOT_EXACT = "geometry_not_exactly_comparable"
+TEMPORAL_SKIPPED_GEOMETRY_NOT_SUFFICIENT = "geometry_not_sufficient_for_volume_only"
+TEMPORAL_SKIPPED_ZERO_PRIOR_VOLUME = "zero_prior_volume"
+TEMPORAL_SKIPPED_EMPTY_PRIOR_MASK = "empty_prior_mask"
+TEMPORAL_SKIPPED_EMPTY_CURRENT_MASK = "empty_current_mask"
+TEMPORAL_SKIPPED_BOTH_MASKS_EMPTY = "both_masks_empty"
 
 
 class MriGuardianHarness:
@@ -212,8 +274,20 @@ def build_case_verification_report(
         raise RuntimeError("Single-series report preparation did not resolve a descriptor.")
     profile_contract = build_verification_profile_contract(descriptor.profile_name)
     analysis = _analyse_case(state, descriptor)
-    contracts = _build_claim_to_proof_contracts(state, analysis, descriptor)
-    manifest = _build_verified_manifest(state, analysis, contracts, descriptor)
+    temporal_consistency = _build_temporal_consistency_section(state, analysis, descriptor)
+    contracts = _build_claim_to_proof_contracts(
+        state,
+        analysis,
+        descriptor,
+        temporal_consistency=temporal_consistency,
+    )
+    manifest = _build_verified_manifest(
+        state,
+        analysis,
+        contracts,
+        descriptor,
+        temporal_consistency=temporal_consistency,
+    )
     reasons = _build_failure_reasons(state, analysis, manifest)
     tiers = manifest["verification_tiers"]
     decision_summary = manifest["decision_summary"]
@@ -1739,6 +1813,22 @@ def _build_release_transition(
                 check=_check_ai_stack_identity,
             ),
             Invariant(
+                name="study_acquired_at_valid",
+                check=_check_study_acquired_at,
+            ),
+            Invariant(
+                name="study_timestamp_provenance_valid",
+                check=_check_study_timestamp_provenance,
+            ),
+            Invariant(
+                name="spatial_geometry_valid",
+                check=_check_spatial_geometry,
+            ),
+            Invariant(
+                name="prior_verified_context_valid",
+                check=_check_prior_verified_context,
+            ),
+            Invariant(
                 name="raw_real_numeric",
                 check=NumbaBatchFieldInvariant(
                     field="raw_real",
@@ -1980,6 +2070,68 @@ def _check_ai_stack_identity(state: Mapping[str, Any]) -> InvariantFailure | Non
     return None
 
 
+def _check_study_acquired_at(state: Mapping[str, Any]) -> InvariantFailure | None:
+    try:
+        canonicalise_study_acquired_at(
+            state.get("study_acquired_at"),
+            path="state.study_acquired_at",
+        )
+    except ValueError as exc:
+        return InvariantFailure(
+            invariant="study_acquired_at_valid",
+            code="invalid_study_acquired_at",
+            message=str(exc),
+            details={"field": "study_acquired_at"},
+        )
+    return None
+
+
+def _check_study_timestamp_provenance(state: Mapping[str, Any]) -> InvariantFailure | None:
+    try:
+        canonicalise_timestamp_provenance(
+            state.get("study_timestamp_provenance", "missing"),
+            path="state.study_timestamp_provenance",
+            allow_verified_bundle=False,
+        )
+    except ValueError as exc:
+        return InvariantFailure(
+            invariant="study_timestamp_provenance_valid",
+            code="invalid_study_timestamp_provenance",
+            message=str(exc),
+            details={"field": "study_timestamp_provenance"},
+        )
+    return None
+
+
+def _check_spatial_geometry(state: Mapping[str, Any]) -> InvariantFailure | None:
+    try:
+        canonicalise_spatial_geometry(
+            state.get("spatial_geometry"),
+            path="state.spatial_geometry",
+        )
+    except ValueError as exc:
+        return InvariantFailure(
+            invariant="spatial_geometry_valid",
+            code="invalid_spatial_geometry",
+            message=str(exc),
+            details={"field": "spatial_geometry"},
+        )
+    return None
+
+
+def _check_prior_verified_context(state: Mapping[str, Any]) -> InvariantFailure | None:
+    try:
+        canonicalise_prior_verified_context(state.get("prior_verified_context"))
+    except ValueError as exc:
+        return InvariantFailure(
+            invariant="prior_verified_context_valid",
+            code="invalid_prior_verified_context",
+            message=str(exc),
+            details={"field": "prior_verified_context"},
+        )
+    return None
+
+
 def _check_geometry_consistent(state: Mapping[str, Any]) -> InvariantFailure | None:
     arrays, failure = _extract_arrays(state)
     if failure is not None:
@@ -2196,6 +2348,19 @@ def _analyse_case(
     ai_reconstruction_hash = hash_canonical_json(ai_reconstruction_list)
     ai_mask_hash = hash_canonical_json(ai_mask_list)
     verified_mask_hash = hash_canonical_json(verified_mask_list)
+    study_acquired_at = canonicalise_study_acquired_at(
+        state.get("study_acquired_at"),
+        path="state.study_acquired_at",
+    )
+    study_timestamp_provenance = canonicalise_timestamp_provenance(
+        state.get("study_timestamp_provenance", "missing"),
+        path="state.study_timestamp_provenance",
+        allow_verified_bundle=False,
+    )
+    spatial_geometry = canonicalise_spatial_geometry(
+        state.get("spatial_geometry"),
+        path="state.spatial_geometry",
+    )
     return {
         "profile_name": descriptor.profile_name,
         "profile_revision": descriptor.profile_revision,
@@ -2212,6 +2377,8 @@ def _analyse_case(
         "verified_mask": verified_mask_list,
         "verified_mask_hash": verified_mask_hash,
         "verified_mask_voxel_count": verified_mask_voxel_count,
+        "verified_mask_empty": verified_mask_voxel_count == 0,
+        "verified_mask_component_count": _count_face_connected_components(verified_mask),
         "mask_voxel_delta": int(np.count_nonzero(mask_mismatch_mask)),
         "mask_false_positive_count": int(np.count_nonzero(mask_false_positive)),
         "mask_false_negative_count": int(np.count_nonzero(mask_false_negative)),
@@ -2223,8 +2390,756 @@ def _analyse_case(
         "relative_ai_l2_error": _relative_l2(ai_residual, derived_reconstruction),
         "reconstruction_mismatch_voxel_count": int(np.count_nonzero(reconstruction_mismatch_mask)),
         "max_imaginary_leakage": imaginary_leakage,
+        "voxel_spacing_mm": _float_array_to_list(voxel_spacing),
         "voxel_volume_mm3": _round_float(voxel_volume_mm3),
         "computed_tumor_volume_mm3": computed_tumor_volume_mm3,
+        "study_acquired_at": study_acquired_at,
+        "study_timestamp_provenance": study_timestamp_provenance,
+        "spatial_geometry": spatial_geometry,
+    }
+
+
+def _count_face_connected_components(mask: np.ndarray) -> int:
+    binary_mask = np.asarray(mask, dtype=np.int64) == 1
+    if not np.any(binary_mask):
+        return 0
+    visited = np.zeros(binary_mask.shape, dtype=bool)
+    neighbours = (
+        (-1, 0, 0),
+        (1, 0, 0),
+        (0, -1, 0),
+        (0, 1, 0),
+        (0, 0, -1),
+        (0, 0, 1),
+    )
+    component_count = 0
+    for seed in np.argwhere(binary_mask):
+        z_index, y_index, x_index = (int(value) for value in seed)
+        if visited[z_index, y_index, x_index]:
+            continue
+        component_count += 1
+        stack = [(z_index, y_index, x_index)]
+        visited[z_index, y_index, x_index] = True
+        while stack:
+            current_z, current_y, current_x = stack.pop()
+            for delta_z, delta_y, delta_x in neighbours:
+                next_z = current_z + delta_z
+                next_y = current_y + delta_y
+                next_x = current_x + delta_x
+                if (
+                    next_z < 0
+                    or next_y < 0
+                    or next_x < 0
+                    or next_z >= binary_mask.shape[0]
+                    or next_y >= binary_mask.shape[1]
+                    or next_x >= binary_mask.shape[2]
+                ):
+                    continue
+                if not binary_mask[next_z, next_y, next_x] or visited[next_z, next_y, next_x]:
+                    continue
+                visited[next_z, next_y, next_x] = True
+                stack.append((next_z, next_y, next_x))
+    return component_count
+
+
+def _temporal_pair_provenance(
+    current_provenance: str,
+    prior_provenance: str,
+) -> str:
+    trusted_classes = {"verified_bundle", "trusted_study_metadata"}
+    if "untrusted" in {current_provenance, prior_provenance}:
+        return TEMPORAL_PAIR_PROVENANCE_UNTRUSTED
+    if "missing" in {current_provenance, prior_provenance}:
+        return TEMPORAL_PAIR_PROVENANCE_MISSING
+    if current_provenance == prior_provenance == "verified_bundle":
+        return TEMPORAL_PAIR_PROVENANCE_VERIFIED_BUNDLE
+    if current_provenance in trusted_classes and prior_provenance in trusted_classes:
+        return TEMPORAL_PAIR_PROVENANCE_TRUSTED_METADATA
+    return TEMPORAL_PAIR_PROVENANCE_MIXED
+
+
+def _temporal_metric_direction(value: float | None) -> str:
+    if value is None:
+        return "not_evaluated"
+    if value == 0.0:
+        return "stable_band"
+    return "increase" if value > 0 else "decrease"
+
+
+def _temporal_skipped_metric(metric: str, reason_code: str) -> dict[str, str]:
+    return {"metric": metric, "reason_code": reason_code}
+
+
+def _temporal_exact_geometry_match(
+    analysis: Mapping[str, Any],
+    prior_context: Mapping[str, Any],
+) -> bool:
+    current_geometry = analysis["spatial_geometry"]
+    prior_geometry = prior_context["spatial_geometry"]
+    if current_geometry is None or prior_geometry is None:
+        return False
+    current_shape = tuple(np.asarray(analysis["verified_mask"], dtype=np.int64).shape)
+    prior_shape = tuple(np.asarray(prior_context["verified_mask"], dtype=np.int64).shape)
+    return (
+        current_shape == prior_shape
+        and list(analysis["voxel_spacing_mm"]) == list(prior_context["voxel_spacing_mm"])
+        and current_geometry["frame_of_reference_uid"] == prior_geometry["frame_of_reference_uid"]
+        and current_geometry["affine_ijk_to_mm"] == prior_geometry["affine_ijk_to_mm"]
+    )
+
+
+def _temporal_scalar_basis_trusted(
+    analysis: Mapping[str, Any],
+    prior_context: Mapping[str, Any],
+) -> bool:
+    current_spacing = analysis.get("voxel_spacing_mm")
+    prior_spacing = prior_context.get("voxel_spacing_mm")
+    if not (
+        isinstance(current_spacing, list)
+        and len(current_spacing) == 3
+        and isinstance(prior_spacing, list)
+        and len(prior_spacing) == 3
+    ):
+        return False
+    if any(
+        type(value) not in {int, float} or float(value) <= 0.0
+        for value in [*current_spacing, *prior_spacing]
+    ):
+        return False
+    current_voxel_count = analysis.get("verified_mask_voxel_count")
+    prior_voxel_count = prior_context.get("verified_mask_voxel_count")
+    if not isinstance(current_voxel_count, int) or not isinstance(prior_voxel_count, int):
+        return False
+    current_volume = analysis.get("computed_tumor_volume_mm3")
+    prior_volume = prior_context.get("verified_volume_mm3")
+    if type(current_volume) not in {int, float} or type(prior_volume) not in {int, float}:
+        return False
+    expected_current_volume = _round_float(
+        current_voxel_count
+        * float(np.prod(np.asarray(current_spacing, dtype=np.float64)))
+    )
+    expected_prior_volume = _round_float(
+        prior_voxel_count
+        * float(np.prod(np.asarray(prior_spacing, dtype=np.float64)))
+    )
+    return (
+        _round_float(float(current_volume)) == expected_current_volume
+        and _round_float(float(prior_volume)) == expected_prior_volume
+    )
+
+
+def _mask_centroid_mm(
+    mask: np.ndarray,
+    affine_ijk_to_mm: list[list[float]],
+) -> np.ndarray | None:
+    positive_voxels = np.argwhere(np.asarray(mask, dtype=np.int64) == 1)
+    if positive_voxels.size == 0:
+        return None
+    affine = np.asarray(affine_ijk_to_mm, dtype=np.float64)
+    homogeneous = np.concatenate(
+        [positive_voxels.astype(np.float64), np.ones((positive_voxels.shape[0], 1), dtype=np.float64)],
+        axis=1,
+    )
+    transformed = (affine @ homogeneous.T).T[:, :3]
+    return np.mean(transformed, axis=0)
+
+
+def _build_temporal_consistency_section(
+    state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    descriptor: Any,
+) -> dict[str, Any]:
+    prior_payload = state.get("prior_verified_context")
+    if prior_payload is None:
+        trace = build_temporal_consistency_trace(
+            case_id=str(state["case_id"]),
+            profile_name=descriptor.profile_name,
+            profile_revision=descriptor.profile_revision,
+            profile_digest=descriptor.profile_digest(),
+            comparison_status=TEMPORAL_STATUS_NOT_EVALUATED,
+            comparison_scope=TEMPORAL_SCOPE_NOT_EVALUATED,
+            prior_admissibility={
+                "status": TEMPORAL_PRIOR_INADMISSIBLE,
+                "reason_code": TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT,
+            },
+            chronology_assessment={
+                "pair_provenance": TEMPORAL_PAIR_PROVENANCE_MISSING,
+                "current_timestamp_provenance": analysis["study_timestamp_provenance"],
+                "prior_timestamp_provenance": "missing",
+                "current_study_acquired_at": analysis["study_acquired_at"],
+                "prior_study_acquired_at": None,
+                "interval_days": None,
+                "ordered": False,
+                "time_metrics_available": False,
+                "reason_code": TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT,
+            },
+            geometry_assessment={
+                "comparability_class": TEMPORAL_GEOMETRY_INSUFFICIENT,
+                "reason_code": TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT,
+            },
+            computed_metrics={
+                "signed_volume_delta_mm3": None,
+                "absolute_volume_delta_mm3": None,
+                "signed_volume_change_percent": None,
+                "signed_normalized_percent_change_per_30d": None,
+                "volume_change_direction": "not_evaluated",
+                "normalized_rate_direction": "not_evaluated",
+                "intersection_over_union": None,
+                "global_centroid_shift_mm": None,
+                "prior_component_count": None,
+                "current_component_count": int(analysis["verified_mask_component_count"]),
+                "component_count_delta": None,
+            },
+            flags=[],
+            skipped_metrics=[
+                _temporal_skipped_metric("signed_volume_delta_mm3", TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT),
+                _temporal_skipped_metric(
+                    "absolute_volume_delta_mm3", TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT
+                ),
+                _temporal_skipped_metric(
+                    "signed_volume_change_percent", TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT
+                ),
+                _temporal_skipped_metric(
+                    "signed_normalized_percent_change_per_30d",
+                    TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT,
+                ),
+                _temporal_skipped_metric("intersection_over_union", TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT),
+                _temporal_skipped_metric("global_centroid_shift_mm", TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT),
+            ],
+        )
+        return {
+            "prior_verified_context": None,
+            "trace": trace,
+            "heuristics": [],
+            "summary": "No prior verified context was supplied; longitudinal verification was not evaluated.",
+        }
+
+    prior_context = build_prior_verified_context(dict(prior_payload))
+    prior_admissibility_status = TEMPORAL_PRIOR_ADMISSIBLE
+    prior_admissibility_reason = "admissible"
+    if not prior_context["prior_bundle_sha256"]:
+        prior_admissibility_status = TEMPORAL_PRIOR_INADMISSIBLE
+        prior_admissibility_reason = TEMPORAL_SKIPPED_PRIOR_BUNDLE_IDENTITY_MISSING
+    elif prior_context["prior_release"]["release_status"] != RELEASE_STATUS_RELEASED:
+        prior_admissibility_status = TEMPORAL_PRIOR_INADMISSIBLE
+        prior_admissibility_reason = TEMPORAL_SKIPPED_PRIOR_NOT_RELEASED
+    elif prior_context["prior_release"]["final_disposition"] != "released":
+        prior_admissibility_status = TEMPORAL_PRIOR_INADMISSIBLE
+        prior_admissibility_reason = TEMPORAL_SKIPPED_PRIOR_NOT_RELEASED
+    elif prior_context["prior_release"]["decision_class"] not in {
+        DECISION_CLASS_VERIFIED_CLEAN,
+        DECISION_CLASS_VERIFIED_BOUNDARY_HUGGING,
+        DECISION_CLASS_VERIFIED_WITH_ADVISORY,
+    }:
+        prior_admissibility_status = TEMPORAL_PRIOR_INADMISSIBLE
+        prior_admissibility_reason = TEMPORAL_SKIPPED_PRIOR_NOT_RELEASED
+    elif prior_context["prior_profile"]["sequence_family"] != descriptor.sequence_family:
+        prior_admissibility_status = TEMPORAL_PRIOR_INADMISSIBLE
+        prior_admissibility_reason = TEMPORAL_SKIPPED_SEQUENCE_FAMILY_MISMATCH
+
+    pair_provenance = _temporal_pair_provenance(
+        str(analysis["study_timestamp_provenance"]),
+        str(prior_context["timestamp_provenance"]),
+    )
+    chronology_reason = "chronology_available"
+    interval_days: float | None = None
+    ordered = False
+    time_metrics_available = False
+    current_timestamp = analysis["study_acquired_at"]
+    prior_timestamp = prior_context["study_acquired_at"]
+    if pair_provenance == TEMPORAL_PAIR_PROVENANCE_UNTRUSTED:
+        chronology_reason = TEMPORAL_SKIPPED_TIMESTAMP_UNTRUSTED
+    elif pair_provenance == TEMPORAL_PAIR_PROVENANCE_MISSING:
+        chronology_reason = TEMPORAL_SKIPPED_TIMESTAMP_MISSING
+    elif current_timestamp is None or prior_timestamp is None:
+        chronology_reason = TEMPORAL_SKIPPED_TIMESTAMP_MISSING
+    else:
+        current_dt = datetime.strptime(str(current_timestamp), "%Y-%m-%dT%H:%M:%SZ")
+        prior_dt = datetime.strptime(str(prior_timestamp), "%Y-%m-%dT%H:%M:%SZ")
+        delta_seconds = (current_dt - prior_dt).total_seconds()
+        if delta_seconds < 0:
+            chronology_reason = TEMPORAL_SKIPPED_TIMESTAMP_REVERSED
+        elif delta_seconds == 0:
+            chronology_reason = TEMPORAL_SKIPPED_ZERO_INTERVAL
+            interval_days = 0.0
+            ordered = True
+        else:
+            ordered = True
+            interval_days = _round_float(delta_seconds / 86400.0)
+            if interval_days > float(descriptor.temporal_rules["degraded_interval_max_days"]):
+                chronology_reason = TEMPORAL_SKIPPED_INTERVAL_EXCEEDS_MAX
+            elif pair_provenance == TEMPORAL_PAIR_PROVENANCE_MIXED:
+                chronology_reason = TEMPORAL_SKIPPED_MIXED_PROVENANCE
+                time_metrics_available = True
+            elif interval_days > float(descriptor.temporal_rules["aligned_interval_max_days"]):
+                chronology_reason = "interval_within_degraded_window"
+                time_metrics_available = True
+            else:
+                chronology_reason = "interval_within_aligned_window"
+                time_metrics_available = True
+
+    geometry_class = TEMPORAL_GEOMETRY_INSUFFICIENT
+    geometry_reason = TEMPORAL_GEOMETRY_REASON_NOT_SUFFICIENT
+    if prior_admissibility_status == TEMPORAL_PRIOR_ADMISSIBLE:
+        if _temporal_exact_geometry_match(analysis, prior_context):
+            geometry_class = TEMPORAL_GEOMETRY_EXACT_MATCH
+            geometry_reason = TEMPORAL_GEOMETRY_REASON_EXACT_MATCH
+        elif _temporal_scalar_basis_trusted(analysis, prior_context):
+            geometry_class = TEMPORAL_GEOMETRY_VOLUME_ONLY
+            geometry_reason = TEMPORAL_GEOMETRY_REASON_NOT_EXACT
+
+    comparison_scope = {
+        TEMPORAL_GEOMETRY_EXACT_MATCH: TEMPORAL_SCOPE_FULL,
+        TEMPORAL_GEOMETRY_VOLUME_ONLY: TEMPORAL_SCOPE_VOLUME_ONLY,
+        TEMPORAL_GEOMETRY_INSUFFICIENT: TEMPORAL_SCOPE_NONE,
+    }[geometry_class]
+    comparison_status = TEMPORAL_STATUS_ALIGNED
+    if prior_admissibility_status == TEMPORAL_PRIOR_INADMISSIBLE:
+        comparison_status = TEMPORAL_STATUS_UNSUITABLE
+        comparison_scope = TEMPORAL_SCOPE_NONE
+    elif chronology_reason in {
+        TEMPORAL_SKIPPED_TIMESTAMP_REVERSED,
+        TEMPORAL_SKIPPED_INTERVAL_EXCEEDS_MAX,
+    }:
+        comparison_status = TEMPORAL_STATUS_UNSUITABLE
+        comparison_scope = TEMPORAL_SCOPE_NONE
+    elif comparison_scope == TEMPORAL_SCOPE_NONE:
+        comparison_status = TEMPORAL_STATUS_UNSUITABLE
+    elif comparison_scope == TEMPORAL_SCOPE_VOLUME_ONLY:
+        comparison_status = TEMPORAL_STATUS_DEGRADED
+    elif pair_provenance in {
+        TEMPORAL_PAIR_PROVENANCE_MISSING,
+        TEMPORAL_PAIR_PROVENANCE_UNTRUSTED,
+        TEMPORAL_PAIR_PROVENANCE_MIXED,
+    } or chronology_reason in {
+        TEMPORAL_SKIPPED_ZERO_INTERVAL,
+        "interval_within_degraded_window",
+    }:
+        comparison_status = TEMPORAL_STATUS_DEGRADED
+
+    current_mask = np.asarray(analysis["verified_mask"], dtype=np.int64)
+    prior_mask = np.asarray(prior_context["verified_mask"], dtype=np.int64)
+    signed_volume_delta_mm3: float | None = None
+    absolute_volume_delta_mm3: float | None = None
+    signed_volume_change_percent: float | None = None
+    signed_normalized_percent_change_per_30d: float | None = None
+    intersection_over_union: float | None = None
+    global_centroid_shift_mm: float | None = None
+    skipped_metrics: list[dict[str, str]] = []
+    flags: list[str] = []
+    if comparison_scope == TEMPORAL_SCOPE_NONE:
+        blocking_reason = prior_admissibility_reason
+        if chronology_reason == TEMPORAL_SKIPPED_TIMESTAMP_REVERSED:
+            blocking_reason = TEMPORAL_SKIPPED_TIMESTAMP_REVERSED
+        elif chronology_reason == TEMPORAL_SKIPPED_INTERVAL_EXCEEDS_MAX:
+            blocking_reason = TEMPORAL_SKIPPED_INTERVAL_EXCEEDS_MAX
+        elif geometry_reason == TEMPORAL_GEOMETRY_REASON_NOT_SUFFICIENT:
+            blocking_reason = TEMPORAL_SKIPPED_GEOMETRY_NOT_SUFFICIENT
+        for metric_name in (
+            "signed_volume_delta_mm3",
+            "absolute_volume_delta_mm3",
+            "signed_volume_change_percent",
+            "signed_normalized_percent_change_per_30d",
+            "intersection_over_union",
+            "global_centroid_shift_mm",
+        ):
+            skipped_metrics.append(_temporal_skipped_metric(metric_name, str(blocking_reason)))
+    else:
+        signed_volume_delta_mm3 = _round_float(
+            float(analysis["computed_tumor_volume_mm3"]) - float(prior_context["verified_volume_mm3"])
+        )
+        absolute_volume_delta_mm3 = _round_float(abs(float(signed_volume_delta_mm3)))
+        if float(prior_context["verified_volume_mm3"]) > 0.0:
+            signed_volume_change_percent = _round_float(
+                (
+                    signed_volume_delta_mm3 / float(prior_context["verified_volume_mm3"])
+                )
+                * 100.0
+            )
+            if time_metrics_available and interval_days is not None and interval_days > 0.0:
+                signed_normalized_percent_change_per_30d = _round_float(
+                    signed_volume_change_percent * 30.0 / float(interval_days)
+                )
+            else:
+                rate_skip_reason = chronology_reason
+                if rate_skip_reason in {
+                    TEMPORAL_SKIPPED_TIMESTAMP_MISSING,
+                    TEMPORAL_SKIPPED_TIMESTAMP_UNTRUSTED,
+                    TEMPORAL_SKIPPED_MIXED_PROVENANCE,
+                    TEMPORAL_SKIPPED_ZERO_INTERVAL,
+                }:
+                    flags.append(TEMPORAL_FLAG_RATE_NOT_EVALUATED)
+                skipped_metrics.append(
+                    _temporal_skipped_metric(
+                        "signed_normalized_percent_change_per_30d",
+                        str(rate_skip_reason),
+                    )
+                )
+        else:
+            skipped_metrics.append(
+                _temporal_skipped_metric(
+                    "signed_volume_change_percent",
+                    TEMPORAL_SKIPPED_ZERO_PRIOR_VOLUME,
+                )
+            )
+            skipped_metrics.append(
+                _temporal_skipped_metric(
+                    "signed_normalized_percent_change_per_30d",
+                    TEMPORAL_SKIPPED_ZERO_PRIOR_VOLUME,
+                )
+            )
+        if comparison_scope == TEMPORAL_SCOPE_FULL:
+            union_voxel_count = int(np.count_nonzero((current_mask == 1) | (prior_mask == 1)))
+            if union_voxel_count == 0:
+                skipped_metrics.append(
+                    _temporal_skipped_metric(
+                        "intersection_over_union",
+                        TEMPORAL_SKIPPED_BOTH_MASKS_EMPTY,
+                    )
+                )
+            else:
+                intersection_over_union = _round_float(
+                    int(np.count_nonzero((current_mask == 1) & (prior_mask == 1)))
+                    / union_voxel_count
+                )
+            current_centroid = None
+            prior_centroid = None
+            if not np.any(prior_mask == 1):
+                skipped_metrics.append(
+                    _temporal_skipped_metric(
+                        "global_centroid_shift_mm",
+                        TEMPORAL_SKIPPED_EMPTY_PRIOR_MASK,
+                    )
+                )
+            elif not np.any(current_mask == 1):
+                skipped_metrics.append(
+                    _temporal_skipped_metric(
+                        "global_centroid_shift_mm",
+                        TEMPORAL_SKIPPED_EMPTY_CURRENT_MASK,
+                    )
+                )
+            else:
+                current_centroid = _mask_centroid_mm(
+                    current_mask,
+                    analysis["spatial_geometry"]["affine_ijk_to_mm"],
+                )
+                prior_centroid = _mask_centroid_mm(
+                    prior_mask,
+                    prior_context["spatial_geometry"]["affine_ijk_to_mm"],
+                )
+                if current_centroid is not None and prior_centroid is not None:
+                    global_centroid_shift_mm = _round_float(
+                        float(np.linalg.norm(current_centroid - prior_centroid))
+                    )
+        else:
+            skipped_metrics.append(
+                _temporal_skipped_metric(
+                    "intersection_over_union",
+                    TEMPORAL_SKIPPED_GEOMETRY_NOT_EXACT,
+                )
+            )
+            skipped_metrics.append(
+                _temporal_skipped_metric(
+                    "global_centroid_shift_mm",
+                    TEMPORAL_SKIPPED_GEOMETRY_NOT_EXACT,
+                )
+            )
+
+    prior_component_count = _count_face_connected_components(prior_mask)
+    current_component_count = int(analysis["verified_mask_component_count"])
+    component_count_delta = abs(current_component_count - prior_component_count)
+    if component_count_delta:
+        flags.append(TEMPORAL_FLAG_COMPONENT_COUNT_CHANGED)
+
+    computed_metrics = {
+        "signed_volume_delta_mm3": signed_volume_delta_mm3,
+        "absolute_volume_delta_mm3": absolute_volume_delta_mm3,
+        "signed_volume_change_percent": signed_volume_change_percent,
+        "signed_normalized_percent_change_per_30d": signed_normalized_percent_change_per_30d,
+        "volume_change_direction": _temporal_metric_direction(signed_volume_delta_mm3),
+        "normalized_rate_direction": _temporal_metric_direction(
+            signed_normalized_percent_change_per_30d
+        ),
+        "intersection_over_union": intersection_over_union,
+        "global_centroid_shift_mm": global_centroid_shift_mm,
+        "prior_component_count": prior_component_count,
+        "current_component_count": current_component_count,
+        "component_count_delta": component_count_delta,
+    }
+
+    temporal_rules = descriptor.temporal_rules["metrics"]
+    heuristics: list[dict[str, Any]] = []
+    if prior_admissibility_status == TEMPORAL_PRIOR_INADMISSIBLE:
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_TEMPORAL_PRIOR_UNSUITABLE,
+                label="Prior admissibility",
+                severity="warning",
+                status="warning",
+                message=(
+                    "The supplied prior context is inadmissible for longitudinal comparison "
+                    f"({prior_admissibility_reason})."
+                ),
+            )
+        )
+    if chronology_reason == TEMPORAL_SKIPPED_TIMESTAMP_REVERSED:
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_TIMESTAMP_REVERSED,
+                label="Chronology ordering",
+                severity="warning",
+                status="warning",
+                message="The supplied prior timestamp is later than the current case timestamp.",
+            )
+        )
+    if comparison_scope == TEMPORAL_SCOPE_VOLUME_ONLY:
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_GEOMETRY_LIMITED,
+                label="Geometry comparability",
+                severity="advisory",
+                status="advisory",
+                message="Geometry is not exactly comparable; only scalar volume comparison ran.",
+            )
+        )
+    if comparison_status == TEMPORAL_STATUS_DEGRADED and chronology_reason in {
+        TEMPORAL_SKIPPED_TIMESTAMP_MISSING,
+        TEMPORAL_SKIPPED_TIMESTAMP_UNTRUSTED,
+        TEMPORAL_SKIPPED_MIXED_PROVENANCE,
+        TEMPORAL_SKIPPED_ZERO_INTERVAL,
+        "interval_within_degraded_window",
+    }:
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_INTERVAL_DEGRADED,
+                label="Chronology quality",
+                severity="advisory",
+                status="advisory",
+                message=(
+                    "Chronology quality is degraded, so time-dependent interpretation is limited."
+                ),
+            )
+        )
+    if (
+        signed_volume_change_percent is not None
+        and abs(float(signed_volume_change_percent))
+        >= float(temporal_rules["signed_volume_change_percent"]["warning_abs_threshold"])
+    ):
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_VOLUME_WARNING,
+                label="Signed volume change percent",
+                severity="warning",
+                status="warning",
+                message=(
+                    "Absolute signed volume change exceeded the configured warning threshold "
+                    f"({signed_volume_change_percent}%)."
+                ),
+                observed=signed_volume_change_percent,
+                threshold=float(
+                    temporal_rules["signed_volume_change_percent"]["warning_abs_threshold"]
+                ),
+            )
+        )
+    elif (
+        signed_volume_change_percent is not None
+        and abs(float(signed_volume_change_percent))
+        >= float(temporal_rules["signed_volume_change_percent"]["advisory_abs_threshold"])
+    ):
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_VOLUME_WARNING,
+                label="Signed volume change percent",
+                severity="advisory",
+                status="advisory",
+                message=(
+                    "Absolute signed volume change exceeded the configured advisory threshold "
+                    f"({signed_volume_change_percent}%)."
+                ),
+                observed=signed_volume_change_percent,
+                threshold=float(
+                    temporal_rules["signed_volume_change_percent"]["advisory_abs_threshold"]
+                ),
+            )
+        )
+    if (
+        signed_normalized_percent_change_per_30d is not None
+        and abs(float(signed_normalized_percent_change_per_30d))
+        >= float(
+            temporal_rules["signed_normalized_percent_change_per_30d"][
+                "warning_abs_threshold"
+            ]
+        )
+    ):
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_RATE_WARNING,
+                label="Signed normalized percent change per 30d",
+                severity="warning",
+                status="warning",
+                message=(
+                    "Absolute signed normalized rate exceeded the configured warning threshold "
+                    f"({signed_normalized_percent_change_per_30d}%)."
+                ),
+                observed=signed_normalized_percent_change_per_30d,
+                threshold=float(
+                    temporal_rules["signed_normalized_percent_change_per_30d"][
+                        "warning_abs_threshold"
+                    ]
+                ),
+            )
+        )
+    elif (
+        signed_normalized_percent_change_per_30d is not None
+        and abs(float(signed_normalized_percent_change_per_30d))
+        >= float(
+            temporal_rules["signed_normalized_percent_change_per_30d"][
+                "advisory_abs_threshold"
+            ]
+        )
+    ):
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_RATE_WARNING,
+                label="Signed normalized percent change per 30d",
+                severity="advisory",
+                status="advisory",
+                message=(
+                    "Absolute signed normalized rate exceeded the configured advisory threshold "
+                    f"({signed_normalized_percent_change_per_30d}%)."
+                ),
+                observed=signed_normalized_percent_change_per_30d,
+                threshold=float(
+                    temporal_rules["signed_normalized_percent_change_per_30d"][
+                        "advisory_abs_threshold"
+                    ]
+                ),
+            )
+        )
+    if (
+        intersection_over_union is not None
+        and float(intersection_over_union)
+        < float(temporal_rules["intersection_over_union"]["warning_floor"])
+    ):
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_IOU_WARNING,
+                label="Intersection over union",
+                severity="warning",
+                status="warning",
+                message=(
+                    "Spatial overlap fell below the configured warning floor "
+                    f"({intersection_over_union})."
+                ),
+                observed=intersection_over_union,
+                threshold=float(temporal_rules["intersection_over_union"]["warning_floor"]),
+            )
+        )
+    elif (
+        intersection_over_union is not None
+        and float(intersection_over_union)
+        < float(temporal_rules["intersection_over_union"]["advisory_floor"])
+    ):
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_IOU_WARNING,
+                label="Intersection over union",
+                severity="advisory",
+                status="advisory",
+                message=(
+                    "Spatial overlap fell below the configured advisory floor "
+                    f"({intersection_over_union})."
+                ),
+                observed=intersection_over_union,
+                threshold=float(temporal_rules["intersection_over_union"]["advisory_floor"]),
+            )
+        )
+    if (
+        global_centroid_shift_mm is not None
+        and float(global_centroid_shift_mm)
+        > float(temporal_rules["global_centroid_shift_mm"]["warning_threshold"])
+    ):
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_CENTROID_WARNING,
+                label="Global centroid shift",
+                severity="warning",
+                status="warning",
+                message=(
+                    "Centroid shift exceeded the configured warning threshold "
+                    f"({global_centroid_shift_mm} mm)."
+                ),
+                observed=global_centroid_shift_mm,
+                threshold=float(
+                    temporal_rules["global_centroid_shift_mm"]["warning_threshold"]
+                ),
+            )
+        )
+    elif (
+        global_centroid_shift_mm is not None
+        and float(global_centroid_shift_mm)
+        > float(temporal_rules["global_centroid_shift_mm"]["advisory_threshold"])
+    ):
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_CENTROID_WARNING,
+                label="Global centroid shift",
+                severity="advisory",
+                status="advisory",
+                message=(
+                    "Centroid shift exceeded the configured advisory threshold "
+                    f"({global_centroid_shift_mm} mm)."
+                ),
+                observed=global_centroid_shift_mm,
+                threshold=float(
+                    temporal_rules["global_centroid_shift_mm"]["advisory_threshold"]
+                ),
+            )
+        )
+
+    trace = build_temporal_consistency_trace(
+        case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        comparison_status=comparison_status,
+        comparison_scope=comparison_scope,
+        prior_admissibility={
+            "status": prior_admissibility_status,
+            "reason_code": prior_admissibility_reason,
+        },
+        chronology_assessment={
+            "pair_provenance": pair_provenance,
+            "current_timestamp_provenance": analysis["study_timestamp_provenance"],
+            "prior_timestamp_provenance": prior_context["timestamp_provenance"],
+            "current_study_acquired_at": current_timestamp,
+            "prior_study_acquired_at": prior_timestamp,
+            "interval_days": interval_days,
+            "ordered": ordered,
+            "time_metrics_available": time_metrics_available,
+            "reason_code": chronology_reason,
+        },
+        geometry_assessment={
+            "comparability_class": geometry_class,
+            "reason_code": geometry_reason,
+        },
+        computed_metrics=computed_metrics,
+        flags=sorted(set(flags)),
+        skipped_metrics=sorted(
+            skipped_metrics,
+            key=lambda item: (str(item["metric"]), str(item["reason_code"])),
+        ),
+    )
+    summary = {
+        TEMPORAL_STATUS_ALIGNED: "Longitudinal comparison ran with full aligned temporal context.",
+        TEMPORAL_STATUS_DEGRADED: "Longitudinal comparison ran with degraded temporal context.",
+        TEMPORAL_STATUS_UNSUITABLE: "Longitudinal comparison was suppressed by v1 temporal policy.",
+    }.get(comparison_status, "Longitudinal comparison was not evaluated.")
+    return {
+        "prior_verified_context": prior_context,
+        "trace": trace,
+        "heuristics": heuristics,
+        "summary": summary,
     }
 
 
@@ -2233,6 +3148,8 @@ def _build_verified_manifest(
     analysis: Mapping[str, Any],
     contracts: Mapping[str, Any],
     descriptor: Any,
+    *,
+    temporal_consistency: Mapping[str, Any],
 ) -> dict[str, Any]:
     claimed_volume = _round_float(float(state["tumor_volume_mm3"]))
     measurement_metrics = {
@@ -2293,7 +3210,11 @@ def _build_verified_manifest(
     ai_match_verified = all(metric["within_tolerance"] for metric in ai_match_metrics.values())
     mask_verified = analysis["mask_voxel_delta"] == 0
     volume_verified = volume_metric["within_tolerance"]
-    clinical_plausibility = _build_clinical_plausibility_manifest(analysis, descriptor)
+    clinical_plausibility = _build_clinical_plausibility_manifest(
+        analysis,
+        descriptor,
+        temporal_consistency=temporal_consistency,
+    )
     heuristic_blocked = bool(clinical_plausibility["blocking_failures"])
     profile_policy_blocked = not descriptor.release_semantics["final_release_allowed"]
     proof_status = (
@@ -2411,6 +3332,8 @@ def _build_verified_manifest(
 def _build_clinical_plausibility_manifest(
     analysis: Mapping[str, Any],
     descriptor: Any,
+    *,
+    temporal_consistency: Mapping[str, Any],
 ) -> dict[str, Any]:
     derived_reconstruction = np.asarray(analysis["derived_reconstruction"], dtype=np.float64)
     verified_mask = np.asarray(analysis["verified_mask"], dtype=np.int64)
@@ -2487,6 +3410,7 @@ def _build_clinical_plausibility_manifest(
             pass_message=f"The verified lesion spans {slice_span} slice(s).",
         )
     )
+    heuristics.extend(list(temporal_consistency["heuristics"]))
 
     warnings = [
         {
@@ -2542,6 +3466,7 @@ def _build_clinical_plausibility_manifest(
         "advisories": advisories,
         "blocking_failures": blocking_failures,
         "heuristics": heuristics,
+        "temporal_consistency": deepcopy(temporal_consistency["trace"]),
     }
 
 
@@ -2628,6 +3553,30 @@ def _build_structural_validity_checks(
             success_message=(
                 "Declared AI stack identity is absent or canonically valid for the active case context."
             ),
+        ),
+        _invariant_check_result(
+            code="study_acquired_at_valid",
+            label="Study acquisition timestamp",
+            failure=_check_study_acquired_at(state),
+            success_message="study_acquired_at is absent or uses the canonical UTC timestamp format.",
+        ),
+        _invariant_check_result(
+            code="study_timestamp_provenance_valid",
+            label="Study timestamp provenance",
+            failure=_check_study_timestamp_provenance(state),
+            success_message="study_timestamp_provenance is absent or uses an approved current-case provenance class.",
+        ),
+        _invariant_check_result(
+            code="spatial_geometry_valid",
+            label="Spatial geometry metadata",
+            failure=_check_spatial_geometry(state),
+            success_message="spatial_geometry is absent or canonically valid for temporal comparison.",
+        ),
+        _invariant_check_result(
+            code="prior_verified_context_valid",
+            label="Prior verified context",
+            failure=_check_prior_verified_context(state),
+            success_message="prior_verified_context is absent or canonically valid for longitudinal comparison.",
         ),
     ]
     checks.extend(_numeric_field_checks(state))
@@ -3841,6 +4790,8 @@ def _build_claim_to_proof_contracts(
     state: Mapping[str, Any],
     analysis: Mapping[str, Any],
     descriptor: Any,
+    *,
+    temporal_consistency: Mapping[str, Any],
 ) -> dict[str, Any]:
     ai_claim_envelope = build_ai_claim_envelope(
         state=dict(state),
@@ -3902,12 +4853,15 @@ def _build_claim_to_proof_contracts(
         relative_ai_l2_error=analysis["relative_ai_l2_error"],
         mask_voxel_delta=analysis["mask_voxel_delta"],
     )
+    prior_verified_context = temporal_consistency["prior_verified_context"]
     return {
         "verification_profile_descriptor": verification_profile_descriptor,
         "ai_claim_envelope": ai_claim_envelope,
         "verified_reconstruction_trace": verified_reconstruction_trace,
         "mask_derivation_policy": mask_derivation_policy,
         "verification_tolerance_policy": verification_tolerance_policy,
+        "prior_verified_context": prior_verified_context,
+        "temporal_consistency_trace": temporal_consistency["trace"],
     }
 
 

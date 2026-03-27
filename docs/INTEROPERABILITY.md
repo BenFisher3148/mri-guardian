@@ -71,6 +71,15 @@ The mocked PACS and trace surfaces mirror the canonical decision object from the
 - `pacs_block_notice.json -> verification_summary.canonical_decision`
 - `integration_trace.json -> pipeline[guardian_layer].canonical_decision`
 
+For single-series cases with longitudinal context, those same mocked surfaces now also mirror:
+
+- `temporal_comparison_status`
+- `temporal_comparison_scope`
+- `temporal_top_flags`
+- `temporal_top_reason_codes`
+
+These temporal fields are interoperability-facing confidence signals only. They do not change released versus blocked disposition in V1, and their interval bands should not be read as clinical expectation statements.
+
 Mocked operational envelopes may also carry optional `ai_runtime_context`:
 
 - `inference_runtime_version`
@@ -84,6 +93,11 @@ directly so audit consumers can inspect canonical declared claim provenance with
 opening the full manifest. That visibility does not change the semantics:
 `ai_claim_envelope.ai_stack_identity` is canonical claim provenance, not runtime
 provenance and not independently verified model validity.
+
+When a prior comparator is supplied, single-series `proof_contracts` also carries
+`prior_verified_context` plus `temporal_consistency_trace` so downstream audit
+systems can consume the exact longitudinal contract without reparsing the full
+verification report.
 
 For deterministic structural rejects, the mocked DICOM ingress and downstream trace artifacts still remain available even if proof-only contract members such as the AI claim envelope could not be derived. Those fields may therefore be absent or `null` on fail-soft structural examples.
 

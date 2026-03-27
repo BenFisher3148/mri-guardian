@@ -23,6 +23,10 @@ The base case state is the canonical input to the verification harness.
 | `tumor_mask` | `list[list[list[int]]]` | AI-proposed binary tumour mask. |
 | `voxel_spacing_mm` | `list[float]` | Physical voxel spacing in millimetres. |
 | `tumor_volume_mm3` | `float` | Claimed tumour volume. |
+| `study_acquired_at` | `str | None` | Optional canonical UTC study timestamp (`YYYY-MM-DDTHH:MM:SSZ`) used for Level 3 temporal comparison. |
+| `study_timestamp_provenance` | `str` | Optional current-case timestamp trust class: `trusted_study_metadata`, `missing`, or `untrusted`. |
+| `spatial_geometry` | `dict | None` | Optional geometry object with `frame_of_reference_uid` plus canonical `affine_ijk_to_mm`. |
+| `prior_verified_context` | `dict | None` | Optional compact prior Guardian-verified comparator used only by single-series Level 3 longitudinal review. |
 | `verification_profile_descriptor` | `dict` | Canonical runtime profile descriptor embedded with the case state and replayed on verification. |
 | `verified_manifest` | `dict | None` | Deterministic proof manifest, populated only on release. |
 | `workstation_payload` | `dict | None` | Verified downstream payload, populated only on release. |
@@ -101,6 +105,8 @@ Defined in [`../mri_guardian/contracts.py`](../mri_guardian/contracts.py).
 | `MaskDerivationPolicy` | Deterministic mapping from raw-derived reconstruction to verified mask | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, proof-significant `algorithm`, and canonical resolved `parameters` |
 | `VerificationTolerancePolicy` | Explicit numeric tolerance contract | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, per-voxel, per-frequency, global-norm, imaginary leakage, and volume tolerances |
 | `VerifiedReconstructionTrace` | Proof trace from raw k-space to verified reconstruction, mask, and volume | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, raw hash, derived hash, verified mask hash, measurement metrics, claim comparison metrics |
+| `PriorVerifiedContext` | Compact canonical summary of one admissible prior Guardian-verified comparator | prior bundle/report hashes, prior profile identity, prior release class, prior verified mask, verified volume, timestamp provenance, and geometry |
+| `TemporalConsistencyTrace` | Deterministic single-series Level 3 temporal trace | `comparison_status`, `comparison_scope`, `prior_admissibility`, `chronology_assessment`, `geometry_assessment`, `computed_metrics`, `flags`, `skipped_metrics` |
 | `CrossSeriesVerificationPolicy` | Study-level multi-series gate contract | `primary_series_id`, canonicalized `supporting_series_ids`, canonicalized `required_series_ids`, geometry rule, corroboration rule |
 | `CrossSeriesVerificationTrace` | Study-level trace for geometry, corroboration, and merged release evaluation | `geometry_verification`, `lesion_corroboration`, `merged_release_evaluation` |
 | `MultiSeriesVerificationProfileDescriptorSet` | Ordered wrapper around per-series runtime profile descriptors | proof-significant ordered `series_descriptors` list |
@@ -151,6 +157,32 @@ Released manifests expose `mask_verification` in two logical sections:
 - `comparison`: exact-match outcome over AI vs verified mask, including voxel counts and deltas
 
 Flat compatibility aliases may still appear during the transition, but future non-threshold families should rely on canonical `mask_rules` and `policy`/`comparison` structure rather than `mask_threshold`.
+
+### Longitudinal Verification Shape
+
+- `PriorVerifiedContext` is admissible only when:
+  - `prior_release.release_status = released_to_radiologist`
+  - `prior_release.final_disposition = released`
+  - `prior_release.decision_class` is one of `verified_clean`, `verified_boundary_hugging`, or `verified_with_advisory`
+  - prior and current `sequence_family` match
+- Pair timestamp provenance is derived deterministically:
+  - any `untrusted` side dominates to `timestamp_untrusted`
+  - otherwise any `missing` side dominates to `timestamp_missing`
+  - both trusted-structured sides collapse to `verified_bundle_pair` or `trusted_metadata_pair`
+- `comparison_status` is one of `not_evaluated`, `aligned`, `degraded`, or `unsuitable`.
+- `comparison_scope` is one of `not_evaluated`, `full`, `volume_only`, or `none`.
+- Interval bands are policy comparability bands, not clinical expectation bands:
+  - `<= 730` days may be `aligned`
+  - `731-3650` days is `degraded`
+  - `> 3650` days is `unsuitable` and suppresses temporal comparison
+- Geometry comparability classes are:
+  - `exact_match`
+  - `volume_basis_only`
+  - `insufficient_geometry_trust`
+- Spatial metrics use fixed definitions:
+  - overlap is `intersection_over_union`
+  - centroid shift is the mm distance between global positive-voxel centroids after applying `affine_ijk_to_mm`
+- `skipped_metrics` is a closed `{metric, reason_code}` list and should be consumed as machine-readable data rather than free text.
 
 ### Multi-Series Gating Shape
 
@@ -223,6 +255,13 @@ Mirrored integration surfaces now carry the canonical decision alongside the leg
 - `pacs_block_notice.json -> verification_summary.canonical_decision`
 - `integration_trace.json -> pipeline[guardian_layer].canonical_decision`
 
+When temporal context is present on single-series cases, the mocked PACS and integration summaries also mirror:
+
+- `temporal_comparison_status`
+- `temporal_comparison_scope`
+- `temporal_top_flags`
+- `temporal_top_reason_codes`
+
 On fail-soft structural rejects, `dicom_input.json` may legitimately carry `ai_claim_envelope = null` because the mocked ingress artifact is preserved even when proof-only contract members could not be derived from the malformed input.
 
 ## Bundle Members
@@ -236,11 +275,15 @@ The portable bundle written by [`../mri_guardian/bundle.py`](../mri_guardian/bun
 - `released_state.json`
 - `workstation_payload.json`
 - `verification_report.json`
-- `verification_profile.json`
 - `verification_profile_descriptor.json`
 - `transcript.json`
 - `replay.json`
 - `transparency-log.jsonl`
+
+When a single-series case carries prior longitudinal context, the bundle also contains:
+
+- `prior_verified_context.json`
+- `temporal_consistency_trace.json`
 
 ## Notes on Determinism
 

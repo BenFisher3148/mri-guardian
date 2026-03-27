@@ -7,7 +7,10 @@ import re
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
+
+import numpy as np
 
 from icsd.core.serialise import hash_canonical_json
 
@@ -31,6 +34,11 @@ _AI_STACK_IDENTITY_FIELDS = (
 )
 _INPUT_NORMALIZATION_FIELDS = ("scheme", "parameters")
 _SEQUENCE_MODEL_COMPATIBILITY_FIELDS = ("compatibility_type", "declared_value")
+_TIMESTAMP_REPO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_CURRENT_TIMESTAMP_PROVENANCE = frozenset({"trusted_study_metadata", "missing", "untrusted"})
+_PRIOR_TIMESTAMP_PROVENANCE = frozenset(
+    {"verified_bundle", "trusted_study_metadata", "missing", "untrusted"}
+)
 
 
 def _require_object_shape(
@@ -107,6 +115,85 @@ def _canonicalise_json_like(value: Any, *, path: str) -> Any:
     raise ValueError(
         f"{path} contains unsupported value type {type(value).__name__!r}."
     )
+
+
+def _round_guardian_float(value: float) -> float:
+    if abs(value) < 1e-12:
+        return 0.0
+    return round(float(value), 9)
+
+
+def _canonicalise_repo_timestamp(value: Any, *, path: str) -> str:
+    text = _require_trimmed_non_empty_string(value, path=path)
+    try:
+        parsed = datetime.strptime(text, _TIMESTAMP_REPO_FORMAT)
+    except ValueError as exc:
+        raise ValueError(
+            f"{path} must use canonical UTC format YYYY-MM-DDTHH:MM:SSZ."
+        ) from exc
+    return parsed.strftime(_TIMESTAMP_REPO_FORMAT)
+
+
+def canonicalise_timestamp_provenance(
+    value: Any,
+    *,
+    path: str,
+    allow_verified_bundle: bool,
+) -> str:
+    provenance = _require_trimmed_non_empty_string(value, path=path)
+    allowed = _PRIOR_TIMESTAMP_PROVENANCE if allow_verified_bundle else _CURRENT_TIMESTAMP_PROVENANCE
+    if provenance not in allowed:
+        allowed_list = ", ".join(sorted(allowed))
+        raise ValueError(f"{path} must be one of: {allowed_list}.")
+    return provenance
+
+
+def canonicalise_study_acquired_at(
+    value: Any,
+    *,
+    path: str,
+) -> str | None:
+    if value is None:
+        return None
+    return _canonicalise_repo_timestamp(value, path=path)
+
+
+def canonicalise_spatial_geometry(
+    value: Any,
+    *,
+    path: str,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    payload = _require_object_shape(
+        value,
+        path=path,
+        required_fields=("frame_of_reference_uid", "affine_ijk_to_mm"),
+    )
+    frame_uid = _require_trimmed_non_empty_string(
+        payload["frame_of_reference_uid"],
+        path=f"{path}.frame_of_reference_uid",
+    )
+    affine = payload["affine_ijk_to_mm"]
+    if not isinstance(affine, list) or len(affine) != 4:
+        raise ValueError(f"{path}.affine_ijk_to_mm must be a 4x4 numeric matrix.")
+    canonical_affine: list[list[float]] = []
+    for row_index, row in enumerate(affine):
+        if not isinstance(row, list) or len(row) != 4:
+            raise ValueError(f"{path}.affine_ijk_to_mm must be a 4x4 numeric matrix.")
+        canonical_row: list[float] = []
+        for column_index, item in enumerate(row):
+            if type(item) not in {int, float} or not math.isfinite(float(item)):
+                raise ValueError(
+                    f"{path}.affine_ijk_to_mm[{row_index}][{column_index}] "
+                    "must be a finite number."
+                )
+            canonical_row.append(_round_guardian_float(float(item)))
+        canonical_affine.append(canonical_row)
+    return {
+        "frame_of_reference_uid": frame_uid,
+        "affine_ijk_to_mm": canonical_affine,
+    }
 
 
 def _sequence_family_vocabulary() -> tuple[str, ...]:
@@ -513,6 +600,254 @@ class MultiSeriesVerificationProfileDescriptorSet:
         }
 
 
+@dataclass(frozen=True)
+class PriorVerifiedContext:
+    """Compact canonical prior-summary contract for temporal comparison."""
+
+    prior_bundle_sha256: str
+    prior_case_id: str
+    prior_study_uid: str
+    prior_series_uid: str
+    prior_released_state_hash: str
+    prior_verification_report_hash: str
+    prior_profile: dict[str, Any]
+    prior_release: dict[str, Any]
+    study_acquired_at: str | None
+    timestamp_provenance: str
+    verified_mask: list[list[list[int]]]
+    verified_mask_hash: str
+    verified_volume_mm3: float
+    verified_mask_voxel_count: int
+    voxel_spacing_mm: list[float]
+    spatial_geometry: dict[str, Any] | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "PriorVerifiedContext",
+            "interface_version": "2026.03",
+            "prior_bundle_sha256": self.prior_bundle_sha256,
+            "prior_case_id": self.prior_case_id,
+            "prior_study_uid": self.prior_study_uid,
+            "prior_series_uid": self.prior_series_uid,
+            "prior_released_state_hash": self.prior_released_state_hash,
+            "prior_verification_report_hash": self.prior_verification_report_hash,
+            "prior_profile": deepcopy(self.prior_profile),
+            "prior_release": deepcopy(self.prior_release),
+            "study_acquired_at": self.study_acquired_at,
+            "timestamp_provenance": self.timestamp_provenance,
+            "verified_mask": deepcopy(self.verified_mask),
+            "verified_mask_hash": self.verified_mask_hash,
+            "verified_volume_mm3": self.verified_volume_mm3,
+            "verified_mask_voxel_count": self.verified_mask_voxel_count,
+            "voxel_spacing_mm": list(self.voxel_spacing_mm),
+            "spatial_geometry": deepcopy(self.spatial_geometry),
+        }
+
+
+@dataclass(frozen=True)
+class TemporalConsistencyTrace:
+    """Deterministic temporal comparison trace for Level 3 longitudinal review."""
+
+    case_id: str
+    profile_name: str
+    profile_revision: str
+    profile_digest: str
+    comparison_status: str
+    comparison_scope: str
+    prior_admissibility: dict[str, Any]
+    chronology_assessment: dict[str, Any]
+    geometry_assessment: dict[str, Any]
+    computed_metrics: dict[str, Any]
+    flags: tuple[str, ...]
+    skipped_metrics: tuple[dict[str, Any], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "TemporalConsistencyTrace",
+            "interface_version": "2026.03",
+            "case_id": self.case_id,
+            "profile_name": self.profile_name,
+            "profile_revision": self.profile_revision,
+            "profile_digest": self.profile_digest,
+            "comparison_status": self.comparison_status,
+            "comparison_scope": self.comparison_scope,
+            "prior_admissibility": deepcopy(self.prior_admissibility),
+            "chronology_assessment": deepcopy(self.chronology_assessment),
+            "geometry_assessment": deepcopy(self.geometry_assessment),
+            "computed_metrics": deepcopy(self.computed_metrics),
+            "flags": list(self.flags),
+            "skipped_metrics": [deepcopy(item) for item in self.skipped_metrics],
+        }
+
+
+def canonicalise_prior_verified_context(
+    payload: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    prior = _require_object_shape(
+        payload,
+        path="prior_verified_context",
+        required_fields=(
+            "prior_bundle_sha256",
+            "prior_case_id",
+            "prior_study_uid",
+            "prior_series_uid",
+            "prior_released_state_hash",
+            "prior_verification_report_hash",
+            "prior_profile",
+            "prior_release",
+            "study_acquired_at",
+            "timestamp_provenance",
+            "verified_mask",
+            "verified_mask_hash",
+            "verified_volume_mm3",
+            "verified_mask_voxel_count",
+            "voxel_spacing_mm",
+            "spatial_geometry",
+        ),
+    )
+    prior_profile = _require_object_shape(
+        prior["prior_profile"],
+        path="prior_verified_context.prior_profile",
+        required_fields=(
+            "profile_name",
+            "profile_revision",
+            "profile_digest",
+            "sequence_family",
+        ),
+    )
+    prior_release = _require_object_shape(
+        prior["prior_release"],
+        path="prior_verified_context.prior_release",
+        required_fields=(
+            "release_status",
+            "final_disposition",
+            "decision_class",
+        ),
+    )
+    verified_mask_array = np.asarray(prior["verified_mask"], dtype=np.int64)
+    if verified_mask_array.ndim != 3 or verified_mask_array.size == 0:
+        raise ValueError(
+            "prior_verified_context.verified_mask must be a non-empty 3D binary tensor."
+        )
+    if not np.isin(verified_mask_array, (0, 1)).all():
+        raise ValueError(
+            "prior_verified_context.verified_mask must contain only 0/1 values."
+        )
+    verified_mask = verified_mask_array.astype(np.int64).tolist()
+    verified_mask_hash = hash_canonical_json(verified_mask)
+    observed_mask_hash = _require_trimmed_non_empty_string(
+        prior["verified_mask_hash"],
+        path="prior_verified_context.verified_mask_hash",
+    )
+    if observed_mask_hash != verified_mask_hash:
+        raise ValueError(
+            "prior_verified_context.verified_mask_hash must match verified_mask."
+        )
+    voxel_spacing_raw = prior["voxel_spacing_mm"]
+    if not isinstance(voxel_spacing_raw, list) or len(voxel_spacing_raw) != 3:
+        raise ValueError(
+            "prior_verified_context.voxel_spacing_mm must be a three-item numeric list."
+        )
+    voxel_spacing_mm: list[float] = []
+    for index, item in enumerate(voxel_spacing_raw):
+        if type(item) not in {int, float} or not math.isfinite(float(item)) or float(item) <= 0:
+            raise ValueError(
+                f"prior_verified_context.voxel_spacing_mm[{index}] must be a positive finite number."
+            )
+        voxel_spacing_mm.append(_round_guardian_float(float(item)))
+    verified_mask_voxel_count = int(prior["verified_mask_voxel_count"])
+    if verified_mask_voxel_count != int(np.count_nonzero(verified_mask_array)):
+        raise ValueError(
+            "prior_verified_context.verified_mask_voxel_count must match verified_mask."
+        )
+    verified_volume_mm3 = _round_guardian_float(float(prior["verified_volume_mm3"]))
+    expected_volume = _round_guardian_float(
+        verified_mask_voxel_count * float(np.prod(np.asarray(voxel_spacing_mm, dtype=np.float64)))
+    )
+    if verified_volume_mm3 != expected_volume:
+        raise ValueError(
+            "prior_verified_context.verified_volume_mm3 must match voxel count and spacing."
+        )
+    return PriorVerifiedContext(
+        prior_bundle_sha256=_require_sha256_hex(
+            prior["prior_bundle_sha256"],
+            path="prior_verified_context.prior_bundle_sha256",
+        ),
+        prior_case_id=_require_trimmed_non_empty_string(
+            prior["prior_case_id"],
+            path="prior_verified_context.prior_case_id",
+        ),
+        prior_study_uid=_require_trimmed_non_empty_string(
+            prior["prior_study_uid"],
+            path="prior_verified_context.prior_study_uid",
+        ),
+        prior_series_uid=_require_trimmed_non_empty_string(
+            prior["prior_series_uid"],
+            path="prior_verified_context.prior_series_uid",
+        ),
+        prior_released_state_hash=_require_sha256_hex(
+            prior["prior_released_state_hash"],
+            path="prior_verified_context.prior_released_state_hash",
+        ),
+        prior_verification_report_hash=_require_sha256_hex(
+            prior["prior_verification_report_hash"],
+            path="prior_verified_context.prior_verification_report_hash",
+        ),
+        prior_profile={
+            "profile_name": _require_trimmed_non_empty_string(
+                prior_profile["profile_name"],
+                path="prior_verified_context.prior_profile.profile_name",
+            ),
+            "profile_revision": _require_trimmed_non_empty_string(
+                prior_profile["profile_revision"],
+                path="prior_verified_context.prior_profile.profile_revision",
+            ),
+            "profile_digest": _require_trimmed_non_empty_string(
+                prior_profile["profile_digest"],
+                path="prior_verified_context.prior_profile.profile_digest",
+            ),
+            "sequence_family": _require_trimmed_non_empty_string(
+                prior_profile["sequence_family"],
+                path="prior_verified_context.prior_profile.sequence_family",
+            ),
+        },
+        prior_release={
+            "release_status": _require_trimmed_non_empty_string(
+                prior_release["release_status"],
+                path="prior_verified_context.prior_release.release_status",
+            ),
+            "final_disposition": _require_trimmed_non_empty_string(
+                prior_release["final_disposition"],
+                path="prior_verified_context.prior_release.final_disposition",
+            ),
+            "decision_class": _require_trimmed_non_empty_string(
+                prior_release["decision_class"],
+                path="prior_verified_context.prior_release.decision_class",
+            ),
+        },
+        study_acquired_at=canonicalise_study_acquired_at(
+            prior["study_acquired_at"],
+            path="prior_verified_context.study_acquired_at",
+        ),
+        timestamp_provenance=canonicalise_timestamp_provenance(
+            prior["timestamp_provenance"],
+            path="prior_verified_context.timestamp_provenance",
+            allow_verified_bundle=True,
+        ),
+        verified_mask=verified_mask,
+        verified_mask_hash=verified_mask_hash,
+        verified_volume_mm3=verified_volume_mm3,
+        verified_mask_voxel_count=verified_mask_voxel_count,
+        voxel_spacing_mm=voxel_spacing_mm,
+        spatial_geometry=canonicalise_spatial_geometry(
+            prior["spatial_geometry"],
+            path="prior_verified_context.spatial_geometry",
+        ),
+    ).to_dict()
+
+
 def build_ai_claim_envelope(
     *,
     state: dict[str, Any],
@@ -705,4 +1040,44 @@ def build_multi_series_verification_profile_descriptor_set(
     return MultiSeriesVerificationProfileDescriptorSet(
         case_id=str(case_id),
         series_descriptors=tuple(dict(item) for item in series_descriptors),
+    ).to_dict()
+
+
+def build_prior_verified_context(
+    prior_context: Mapping[str, Any],
+) -> dict[str, Any]:
+    canonical = canonicalise_prior_verified_context(prior_context)
+    if canonical is None:
+        raise ValueError("prior_context must not be null.")
+    return canonical
+
+
+def build_temporal_consistency_trace(
+    *,
+    case_id: str,
+    profile_name: str,
+    profile_revision: str,
+    profile_digest: str,
+    comparison_status: str,
+    comparison_scope: str,
+    prior_admissibility: Mapping[str, Any],
+    chronology_assessment: Mapping[str, Any],
+    geometry_assessment: Mapping[str, Any],
+    computed_metrics: Mapping[str, Any],
+    flags: list[str] | tuple[str, ...],
+    skipped_metrics: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    return TemporalConsistencyTrace(
+        case_id=str(case_id),
+        profile_name=str(profile_name),
+        profile_revision=str(profile_revision),
+        profile_digest=str(profile_digest),
+        comparison_status=str(comparison_status),
+        comparison_scope=str(comparison_scope),
+        prior_admissibility=dict(prior_admissibility),
+        chronology_assessment=dict(chronology_assessment),
+        geometry_assessment=dict(geometry_assessment),
+        computed_metrics=dict(computed_metrics),
+        flags=tuple(str(item) for item in flags),
+        skipped_metrics=tuple(dict(item) for item in skipped_metrics),
     ).to_dict()

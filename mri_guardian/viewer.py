@@ -40,10 +40,17 @@ def build_side_by_side_view_model(
     reasons = report["failure_reasons"]
     tiers = report["verification_tiers"]
     decision_summary = report["decision_summary"]
+    longitudinal = _build_longitudinal_summary(report)
     ai_reconstruction = np.asarray(arrays["ai_reconstruction"], dtype=np.float64)
     ai_mask = np.asarray(analysis["ai_mask"], dtype=np.int64)
     verified_reconstruction = np.asarray(analysis["derived_reconstruction"], dtype=np.float64)
     verified_mask = np.asarray(analysis["verified_mask"], dtype=np.int64)
+    prior_verified_mask = None
+    if longitudinal["overlay_enabled"]:
+        prior_verified_mask = np.asarray(
+            report["contracts"]["prior_verified_context"]["verified_mask"],
+            dtype=np.int64,
+        )
     intensity_mismatch_mask = (
         np.abs(ai_reconstruction - verified_reconstruction)
         > float(manifest["ai_reconstruction_match"]["max_abs_tolerance"])
@@ -72,6 +79,11 @@ def build_side_by_side_view_model(
                 ),
                 "ai_mask": ai_mask[slice_index].astype(np.int64).tolist(),
                 "verified_mask": verified_mask[slice_index].astype(np.int64).tolist(),
+                "prior_verified_mask": (
+                    prior_verified_mask[slice_index].astype(np.int64).tolist()
+                    if prior_verified_mask is not None
+                    else None
+                ),
                 "intensity_mismatch_mask": slice_mismatch_mask.astype(np.int64).tolist(),
                 "rejected_mask": slice_rejected_mask.astype(np.int64).tolist(),
                 "missing_mask": slice_missing_mask.astype(np.int64).tolist(),
@@ -140,6 +152,7 @@ def build_side_by_side_view_model(
         "findings": findings,
         "clinical_summary": clinical_summary,
         "integration": integration,
+        "longitudinal": longitudinal,
         "summary": {
             "mask_voxel_delta": mask_delta,
             "rejected_region_count": rejected_count,
@@ -261,6 +274,7 @@ def _build_minimal_single_series_view_model(
         if isinstance(claimed_volume, (int, float))
         else "Unavailable"
     )
+    longitudinal = _build_longitudinal_summary(report)
     return {
         "title": "MRI Guardian Layer",
         "subtitle": "Verification proxy between the reconstruction AI and the PACS/workstation boundary.",
@@ -308,6 +322,7 @@ def _build_minimal_single_series_view_model(
             report=report,
             primary_reason=verification["primary_reason_summary"],
         ),
+        "longitudinal": longitudinal,
         "summary": {
             "mask_voxel_delta": 0,
             "rejected_region_count": 0,
@@ -491,6 +506,15 @@ def render_side_by_side_report_html(
         f"<li>{escape(finding)}</li>" for finding in view_model["findings"]
     )
     differences_markup = _difference_table_markup(view_model["differences"])
+    longitudinal = view_model["longitudinal"]
+    prior_legend_markup = (
+        "<span class=\"legend-item\"><span class=\"swatch swatch-prior\"></span> Prior verified overlay</span>"
+        if longitudinal["overlay_enabled"]
+        else ""
+    )
+    longitudinal_flags = ", ".join(longitudinal["top_flags"]) or "none"
+    longitudinal_reasons = ", ".join(longitudinal["top_reason_codes"]) or "none"
+    longitudinal_skips = ", ".join(longitudinal["skipped_reason_codes"]) or "none"
     reason_markup = "\n".join(
         (
             "<li>"
@@ -1030,6 +1054,10 @@ def render_side_by_side_report_html(
       background: rgba(255, 194, 75, 0.45);
     }}
 
+    .swatch-prior {{
+      background: rgba(255, 194, 75, 0.2);
+    }}
+
     .swatch-rejected {{
       background:
         repeating-linear-gradient(
@@ -1344,6 +1372,46 @@ def render_side_by_side_report_html(
           <div class="metric-note">Claimed volume: {summary["claimed_tumor_volume_mm3"]} mm3.</div>
         </article>
       </div>
+      <div class="performance-card">
+        <h2>Longitudinal Summary</h2>
+        <p class="performance-copy">
+          Status: {escape(longitudinal["status_label"])}. Scope: {escape(longitudinal["scope_label"])}.
+          {escape(longitudinal["status_note"])}
+        </p>
+        <div class="metric-grid">
+          <article class="metric-card">
+            <span class="metric-label">Prior Verified Volume</span>
+            <div class="metric-value">{escape(longitudinal["prior_volume_mm3_display"])}</div>
+            <div class="metric-note">Current verified volume: {escape(longitudinal["current_volume_mm3_display"])}.</div>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Signed Volume Change</span>
+            <div class="metric-value">{escape(longitudinal["signed_volume_change_percent_display"])}</div>
+            <div class="metric-note">Interval: {escape(longitudinal["interval_days_display"])}.</div>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Signed Rate / 30d</span>
+            <div class="metric-value">{escape(longitudinal["signed_normalized_percent_change_per_30d_display"])}</div>
+            <div class="metric-note">Chronology provenance: {escape(longitudinal["pair_provenance"])}.</div>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Intersection Over Union</span>
+            <div class="metric-value">{escape(longitudinal["intersection_over_union_display"])}</div>
+            <div class="metric-note">Geometry: {escape(longitudinal["geometry_reason_code"])}.</div>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Centroid Shift</span>
+            <div class="metric-value">{escape(longitudinal["global_centroid_shift_mm_display"])}</div>
+            <div class="metric-note">Chronology reason: {escape(longitudinal["chronology_reason_code"])}.</div>
+          </article>
+        </div>
+        <p class="performance-note">
+          Temporal flags: {escape(longitudinal_flags)}. Temporal reason codes: {escape(longitudinal_reasons)}.
+        </p>
+        <p class="performance-note">
+          Skipped metric reasons: {escape(longitudinal_skips)}.
+        </p>
+      </div>
       <ul class="findings">
         {findings_markup}
       </ul>
@@ -1354,6 +1422,7 @@ def render_side_by_side_report_html(
       <div class="legend-items">
         <span class="legend-item"><span class="swatch swatch-ai"></span> AI tumour overlay</span>
         <span class="legend-item"><span class="swatch swatch-verified"></span> Verified tumour overlay</span>
+        {prior_legend_markup}
         <span class="legend-item"><span class="swatch swatch-mismatch"></span> Intensity mismatch</span>
         <span class="legend-item"><span class="swatch swatch-rejected"></span> Rejected AI region</span>
       </div>
@@ -1395,7 +1464,9 @@ def render_side_by_side_report_html(
           </section>
           <section class="panel">
             <h3>${{comparisonData.verified_label}}</h3>
-            <p>Guardian-layer reconstruction from raw k-space with the profile-verified tumour mask.</p>
+            <p>${{comparisonData.longitudinal.overlay_enabled
+              ? "Guardian-layer reconstruction from raw k-space with the profile-verified tumour mask and a faded prior verified overlay."
+              : "Guardian-layer reconstruction from raw k-space with the profile-verified tumour mask."}}</p>
             <canvas data-side="verified"></canvas>
           </section>
         </div>
@@ -1430,6 +1501,7 @@ def render_side_by_side_report_html(
       const ctx = canvas.getContext("2d");
       const image = side === "ai" ? slice.ai_reconstruction : slice.verified_reconstruction;
       const mask = side === "ai" ? slice.ai_mask : slice.verified_mask;
+      const priorMask = side === "verified" ? slice.prior_verified_mask : null;
       const intensityMismatch = slice.intensity_mismatch_mask;
       const rejected = slice.rejected_mask;
 
@@ -1444,6 +1516,16 @@ def render_side_by_side_report_html(
           const shade = Math.round(intensity * 255);
           ctx.fillStyle = `rgb(${{shade}}, ${{shade}}, ${{shade}})`;
           ctx.fillRect(x, y, cell, cell);
+
+          if (
+            side === "verified"
+            && comparisonData.longitudinal.overlay_enabled
+            && priorMask
+            && priorMask[row][col]
+          ) {{
+            ctx.fillStyle = "rgba(255, 194, 75, 0.18)";
+            ctx.fillRect(x, y, cell, cell);
+          }}
 
           if (mask[row][col]) {{
             ctx.fillStyle = side === "ai" ? "rgba(0, 214, 255, 0.30)" : "rgba(54, 226, 143, 0.32)";
@@ -1742,7 +1824,138 @@ def _build_findings(
         findings.append(
             "Clinical plausibility heuristics also raised advisory review flags on the verified anatomy."
         )
+    temporal_codes = [
+        str(item.get("code"))
+        for item in report["manifest"]["clinical_plausibility"]["heuristics"]
+        if str(item.get("code", "")).startswith("temporal_")
+    ]
+    temporal_trace = report["contracts"].get("temporal_consistency_trace")
+    if temporal_trace is not None and temporal_trace["comparison_status"] == "aligned":
+        findings.append(
+            "Longitudinal comparison aligned with the supplied prior verified trajectory."
+        )
+    elif temporal_trace is not None and temporal_trace["comparison_status"] == "degraded":
+        findings.append(
+            "Longitudinal comparison ran in degraded mode; chronology quality or geometry comparability limited interpretation."
+        )
+    elif temporal_trace is not None and temporal_trace["comparison_status"] == "unsuitable":
+        findings.append(
+            "Longitudinal comparison was suppressed by v1 temporal policy for the supplied prior context."
+        )
+    if temporal_codes:
+        findings.append(
+            "Temporal review raised: " + ", ".join(sorted(dict.fromkeys(temporal_codes))) + "."
+        )
     return findings
+
+
+def _build_longitudinal_summary(report: dict[str, Any]) -> dict[str, Any]:
+    temporal_trace = report["contracts"].get("temporal_consistency_trace")
+    if not isinstance(temporal_trace, dict):
+        return {
+            "comparison_status": "not_evaluated",
+            "comparison_scope": "not_evaluated",
+            "status_label": "Not Evaluated",
+            "scope_label": "No prior context",
+            "status_note": "No temporal trace is available for this report.",
+            "prior_volume_mm3_display": "Unavailable",
+            "current_volume_mm3_display": "Unavailable",
+            "signed_volume_change_percent_display": "Unavailable",
+            "signed_normalized_percent_change_per_30d_display": "Unavailable",
+            "intersection_over_union_display": "Unavailable",
+            "global_centroid_shift_mm_display": "Unavailable",
+            "interval_days_display": "Unavailable",
+            "pair_provenance": "timestamp_missing",
+            "geometry_reason_code": "geometry_not_sufficient_for_volume_only",
+            "chronology_reason_code": "no_prior_context",
+            "top_flags": [],
+            "top_reason_codes": [],
+            "skipped_reason_codes": [],
+            "overlay_enabled": False,
+        }
+    computed_metrics = temporal_trace["computed_metrics"]
+    chronology = temporal_trace["chronology_assessment"]
+    geometry = temporal_trace["geometry_assessment"]
+    comparison_scope = temporal_trace["comparison_scope"]
+    comparison_status = temporal_trace["comparison_status"]
+    prior_context = report["contracts"].get("prior_verified_context") or {}
+    top_reason_codes = sorted(
+        {
+            str(item.get("code"))
+            for item in report["manifest"]["clinical_plausibility"]["heuristics"]
+            if isinstance(item, dict) and str(item.get("code", "")).startswith("temporal_")
+        }
+    )
+    skipped_reason_codes = sorted(
+        {
+            str(item["reason_code"])
+            for item in temporal_trace["skipped_metrics"]
+        }
+    )
+    if comparison_status == "not_evaluated":
+        status_note = "No prior verified context was supplied."
+    elif comparison_status == "aligned":
+        status_note = "Full longitudinal comparison ran inside the preferred v1 policy interval."
+    elif comparison_status == "degraded":
+        status_note = (
+            "Longitudinal comparison ran with degraded confidence because chronology quality, interval band, or geometry comparability was limited."
+        )
+    else:
+        status_note = (
+            "Longitudinal comparison was suppressed by v1 policy even though the present-case release path remained unchanged."
+        )
+    scope_label_map = {
+        "not_evaluated": "No prior context",
+        "full": "Full comparison",
+        "volume_only": "Volume-only comparison",
+        "none": "No comparison metrics",
+    }
+    return {
+        "comparison_status": comparison_status,
+        "comparison_scope": comparison_scope,
+        "status_label": comparison_status.replace("_", " ").title(),
+        "scope_label": scope_label_map.get(comparison_scope, comparison_scope.replace("_", " ").title()),
+        "status_note": status_note,
+        "prior_volume_mm3_display": _display_optional_metric(
+            prior_context.get("verified_volume_mm3"),
+            suffix=" mm3",
+        ),
+        "current_volume_mm3_display": _display_optional_metric(
+            report["analysis"]["computed_tumor_volume_mm3"],
+            suffix=" mm3",
+        ),
+        "signed_volume_change_percent_display": _display_optional_metric(
+            computed_metrics["signed_volume_change_percent"],
+            suffix=" %",
+            signed=True,
+        ),
+        "signed_normalized_percent_change_per_30d_display": _display_optional_metric(
+            computed_metrics["signed_normalized_percent_change_per_30d"],
+            suffix=" % / 30d",
+            signed=True,
+        ),
+        "intersection_over_union_display": _display_optional_metric(
+            computed_metrics["intersection_over_union"]
+        ),
+        "global_centroid_shift_mm_display": _display_optional_metric(
+            computed_metrics["global_centroid_shift_mm"],
+            suffix=" mm",
+        ),
+        "interval_days_display": _display_optional_metric(
+            chronology["interval_days"],
+            suffix=" days",
+        ),
+        "pair_provenance": chronology["pair_provenance"],
+        "geometry_reason_code": geometry["reason_code"],
+        "chronology_reason_code": chronology["reason_code"],
+        "top_flags": list(temporal_trace["flags"]),
+        "top_reason_codes": top_reason_codes,
+        "skipped_reason_codes": skipped_reason_codes,
+        "overlay_enabled": bool(
+            comparison_scope == "full"
+            and report["contracts"].get("prior_verified_context") is not None
+        ),
+    }
 
 
 def _build_clinical_summary(
@@ -2055,6 +2268,20 @@ def _display_ms(value: float) -> str:
 def _display_percent(value: float) -> str:
     rounded = int(round(float(value)))
     return f"{rounded}%"
+
+
+def _display_optional_metric(
+    value: Any,
+    *,
+    suffix: str = "",
+    signed: bool = False,
+) -> str:
+    if value is None:
+        return "Unavailable"
+    number = _round_float(float(value))
+    if signed and number > 0.0:
+        return f"+{number}{suffix}"
+    return f"{number}{suffix}"
 
 
 def _display_probe_shape(shape: list[int]) -> str:

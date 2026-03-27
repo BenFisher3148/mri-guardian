@@ -35,6 +35,8 @@ The Guardian Layer is intentionally non-invasive. It does not replace the MRI sc
 - The replay path must bind to the embedded runtime profile descriptor by `profile_name`, `profile_revision`, and `profile_digest`, not the process default.
 - Canonical `ai_stack_identity` is claim-bound declared provenance when present. It affects claim identity hashes, but it is not an independently verified physical invariant of the proof process.
 - New monitoring logic must treat the additive `decision` object as canonical; `decision_summary` remains compatibility-only.
+- Single-series longitudinal verification is optional, non-blocking in V1, and must not change the Level 2 release gate.
+- Longitudinal interval bands are comparability-confidence policy bands, not clinical expectation bands.
 - In `multi_series_v2`, all payload series are individually verified and reported, but only `required_series_ids` participate in merged release gating.
 - In `multi_series_v2`, study order is proof-significant for canonical serialization, stable diffs, and deterministic replay.
 
@@ -75,7 +77,7 @@ The verified-mask layer uses a fixed approved algorithm catalogue and canonical 
 | [`mri_guardian/harness.py`](../mri_guardian/harness.py) | Core verification transition, deterministic reconstruction, release gate, and manifest generation. |
 | [`mri_guardian/mask_engine.py`](../mri_guardian/mask_engine.py) | Fixed approved mask-algorithm catalogue, canonical parameter normalization, and deterministic dispatcher. |
 | [`mri_guardian/profiles.py`](../mri_guardian/profiles.py) | Runtime profile registry, canonical descriptor hashing, and mapping to ICSD invariant policy identities. |
-| [`mri_guardian/contracts.py`](../mri_guardian/contracts.py) | Explicit claim-to-proof interfaces: `AIClaimEnvelope`, `MaskDerivationPolicy`, `VerificationTolerancePolicy`, and `VerifiedReconstructionTrace`. |
+| [`mri_guardian/contracts.py`](../mri_guardian/contracts.py) | Explicit claim-to-proof interfaces: `AIClaimEnvelope`, `MaskDerivationPolicy`, `VerificationTolerancePolicy`, `VerifiedReconstructionTrace`, `PriorVerifiedContext`, and `TemporalConsistencyTrace`. |
 | [`mri_guardian/integration.py`](../mri_guardian/integration.py) | Mocked DICOM ingress, PACS egress, and hospital integration narrative. |
 | [`mri_guardian/bundle.py`](../mri_guardian/bundle.py) | Portable `.mri-guard-bundle` writer and deterministic replay verifier. |
 | [`mri_guardian/timing.py`](../mri_guardian/timing.py) | Benchmark ladder, worst-case bound derivation, and streaming-validation strategy. |
@@ -92,13 +94,19 @@ The verified-mask layer uses a fixed approved algorithm catalogue and canonical 
 5. Compare the AI reconstruction with the raw-derived reconstruction using explicit per-voxel and global-norm tolerances.
 6. Resolve the runtime profile's mask policy canonically, derive the verified mask with the approved dispatcher, and compare it with the AI mask.
 7. Recompute tumour volume from verified voxels and voxel spacing.
-8. If deterministic proof passes and the selected profile permits final release, emit:
+8. Optionally evaluate one admissible prior Guardian-verified comparator for Level 3 temporal consistency:
+   - current-case timestamps accept `trusted_study_metadata`, `missing`, or `untrusted`
+   - prior timestamps accept `verified_bundle`, `trusted_study_metadata`, `missing`, or `untrusted`
+   - exact geometry requires matching shape, voxel spacing, frame of reference, and canonicalized affine
+   - geometry-limited cases may fall back to scalar `volume_only` comparison
+   - interval `> 3650` days suppresses all temporal comparison by policy
+9. If deterministic proof passes and the selected profile permits final release, emit:
    - `verified_manifest`
    - `workstation_payload`
    - ICSD evidence
    - transparency receipt
    - portable bundle
-9. If proof fails, a blocking heuristic fails, or the profile is non-final, block the Guardian handoff and emit explicit failure reasons with separate `proof_failure`, `heuristic_block`, or `profile_policy_block` categories.
+10. If proof fails, a blocking heuristic fails, or the profile is non-final, block the Guardian handoff and emit explicit failure reasons with separate `proof_failure`, `heuristic_block`, or `profile_policy_block` categories.
 
 ## Decision Contract
 
@@ -150,6 +158,8 @@ Deterministic reason ordering:
 | Level 2 | Physical consistency from raw k-space to reconstruction, mask, and volume | Yes |
 | Level 3 | Profile-scoped clinical plausibility heuristics | Profile-dependent |
 
+Within Level 3, longitudinal verification is now a first-class single-series sub-path. It consumes one `PriorVerifiedContext`, produces one `TemporalConsistencyTrace`, and surfaces `comparison_status` plus `comparison_scope` explicitly so viewer, integration, and replay code do not infer temporal meaning from prose.
+
 ## State Model
 
 The project operates on a simple two-state release model:
@@ -167,7 +177,7 @@ The Guardian Layer emits several artifact classes:
 
 - state artifacts: `released_state.json`, `workstation_payload.json`
 - proof artifacts: `evidence.json`, `bundle_verification.json`, `.mri-guard-bundle`
-- contract artifacts: `verification_profile.json`, `verification_profile_descriptor.json`, `ai_claim_envelope.json`, `verified_reconstruction_trace.json`, `mask_derivation_policy.json`, `verification_tolerance_policy.json`
+- contract artifacts: `verification_profile.json`, `verification_profile_descriptor.json`, `ai_claim_envelope.json`, `verified_reconstruction_trace.json`, `mask_derivation_policy.json`, `verification_tolerance_policy.json`, plus `prior_verified_context.json` and `temporal_consistency_trace.json` when a prior comparator is supplied
 - integration artifacts: `dicom_input.json`, `integration_narrative.json`, `pacs_submission.json`, `integration_trace.json`
 - performance artifacts: `performance_profile.json`
 
