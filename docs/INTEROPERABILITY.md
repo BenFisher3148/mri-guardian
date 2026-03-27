@@ -65,6 +65,14 @@ Generated demo artifacts:
 
 These are narrative and schema examples, not a formal DICOM conformance package.
 
+The mocked PACS and trace surfaces mirror the canonical decision object from the verification report:
+
+- `pacs_submission.json -> verification_summary.canonical_decision`
+- `pacs_block_notice.json -> verification_summary.canonical_decision`
+- `integration_trace.json -> pipeline[guardian_layer].canonical_decision`
+
+For deterministic structural rejects, the mocked DICOM ingress and downstream trace artifacts still remain available even if proof-only contract members such as the AI claim envelope could not be derived. Those fields may therefore be absent or `null` on fail-soft structural examples.
+
 ## Fail-Open vs Fail-Closed
 
 The Guardian Layer is fail-closed for the verified handoff.

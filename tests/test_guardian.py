@@ -759,7 +759,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(view_model["decision"]["decision_class"], "verified_with_advisory")
         self.assertEqual(
             view_model["verification"]["primary_reason_summary"],
-            "all_blocking_checks_passed; clinical_plausibility_review_recommended",
+            "clinical_plausibility_non_blocking_finding",
         )
         self.assertEqual(view_model["integration"]["egress_label"], "Mock PACS Output")
 
@@ -773,7 +773,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(report["decision"]["decision_class"], "verified_with_advisory")
         self.assertEqual(report["verification_tiers"]["level_3"]["status"], "warning")
         self.assertEqual(report["manifest"]["clinical_plausibility"]["warning_count"], 1)
-        self.assertEqual(view_model["verification"]["headline"], "Verification PASSED")
+        self.assertEqual(view_model["verification"]["headline"], "Verification PASSED WITH ADVISORY")
         self.assertEqual(view_model["verification"]["tiers"][2]["status_label"], "ADVISORY WARN")
 
     def test_strict_research_mode_blocks_on_heuristic_failure(self) -> None:
@@ -945,6 +945,25 @@ class MriGuardianHarnessTests(unittest.TestCase):
             "blocked_structural",
         )
 
+    def test_structural_block_dicom_input_and_trace_remain_available(self) -> None:
+        state = build_demo_case()
+        state["verification_profile_descriptor"] = {"profile_name": "does_not_exist"}
+
+        dicom_input = build_mock_dicom_input(state)
+        pacs_block = build_mock_pacs_block_notice(state)
+        integration_trace = build_mock_integration_trace(
+            dicom_input=dicom_input,
+            pacs_output=pacs_block,
+        )
+
+        self.assertEqual(dicom_input["kind"], "mock_dicom_input")
+        self.assertEqual(dicom_input["study"]["case_id"], state["case_id"])
+        self.assertIsNone(dicom_input["ai_claim_envelope"])
+        self.assertEqual(
+            integration_trace["pipeline"][1]["canonical_decision"]["decision_class"],
+            "blocked_structural",
+        )
+
     def test_structural_validity_failure_uses_minimal_report_floor(self) -> None:
         state = build_demo_case()
         state["case_id"] = ""
@@ -959,6 +978,27 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(pacs_block["study"]["case_id"], "unknown-case")
         self.assertEqual(
             pacs_block["verification_summary"]["canonical_decision"]["decision_class"],
+            "blocked_structural",
+        )
+
+    def test_structural_block_dicom_input_accepts_partial_case_state(self) -> None:
+        state = build_demo_case()
+        state.pop("series_uid")
+
+        dicom_input = build_mock_dicom_input(state)
+        pacs_block = build_mock_pacs_block_notice(state)
+        integration_trace = build_mock_integration_trace(
+            dicom_input=dicom_input,
+            pacs_output=pacs_block,
+        )
+
+        self.assertEqual(dicom_input["study"]["series_uid"], "unknown-series")
+        self.assertEqual(
+            integration_trace["pipeline"][0]["series_uid"],
+            "unknown-series",
+        )
+        self.assertEqual(
+            integration_trace["pipeline"][1]["canonical_decision"]["decision_class"],
             "blocked_structural",
         )
 
@@ -1429,6 +1469,50 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(integration_trace["pipeline"][0]["label"], "DICOM Input")
         self.assertEqual(integration_trace["pipeline"][1]["decision_class"], "final_release_candidate")
         self.assertEqual(integration_trace["pipeline"][2]["label"], "PACS Output")
+
+    def test_boundary_release_surfaces_canonical_reason_in_viewer_and_pacs(self) -> None:
+        state = build_demo_case()
+        state["tumor_volume_mm3"] = round(float(state["tumor_volume_mm3"]) + 8.5e-10, 9)
+
+        view_model = build_side_by_side_view_model(state)
+        result = self._build_harness().release_case(
+            state=state,
+            actor="guardian:test",
+            authority_sources=build_demo_authority_sources(case_id=state["case_id"]),
+            timestamp="2026-03-26T00:00:00Z",
+        )
+        pacs_submission = build_mock_pacs_submission(result)
+
+        self.assertEqual(view_model["decision"]["decision_class"], "verified_boundary_hugging")
+        self.assertEqual(view_model["verification"]["headline"], "Verification PASSED NEAR BOUNDARY")
+        self.assertEqual(view_model["verification"]["primary_reason_summary"], "proof_metric_near_boundary")
+        self.assertEqual(
+            pacs_submission["verification_summary"]["primary_reason"],
+            "proof_metric_near_boundary",
+        )
+
+    def test_advisory_release_surfaces_canonical_reason_in_viewer_and_pacs(self) -> None:
+        state = self._build_warning_stack_case()
+
+        view_model = build_side_by_side_view_model(state)
+        result = self._build_harness().release_case(
+            state=state,
+            actor="guardian:test",
+            authority_sources=build_demo_authority_sources(case_id=state["case_id"]),
+            timestamp="2026-03-26T00:00:00Z",
+        )
+        pacs_submission = build_mock_pacs_submission(result)
+
+        self.assertEqual(view_model["decision"]["decision_class"], "verified_with_advisory")
+        self.assertEqual(view_model["verification"]["headline"], "Verification PASSED WITH ADVISORY")
+        self.assertEqual(
+            view_model["verification"]["primary_reason_summary"],
+            "clinical_plausibility_non_blocking_finding",
+        )
+        self.assertEqual(
+            pacs_submission["verification_summary"]["primary_reason"],
+            "clinical_plausibility_non_blocking_finding",
+        )
 
     def test_mock_pacs_block_notice_withholds_tampered_case(self) -> None:
         state = build_tamper_scenarios()[0]["state"]

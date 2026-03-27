@@ -192,6 +192,14 @@ They do not guarantee full proof artifacts such as reconstruction traces or veri
 | [`../demo_artifacts/integration_trace.json`](../demo_artifacts/integration_trace.json) | Boundary trace from DICOM ingress through Guardian decision to PACS egress |
 | [`../demo_artifacts/integration_narrative.json`](../demo_artifacts/integration_narrative.json) | Standalone DICOM, placement, and fail-closed narrative |
 
+Mirrored integration surfaces now carry the canonical decision alongside the legacy compatibility fields:
+
+- `pacs_submission.json -> verification_summary.canonical_decision`
+- `pacs_block_notice.json -> verification_summary.canonical_decision`
+- `integration_trace.json -> pipeline[guardian_layer].canonical_decision`
+
+On fail-soft structural rejects, `dicom_input.json` may legitimately carry `ai_claim_envelope = null` because the mocked ingress artifact is preserved even when proof-only contract members could not be derived from the malformed input.
+
 ## Bundle Members
 
 The portable bundle written by [`../mri_guardian/bundle.py`](../mri_guardian/bundle.py) contains:

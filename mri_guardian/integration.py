@@ -32,6 +32,130 @@ _STATE_FIELDS = (
 )
 
 
+def _input_field_hash(state: dict[str, Any], field: str) -> str | None:
+    value = state.get(field)
+    if value is None:
+        return None
+    return hash_canonical_json(value)
+
+
+def _raw_kspace_hash_from_state(state: dict[str, Any]) -> str | None:
+    if "raw_real" not in state or "raw_imag" not in state:
+        return None
+    return hash_canonical_json(
+        {
+            "raw_real": state["raw_real"],
+            "raw_imag": state["raw_imag"],
+        }
+    )
+
+
+def _fallback_claim_outputs_hash(
+    state: dict[str, Any],
+    *,
+    raw_hash: str | None,
+    ai_reconstruction_hash: str | None,
+    ai_mask_hash: str | None,
+) -> str | None:
+    payload: dict[str, Any] = {}
+    if raw_hash is not None:
+        payload["raw_kspace_hash"] = raw_hash
+    if ai_reconstruction_hash is not None:
+        payload["ai_reconstruction_hash"] = ai_reconstruction_hash
+    if ai_mask_hash is not None:
+        payload["ai_mask_hash"] = ai_mask_hash
+    claimed_volume = state.get("tumor_volume_mm3")
+    if isinstance(claimed_volume, (int, float)):
+        payload["claimed_tumor_volume_mm3"] = float(claimed_volume)
+    if not payload:
+        return None
+    return hash_canonical_json(payload)
+
+
+def _single_series_input_objects(
+    state: dict[str, Any],
+    report: dict[str, Any],
+) -> list[dict[str, Any]]:
+    analysis = report["analysis"]
+    contracts = report["contracts"]
+    claim_envelope = contracts.get("ai_claim_envelope")
+    raw_hash = analysis.get("raw_hash") or _raw_kspace_hash_from_state(state)
+    ai_reconstruction_hash = (
+        claim_envelope["claimed_outputs"]["ai_reconstruction_hash"]
+        if claim_envelope is not None
+        else _input_field_hash(state, "ai_reconstruction")
+    )
+    ai_mask_hash = (
+        claim_envelope["claimed_outputs"]["ai_mask_hash"]
+        if claim_envelope is not None
+        else _input_field_hash(state, "tumor_mask")
+    )
+    claim_outputs_hash = (
+        hash_canonical_json(claim_envelope["claimed_outputs"])
+        if claim_envelope is not None
+        else _fallback_claim_outputs_hash(
+            state,
+            raw_hash=raw_hash,
+            ai_reconstruction_hash=ai_reconstruction_hash,
+            ai_mask_hash=ai_mask_hash,
+        )
+    )
+    objects: list[dict[str, Any]] = []
+    if raw_hash is not None:
+        objects.append(
+            {
+                "role": "raw_kspace",
+                "sop_class": "MR Raw Data Storage (mock)",
+                "hash": raw_hash,
+                "members": ["raw_real", "raw_imag"],
+            }
+        )
+    if ai_reconstruction_hash is not None:
+        objects.append(
+            {
+                "role": "ai_reconstruction",
+                "sop_class": "MR Image Storage (mock)",
+                "hash": ai_reconstruction_hash,
+            }
+        )
+    if ai_mask_hash is not None:
+        objects.append(
+            {
+                "role": "ai_segmentation",
+                "sop_class": "Segmentation Storage (mock)",
+                "hash": ai_mask_hash,
+            }
+        )
+    if claim_outputs_hash is not None:
+        objects.append(
+            {
+                "role": "ai_volume_claim",
+                "sop_class": "Comprehensive SR Storage (mock)",
+                "hash": claim_outputs_hash,
+            }
+        )
+    return objects
+
+
+def _multi_series_input_objects(series_report: dict[str, Any]) -> list[dict[str, Any]]:
+    objects: list[dict[str, Any]] = []
+    for item in _single_series_input_objects(
+        series_report["series_state"],
+        series_report,
+    ):
+        objects.append(
+            {
+                "series_id": series_report["series_id"],
+                "series_uid": _string_or_fallback(
+                    series_report.get("series_uid"),
+                    "unknown-series",
+                ),
+                **item,
+            }
+        )
+    return objects
+
+
 def build_mock_dicom_input(
     state: dict[str, Any],
     *,
@@ -46,40 +170,7 @@ def build_mock_dicom_input(
     if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
         objects: list[dict[str, Any]] = []
         for series_report in report["series_reports"]:
-            claim_envelope = series_report["contracts"]["ai_claim_envelope"]
-            objects.extend(
-                [
-                    {
-                        "series_id": series_report["series_id"],
-                        "series_uid": series_report["series_uid"],
-                        "role": "raw_kspace",
-                        "sop_class": "MR Raw Data Storage (mock)",
-                        "hash": series_report["analysis"]["raw_hash"],
-                        "members": ["raw_real", "raw_imag"],
-                    },
-                    {
-                        "series_id": series_report["series_id"],
-                        "series_uid": series_report["series_uid"],
-                        "role": "ai_reconstruction",
-                        "sop_class": "MR Image Storage (mock)",
-                        "hash": claim_envelope["claimed_outputs"]["ai_reconstruction_hash"],
-                    },
-                    {
-                        "series_id": series_report["series_id"],
-                        "series_uid": series_report["series_uid"],
-                        "role": "ai_segmentation",
-                        "sop_class": "Segmentation Storage (mock)",
-                        "hash": claim_envelope["claimed_outputs"]["ai_mask_hash"],
-                    },
-                    {
-                        "series_id": series_report["series_id"],
-                        "series_uid": series_report["series_uid"],
-                        "role": "ai_volume_claim",
-                        "sop_class": "Comprehensive SR Storage (mock)",
-                        "hash": hash_canonical_json(claim_envelope["claimed_outputs"]),
-                    },
-                ]
-            )
+            objects.extend(_multi_series_input_objects(series_report))
         return {
             "schema_version": _INTEGRATION_SCHEMA_VERSION,
             "kind": "mock_dicom_input",
@@ -90,17 +181,20 @@ def build_mock_dicom_input(
             },
             "study": {
                 "case_kind": MULTI_SERIES_CASE_KIND,
-                "case_id": state["case_id"],
-                "study_uid": state["study_uid"],
-                "patient_pseudonym": state["patient_pseudonym"],
-                "series_count": len(state["series"]),
+                "case_id": _string_or_fallback(state.get("case_id"), "unknown-case"),
+                "study_uid": _string_or_fallback(state.get("study_uid"), "unknown-study"),
+                "patient_pseudonym": _string_or_fallback(
+                    state.get("patient_pseudonym"),
+                    "unknown-patient",
+                ),
+                "series_count": len(state.get("series", [])),
             },
             "dicom_tags": {
                 "Modality": "MR",
-                "PatientID": state["patient_pseudonym"],
-                "StudyInstanceUID": state["study_uid"],
-                "ManufacturerModelName": state["scanner_id"],
-                "NumberOfStudyRelatedSeries": len(state["series"]),
+                "PatientID": _string_or_fallback(state.get("patient_pseudonym"), "unknown-patient"),
+                "StudyInstanceUID": _string_or_fallback(state.get("study_uid"), "unknown-study"),
+                "ManufacturerModelName": _string_or_fallback(state.get("scanner_id"), "unknown-scanner"),
+                "NumberOfStudyRelatedSeries": len(state.get("series", [])),
             },
             "objects": objects,
             "cross_series_policy": report["contracts"]["cross_series_verification_policy"],
@@ -108,9 +202,6 @@ def build_mock_dicom_input(
             "integration_narrative": integration_narrative,
             "guardian_case": deepcopy(state),
         }
-    analysis = report["analysis"]
-    contracts = report["contracts"]
-    claim_envelope = contracts["ai_claim_envelope"]
     return {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_dicom_input",
@@ -120,47 +211,27 @@ def build_mock_dicom_input(
             "destination_ae_title": destination_ae_title,
         },
         "study": {
-            "case_id": state["case_id"],
-            "study_uid": state["study_uid"],
-            "series_uid": state["series_uid"],
-            "patient_pseudonym": state["patient_pseudonym"],
+            "case_id": _string_or_fallback(state.get("case_id"), "unknown-case"),
+            "study_uid": _string_or_fallback(state.get("study_uid"), "unknown-study"),
+            "series_uid": _string_or_fallback(state.get("series_uid"), "unknown-series"),
+            "patient_pseudonym": _string_or_fallback(state.get("patient_pseudonym"), "unknown-patient"),
         },
         "dicom_tags": {
             "Modality": "MR",
-            "PatientID": state["patient_pseudonym"],
-            "StudyInstanceUID": state["study_uid"],
-            "SeriesInstanceUID": state["series_uid"],
+            "PatientID": _string_or_fallback(state.get("patient_pseudonym"), "unknown-patient"),
+            "StudyInstanceUID": _string_or_fallback(state.get("study_uid"), "unknown-study"),
+            "SeriesInstanceUID": _string_or_fallback(state.get("series_uid"), "unknown-series"),
             "SeriesDescription": "AI reconstruction candidate for Guardian Layer verification",
-            "ProtocolName": state["sequence_id"],
-            "ManufacturerModelName": state["scanner_id"],
+            "ProtocolName": _string_or_fallback(state.get("sequence_id"), "unknown-sequence"),
+            "ManufacturerModelName": _string_or_fallback(state.get("scanner_id"), "unknown-scanner"),
         },
-        "objects": [
-            {
-                "role": "raw_kspace",
-                "sop_class": "MR Raw Data Storage (mock)",
-                "hash": analysis["raw_hash"],
-                "members": ["raw_real", "raw_imag"],
-            },
-            {
-                "role": "ai_reconstruction",
-                "sop_class": "MR Image Storage (mock)",
-                "hash": claim_envelope["claimed_outputs"]["ai_reconstruction_hash"],
-            },
-            {
-                "role": "ai_segmentation",
-                "sop_class": "Segmentation Storage (mock)",
-                "hash": claim_envelope["claimed_outputs"]["ai_mask_hash"],
-            },
-            {
-                "role": "ai_volume_claim",
-                "sop_class": "Comprehensive SR Storage (mock)",
-                "hash": hash_canonical_json(claim_envelope["claimed_outputs"]),
-            },
-        ],
-        "ai_claim_envelope": claim_envelope,
+        "objects": _single_series_input_objects(state, report),
+        "ai_claim_envelope": deepcopy(report["contracts"]["ai_claim_envelope"])
+        if "ai_claim_envelope" in report["contracts"]
+        else None,
         "verification_profile_descriptor": report["profile"],
         "integration_narrative": integration_narrative,
-        "guardian_case": {field: deepcopy(state[field]) for field in _STATE_FIELDS},
+        "guardian_case": deepcopy(dict(state)),
     }
 
 
@@ -175,10 +246,7 @@ def restore_case_state_from_dicom_input(dicom_input: dict[str, Any]) -> dict[str
         return deepcopy(case_state)
     missing_fields = [field for field in _STATE_FIELDS if field not in case_state]
     if missing_fields:
-        raise ValueError(
-            "Mocked DICOM input is missing required Guardian Layer fields: "
-            + ", ".join(missing_fields)
-        )
+        return deepcopy(case_state)
     return {field: deepcopy(case_state[field]) for field in _STATE_FIELDS}
 
 
@@ -479,7 +547,7 @@ def build_mock_integration_trace(
         return {
             "schema_version": _INTEGRATION_SCHEMA_VERSION,
             "kind": "mock_integration_trace",
-            "case_id": state["case_id"],
+            "case_id": _string_or_fallback(state.get("case_id"), "unknown-case"),
             "integration_narrative": integration_narrative,
             "pipeline": [
                 {
@@ -488,8 +556,8 @@ def build_mock_integration_trace(
                     "transport": dicom_input["transport"],
                     "ae_title": dicom_input["endpoint"]["source_ae_title"],
                     "object_count": len(dicom_input["objects"]),
-                    "study_uid": state["study_uid"],
-                    "series_count": len(state["series"]),
+                    "study_uid": _string_or_fallback(state.get("study_uid"), "unknown-study"),
+                    "series_count": len(state.get("series", [])),
                 },
                 {
                     "stage": "guardian_layer",
@@ -523,7 +591,7 @@ def build_mock_integration_trace(
     return {
         "schema_version": _INTEGRATION_SCHEMA_VERSION,
         "kind": "mock_integration_trace",
-        "case_id": state["case_id"],
+        "case_id": _string_or_fallback(state.get("case_id"), "unknown-case"),
         "integration_narrative": integration_narrative,
         "pipeline": [
             {
@@ -532,8 +600,8 @@ def build_mock_integration_trace(
                 "transport": dicom_input["transport"],
                 "ae_title": dicom_input["endpoint"]["source_ae_title"],
                 "object_count": len(dicom_input["objects"]),
-                "study_uid": state["study_uid"],
-                "series_uid": state["series_uid"],
+                "study_uid": _string_or_fallback(state.get("study_uid"), "unknown-study"),
+                "series_uid": _string_or_fallback(state.get("series_uid"), "unknown-series"),
             },
             {
                 "stage": "guardian_layer",
@@ -639,11 +707,10 @@ def _primary_reason_summary(report: dict[str, Any]) -> str:
     reasons = report["failure_reasons"]
     if reasons:
         return reasons[0]["summary"]
-    if report["decision_summary"]["decision_class"] == "triage_only":
-        return "proof_passed_but_profile_is_triage_only"
-    if report["decision_summary"]["operator_review_required"]:
-        return "all_blocking_checks_passed; clinical_plausibility_review_recommended"
-    return "all_blocking_checks_passed"
+    decision = report["decision"]
+    if decision["reason_codes"]:
+        return str(decision["reason_codes"][0])
+    return "final_release_authorized" if report["release_eligible"] else "decision_blocked"
 
 
 def _string_or_fallback(value: Any, fallback: str) -> str:

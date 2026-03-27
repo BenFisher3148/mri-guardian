@@ -100,7 +100,7 @@ def build_side_by_side_view_model(
     )
     timing = build_timing_overlay_snapshot(manifest["profile_name"])
     findings = _build_findings(
-        decision_summary=decision_summary,
+        report=report,
         reasons=reasons,
         tiers=tiers,
         mask_delta=mask_delta,
@@ -112,7 +112,7 @@ def build_side_by_side_view_model(
     )
     integration = _build_integration_summary(
         release_eligible=bool(report["release_eligible"]),
-        decision_class=decision_summary["decision_class"],
+        report=report,
         primary_reason=verification["primary_reason_summary"],
     )
     clinical_summary = _build_clinical_summary(
@@ -120,9 +120,7 @@ def build_side_by_side_view_model(
         analysis=analysis,
         verification=verification,
         release_eligible=bool(report["release_eligible"]),
-        decision_class=decision_summary["decision_class"],
-        operator_review_required=decision_summary["operator_review_required"],
-        clinical_status=tiers["level_3"]["status"],
+        report=report,
     )
     return {
         "title": "MRI Guardian Layer",
@@ -167,11 +165,6 @@ def build_side_by_side_view_model(
 
 def _build_multi_series_view_model(state: dict[str, Any]) -> dict[str, Any]:
     report = build_case_verification_report(state)
-    primary_reason = (
-        report["failure_reasons"][0]["summary"]
-        if report["failure_reasons"]
-        else "all_blocking_checks_passed"
-    )
     primary_series = next(
         item for item in report["series_reports"] if item["resolved_role"] == "primary"
     )
@@ -191,11 +184,13 @@ def _build_multi_series_view_model(state: dict[str, Any]) -> dict[str, Any]:
         "decision": report["decision"],
         "decision_summary": report["decision_summary"],
         "verification": {
-            "headline": (
-                "Verification PASSED" if report["release_eligible"] else "Verification FAILED"
+            "headline": _verification_headline(report),
+            "primary_reason_summary": _viewer_primary_reason_summary(report),
+            "reasons": (
+                report["failure_reasons"]
+                if report["failure_reasons"]
+                else _decision_reason_items(report["decision"])
             ),
-            "primary_reason_summary": primary_reason,
-            "reasons": report["failure_reasons"],
             "tiers": [
                 {
                     "code": key,
@@ -310,7 +305,7 @@ def _build_minimal_single_series_view_model(
         },
         "integration": _build_integration_summary(
             release_eligible=False,
-            decision_class=report["decision_summary"]["decision_class"],
+            report=report,
             primary_reason=verification["primary_reason_summary"],
         ),
         "summary": {
@@ -1605,39 +1600,40 @@ def _build_verification_summary(
     ordered_tiers = _ordered_tiers(tiers)
     tier_view_models = [_tier_view_model(tier) for tier in ordered_tiers]
     decision = report["decision"]
-    decision_summary = report["decision_summary"]
+    headline = _verification_headline(report)
+    primary_reason = _viewer_primary_reason_summary(report)
     if decision["decision_class"] == "blocked_structural":
-        primary_reason = reasons[0] if reasons else {
+        primary_reason_entry = reasons[0] if reasons else {
             "summary": "structural_intake_block",
             "message": "Guardian structural intake blocked proof construction.",
         }
         return {
-            "headline": "Structural BLOCKED",
-            "primary_reason_summary": primary_reason["summary"],
+            "headline": headline,
+            "primary_reason_summary": primary_reason_entry["summary"],
             "reasons": [
                 {"code": reason["code"], "message": reason["message"]}
                 for reason in reasons
             ],
             "tiers": tier_view_models,
         }
-    if decision_summary["proof_status"] == "failed":
-        primary_reason = reasons[0] if reasons else {
+    if decision["decision_class"] == "blocked_physical":
+        primary_reason_entry = reasons[0] if reasons else {
             "summary": "verification_blocked_by_structural_or_physical_gate",
             "message": "Blocking proof verification failed.",
         }
         return {
-            "headline": "Verification FAILED",
-            "primary_reason_summary": primary_reason["summary"],
+            "headline": headline,
+            "primary_reason_summary": primary_reason_entry["summary"],
             "reasons": [
                 {"code": reason["code"], "message": reason["message"]}
                 for reason in reasons
             ],
             "tiers": tier_view_models,
         }
-    if decision_summary["decision_class"] == "triage_only":
+    if _report_is_triage_only(report):
         return {
-            "headline": "TRIAGE ONLY",
-            "primary_reason_summary": "proof_passed_but_profile_is_triage_only",
+            "headline": headline,
+            "primary_reason_summary": primary_reason,
             "reasons": [
                 {
                     "code": "proof_passed",
@@ -1655,47 +1651,16 @@ def _build_verification_summary(
             "tiers": tier_view_models,
         }
     if release_eligible:
-        level_3 = tiers["level_3"]
-        if decision_summary["operator_review_required"]:
-            return {
-                "headline": "Verification PASSED",
-                "primary_reason_summary": (
-                    "all_blocking_checks_passed; clinical_plausibility_review_recommended"
-                ),
-                "reasons": [
-                    {
-                        "code": "all_blocking_checks_passed",
-                        "message": (
-                            "Level 1 structural validity and Level 2 physical consistency "
-                            "both passed."
-                        ),
-                    },
-                    {
-                        "code": "clinical_plausibility_review_recommended",
-                        "message": level_3["summary"],
-                    },
-                ],
-                "tiers": tier_view_models,
-            }
         return {
-            "headline": "Verification PASSED",
-            "primary_reason_summary": "all_verification_checks_passed",
-            "reasons": [
-                {
-                    "code": "all_verification_checks_passed",
-                    "message": (
-                        "The AI reconstruction, mask, and tumour volume all match the "
-                        "deterministic runtime-profile verification path."
-                    ),
-                }
-            ],
+            "headline": headline,
+            "primary_reason_summary": primary_reason,
+            "reasons": _decision_reason_items(decision),
             "tiers": tier_view_models,
         }
     if reasons:
-        primary_reason = reasons[0]
         return {
-            "headline": "Profile Policy BLOCKED",
-            "primary_reason_summary": primary_reason["summary"],
+            "headline": headline,
+            "primary_reason_summary": primary_reason,
             "reasons": [
                 {"code": reason["code"], "message": reason["message"]}
                 for reason in reasons
@@ -1703,21 +1668,16 @@ def _build_verification_summary(
             "tiers": tier_view_models,
         }
     return {
-        "headline": "Profile Policy BLOCKED",
-        "primary_reason_summary": "profile_policy_blocked",
-        "reasons": [
-            {
-                "code": "profile_policy_blocked",
-                "message": "The selected runtime profile blocked downstream release.",
-            }
-        ],
+        "headline": headline,
+        "primary_reason_summary": primary_reason,
+        "reasons": _decision_reason_items(decision),
         "tiers": tier_view_models,
     }
 
 
 def _build_findings(
     *,
-    decision_summary: dict[str, Any],
+    report: dict[str, Any],
     reasons: list[dict[str, Any]],
     tiers: dict[str, Any],
     mask_delta: int,
@@ -1728,7 +1688,8 @@ def _build_findings(
     volume_verified: bool,
 ) -> list[str]:
     clinical_tier = tiers["level_3"]
-    if decision_summary["decision_class"] == "triage_only":
+    decision = report["decision"]
+    if _report_is_triage_only(report):
         return [
             "Deterministic proof passed, but the selected runtime profile is explicitly triage-only.",
             "No final PACS/workstation release is allowed under this profile.",
@@ -1743,6 +1704,18 @@ def _build_findings(
             findings.append(
                 "Clinical plausibility raised advisory review flags even though the blocking verification gate passed."
             )
+        if decision["decision_class"] == "verified_boundary_hugging":
+            findings.append(
+                "At least one eligible proof metric remained within tolerance but inside the configured guard band of a failure threshold."
+            )
+        if decision["decision_class"] == "verified_with_advisory":
+            findings.append(
+                "The released case carries non-blocking advisory findings recorded in the canonical decision layer."
+            )
+            if decision["success_modifiers"]["near_proof_threshold"]:
+                findings.append(
+                    "One or more eligible proof metrics also remained within tolerance but inside the configured guard band."
+                )
         return findings
     findings: list[str] = []
     if mask_delta:
@@ -1778,12 +1751,11 @@ def _build_clinical_summary(
     analysis: dict[str, Any],
     verification: dict[str, Any],
     release_eligible: bool,
-    decision_class: str,
-    operator_review_required: bool,
-    clinical_status: str,
+    report: dict[str, Any],
 ) -> dict[str, str]:
     verified_volume_mm3 = analysis["computed_tumor_volume_mm3"]
-    if decision_class == "triage_only":
+    decision_class = report["decision"]["decision_class"]
+    if _report_is_triage_only(report):
         status_label = "TRIAGE ONLY"
         status_note = "Proof passed, but this runtime profile is non-final and cannot release downstream."
     else:
@@ -1793,13 +1765,18 @@ def _build_clinical_summary(
             if release_eligible
             else f"Blocked before downstream handoff. Reason: {verification['primary_reason_summary']}."
         )
-    if decision_class == "triage_only":
+    if _report_is_triage_only(report):
         confidence_label = "Derived from raw data (triage only)"
         confidence_note = "The measured-data proof path passed, but the profile is limited to pre-screening."
-    elif release_eligible and operator_review_required:
+    elif release_eligible and decision_class == "verified_with_advisory":
         confidence_label = "Derived from raw data (not AI)"
         confidence_note = (
-            "Not AI-authored. Level 1 and Level 2 passed; Level 3 advisory review is still recommended."
+            "Not AI-authored. Released from the measured MRI path with non-blocking advisory findings recorded for review."
+        )
+    elif release_eligible and decision_class == "verified_boundary_hugging":
+        confidence_label = "Derived from raw data (not AI)"
+        confidence_note = (
+            "Not AI-authored. Released from the measured MRI path, but at least one eligible proof metric sat inside the configured guard band."
         )
     elif release_eligible:
         confidence_label = "Derived from raw data (not AI)"
@@ -1819,7 +1796,7 @@ def _build_clinical_summary(
     return {
         "status_state": (
             "triage"
-            if decision_class == "triage_only"
+            if _report_is_triage_only(report)
             else "verified" if release_eligible else "blocked"
         ),
         "status_label": status_label,
@@ -1836,26 +1813,36 @@ def _build_clinical_summary(
 def _build_integration_summary(
     *,
     release_eligible: bool,
-    decision_class: str,
+    report: dict[str, Any],
     primary_reason: str,
 ) -> dict[str, str]:
-    if decision_class == "triage_only":
+    decision_class = report["decision"]["decision_class"]
+    if _report_is_triage_only(report):
         decision = "blocked"
     else:
         decision = "released" if release_eligible else "blocked"
     narrative = build_guardian_integration_narrative(
         current_guardian_decision=decision,
     )
-    if decision_class == "triage_only":
+    if _report_is_triage_only(report):
         egress_label = "No Final PACS Output"
         egress_detail = "This profile is triage-only, so no final downstream series are released."
     else:
         egress_label = "Mock PACS Output" if release_eligible else "PACS Output Blocked"
-        egress_detail = (
-            "Verified reconstruction, verified segmentation, and evidence records are ready for downstream PACS/workstation handoff."
-            if release_eligible
-            else f"No downstream series are released. Block reason: {primary_reason}."
-        )
+        if release_eligible and decision_class == "verified_with_advisory":
+            egress_detail = (
+                "Verified reconstruction, verified segmentation, and evidence records are ready for downstream PACS/workstation handoff, with non-blocking advisory findings preserved in the canonical decision."
+            )
+        elif release_eligible and decision_class == "verified_boundary_hugging":
+            egress_detail = (
+                "Verified reconstruction, verified segmentation, and evidence records are ready for downstream PACS/workstation handoff, with guard-band boundary proximity recorded in the canonical decision."
+            )
+        else:
+            egress_detail = (
+                "Verified reconstruction, verified segmentation, and evidence records are ready for downstream PACS/workstation handoff."
+                if release_eligible
+                else f"No downstream series are released. Block reason: {primary_reason}."
+            )
     return {
         "ingress_label": "Mock DICOM Input",
         "ingress_detail": (
@@ -1889,6 +1876,44 @@ def _format_volume_cm3(volume_mm3: float) -> str:
 
 def _short_audit_id(audit_hash: str) -> str:
     return f"{audit_hash[:4]}...{audit_hash[-3:]}"
+
+
+def _report_is_triage_only(report: dict[str, Any]) -> bool:
+    return any(reason["code"] == "non_final_profile_selected" for reason in report["failure_reasons"])
+
+
+def _decision_reason_items(decision: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {"code": item["code"], "message": item["message"]}
+        for item in decision["decision_reasons"]
+    ]
+
+
+def _viewer_primary_reason_summary(report: dict[str, Any]) -> str:
+    reasons = report["failure_reasons"]
+    if reasons:
+        return str(reasons[0]["summary"])
+    decision = report["decision"]
+    if decision["reason_codes"]:
+        return str(decision["reason_codes"][0])
+    return "final_release_authorized" if report["release_eligible"] else "decision_blocked"
+
+
+def _verification_headline(report: dict[str, Any]) -> str:
+    decision_class = report["decision"]["decision_class"]
+    if decision_class == "blocked_structural":
+        return "Structural BLOCKED"
+    if decision_class == "blocked_physical":
+        return "Verification FAILED"
+    if _report_is_triage_only(report):
+        return "TRIAGE ONLY"
+    if decision_class == "blocked_policy":
+        return "Profile Policy BLOCKED"
+    if decision_class == "verified_with_advisory":
+        return "Verification PASSED WITH ADVISORY"
+    if decision_class == "verified_boundary_hugging":
+        return "Verification PASSED NEAR BOUNDARY"
+    return "Verification PASSED"
 
 
 def _ordered_tiers(tiers: dict[str, Any]) -> list[dict[str, Any]]:
