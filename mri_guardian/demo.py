@@ -153,8 +153,24 @@ def run_demo(
             f"{canonical_json_dumps(report['contracts']['ai_claim_envelope'])}\n",
             encoding="utf-8",
         )
-        (output_path / "verified_reconstruction_trace.json").write_text(
-            f"{canonical_json_dumps(report['contracts']['verified_reconstruction_trace'])}\n",
+        (output_path / "measurement_integrity_proof.json").write_text(
+            f"{canonical_json_dumps(report['contracts']['measurement_integrity_proof'])}\n",
+            encoding="utf-8",
+        )
+        (output_path / "reconstruction_parity_proof.json").write_text(
+            f"{canonical_json_dumps(report['contracts']['reconstruction_parity_proof'])}\n",
+            encoding="utf-8",
+        )
+        (output_path / "segmentation_policy_proof.json").write_text(
+            f"{canonical_json_dumps(report['contracts']['segmentation_policy_proof'])}\n",
+            encoding="utf-8",
+        )
+        (output_path / "volume_computation_proof.json").write_text(
+            f"{canonical_json_dumps(report['contracts']['volume_computation_proof'])}\n",
+            encoding="utf-8",
+        )
+        (output_path / "proof_core_evidence_trace.json").write_text(
+            f"{canonical_json_dumps(report['contracts']['proof_core_evidence_trace'])}\n",
             encoding="utf-8",
         )
         (output_path / "mask_derivation_policy.json").write_text(

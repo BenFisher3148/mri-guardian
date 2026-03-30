@@ -10,6 +10,12 @@ import numpy as np
 from .contracts import build_verification_profile_contract
 from .harness import (
     MULTI_SERIES_CASE_KIND,
+    PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
+    PIPELINE_PHASE_PROOF_CORE,
+    PROOF_STAGE_MEASUREMENT_INTEGRITY,
+    PROOF_STAGE_RECONSTRUCTION_PARITY,
+    PROOF_STAGE_SEGMENTATION_POLICY,
+    PROOF_STAGE_VOLUME_COMPUTATION,
     _derive_verified_mask,
     _float_array_to_list,
     _round_float,
@@ -119,6 +125,16 @@ _CONTROL_SURFACE_TYPES = {
     CONTROL_SURFACE_GATE,
     CONTROL_SURFACE_COMPARISON,
 }
+_PIPELINE_PHASES = {
+    PIPELINE_PHASE_PROOF_CORE,
+    PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
+}
+_PROOF_STAGES = {
+    PROOF_STAGE_MEASUREMENT_INTEGRITY,
+    PROOF_STAGE_RECONSTRUCTION_PARITY,
+    PROOF_STAGE_SEGMENTATION_POLICY,
+    PROOF_STAGE_VOLUME_COMPUTATION,
+}
 
 _COMPATIBILITY_TAMPER_SLUGS = (
     "fake_tumour",
@@ -218,17 +234,17 @@ def _control(
 def _mask_semantic_controls() -> list[dict[str, str]]:
     return [
         _control(
-            "MaskDerivationPolicy",
+            "SegmentationPolicyProof",
             CONTROL_ROLE_DETECTIVE,
             control_surface_type=CONTROL_SURFACE_POLICY,
         ),
         _control(
-            "manifest.mask_verification.comparison",
+            "manifest.segmentation_policy_proof.comparison",
             CONTROL_ROLE_DETECTIVE,
             control_surface_type=CONTROL_SURFACE_COMPARISON,
         ),
         _control(
-            "VerifiedReconstructionTrace",
+            "ProofCoreEvidenceTrace",
             CONTROL_ROLE_EVIDENTIARY,
             control_surface_type=CONTROL_SURFACE_TRACE,
         ),
@@ -240,7 +256,7 @@ def _mask_semantic_controls() -> list[dict[str, str]]:
     ]
 
 
-def _reconstruction_integrity_controls() -> list[dict[str, str]]:
+def _measurement_integrity_controls() -> list[dict[str, str]]:
     return [
         _control(
             "VerificationTolerancePolicy",
@@ -248,12 +264,37 @@ def _reconstruction_integrity_controls() -> list[dict[str, str]]:
             control_surface_type=CONTROL_SURFACE_POLICY,
         ),
         _control(
-            "manifest.ai_reconstruction_match",
+            "manifest.measurement_integrity_proof",
             CONTROL_ROLE_DETECTIVE,
             control_surface_type=CONTROL_SURFACE_COMPARISON,
         ),
         _control(
-            "VerifiedReconstructionTrace",
+            "ProofCoreEvidenceTrace",
+            CONTROL_ROLE_EVIDENTIARY,
+            control_surface_type=CONTROL_SURFACE_TRACE,
+        ),
+        _control(
+            "release_control",
+            CONTROL_ROLE_GATING,
+            control_surface_type=CONTROL_SURFACE_GATE,
+        ),
+    ]
+
+
+def _reconstruction_parity_controls() -> list[dict[str, str]]:
+    return [
+        _control(
+            "VerificationTolerancePolicy",
+            CONTROL_ROLE_DETECTIVE,
+            control_surface_type=CONTROL_SURFACE_POLICY,
+        ),
+        _control(
+            "manifest.reconstruction_parity_proof",
+            CONTROL_ROLE_DETECTIVE,
+            control_surface_type=CONTROL_SURFACE_COMPARISON,
+        ),
+        _control(
+            "ProofCoreEvidenceTrace",
             CONTROL_ROLE_EVIDENTIARY,
             control_surface_type=CONTROL_SURFACE_TRACE,
         ),
@@ -268,17 +309,17 @@ def _reconstruction_integrity_controls() -> list[dict[str, str]]:
 def _quantitative_claim_controls() -> list[dict[str, str]]:
     return [
         _control(
-            "manifest.tumor_volume_proof",
+            "manifest.volume_computation_proof",
             CONTROL_ROLE_DETECTIVE,
             control_surface_type=CONTROL_SURFACE_COMPARISON,
         ),
         _control(
-            "manifest.mask_verification.comparison",
+            "manifest.segmentation_policy_proof.comparison",
             CONTROL_ROLE_DETECTIVE,
             control_surface_type=CONTROL_SURFACE_COMPARISON,
         ),
         _control(
-            "VerifiedReconstructionTrace",
+            "ProofCoreEvidenceTrace",
             CONTROL_ROLE_EVIDENTIARY,
             control_surface_type=CONTROL_SURFACE_TRACE,
         ),
@@ -460,9 +501,11 @@ def _threat_entry(
     determinism_contract: dict[str, Any],
     expected_decision_class: str,
     expected_failure_route: str,
+    pipeline_phase: str,
     state: dict[str, Any],
     evidence_tests: tuple[str, ...],
     evidence_traces: tuple[str, ...],
+    proof_stage: str | None = None,
     expected_block_category: str | None = None,
     expected_primary_reason_family: str | None = None,
     provenance_scope: str | None = None,
@@ -481,6 +524,7 @@ def _threat_entry(
         "hazard_severity": str(hazard_severity),
         "mitigation_mapping": mitigation_mapping,
         "determinism_contract": determinism_contract,
+        "pipeline_phase": str(pipeline_phase),
         "normative_invariants": {
             "expected_decision_class": str(expected_decision_class),
             "expected_failure_route": str(expected_failure_route),
@@ -495,6 +539,8 @@ def _threat_entry(
         if state.get("case_kind") != MULTI_SERIES_CASE_KIND
         else None,
     }
+    if proof_stage is not None:
+        entry["proof_stage"] = str(proof_stage)
     if expected_block_category is not None:
         entry["observational_expectations"]["expected_block_category"] = str(
             expected_block_category
@@ -520,6 +566,18 @@ def _validate_threat_entry(entry: Mapping[str, Any]) -> None:
         raise ValueError(f"Unsupported corpus status: {entry['corpus_status']!r}")
     if entry["hazard_severity"] not in _HAZARD_SEVERITIES:
         raise ValueError(f"Unsupported hazard severity: {entry['hazard_severity']!r}")
+    if entry["pipeline_phase"] not in _PIPELINE_PHASES:
+        raise ValueError(f"Unsupported pipeline phase: {entry['pipeline_phase']!r}")
+    proof_stage = entry.get("proof_stage")
+    if entry["pipeline_phase"] == PIPELINE_PHASE_PROOF_CORE:
+        if proof_stage not in _PROOF_STAGES:
+            raise ValueError(
+                "Proof-core threat corpus entries must declare a legal primary proof stage."
+            )
+    elif proof_stage is not None:
+        raise ValueError(
+            "Only proof-core threat corpus entries may declare a primary proof stage."
+        )
     invariants = entry["normative_invariants"]
     if invariants["expected_failure_route"] not in _THREAT_FAILURE_ROUTES:
         raise ValueError(
@@ -581,13 +639,15 @@ def _build_fake_tumour_entry(base_case: dict[str, Any]) -> dict[str, Any]:
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_SEGMENTATION_POLICY,
         expected_block_category="proof_failure",
         expected_primary_reason_family=_MASK_REASON_FAMILY,
         state=state,
         evidence_tests=("test_rejects_ai_mask_with_fake_tumour_voxel",),
         evidence_traces=(
-            "manifest.mask_verification.comparison",
-            "VerifiedReconstructionTrace",
+            "manifest.segmentation_policy_proof.comparison",
+            "ProofCoreEvidenceTrace",
         ),
     )
 
@@ -618,6 +678,8 @@ def _build_shifted_mask_entry(base_case: dict[str, Any]) -> dict[str, Any]:
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_SEGMENTATION_POLICY,
         expected_block_category="proof_failure",
         expected_primary_reason_family=_MASK_REASON_FAMILY,
         state=state,
@@ -625,8 +687,8 @@ def _build_shifted_mask_entry(base_case: dict[str, Any]) -> dict[str, Any]:
             "test_tamper_mode_scenarios_surface_expected_primary_failures",
         ),
         evidence_traces=(
-            "manifest.mask_verification.comparison",
-            "VerifiedReconstructionTrace",
+            "manifest.segmentation_policy_proof.comparison",
+            "ProofCoreEvidenceTrace",
         ),
     )
 
@@ -649,7 +711,7 @@ def _build_intensity_manipulation_entry(base_case: dict[str, Any]) -> dict[str, 
         clinical_hazard="image_integrity_distortion",
         downstream_effect="False positive or false negative interpretation burden.",
         hazard_severity=HAZARD_SEVERITY_MAJOR,
-        mitigation_mapping=_reconstruction_integrity_controls(),
+        mitigation_mapping=_reconstruction_parity_controls(),
         determinism_contract={
             "builder_id": "single_series.intensity_manipulation",
             "fixed_inputs": {"z": [0, 3], "y": [0, 7], "x": [16, 23], "delta": 0.55},
@@ -658,13 +720,70 @@ def _build_intensity_manipulation_entry(base_case: dict[str, Any]) -> dict[str, 
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_RECONSTRUCTION_PARITY,
         expected_block_category="proof_failure",
         expected_primary_reason_family=_INTENSITY_REASON_FAMILY,
         state=state,
         evidence_tests=("test_rejects_ai_reconstruction_with_invented_pixels",),
         evidence_traces=(
-            "manifest.ai_reconstruction_match",
-            "VerifiedReconstructionTrace",
+            "manifest.reconstruction_parity_proof",
+            "ProofCoreEvidenceTrace",
+        ),
+    )
+
+
+def _build_measurement_domain_tamper_entry(base_case: dict[str, Any]) -> dict[str, Any]:
+    state = deepcopy(base_case)
+    raw_real = np.asarray(state["raw_real"], dtype=np.float64)
+    raw_imag = np.asarray(state["raw_imag"], dtype=np.float64)
+    raw_real[0:2, 0:4, 10:14] += 0.18
+    raw_imag[0:2, 0:4, 10:14] -= 0.11
+    state["raw_real"] = _float_array_to_list(raw_real)
+    state["raw_imag"] = _float_array_to_list(raw_imag)
+    state["case_id"] = "mri-case-tamper-measurement-domain"
+    return _threat_entry(
+        corpus_id="VFTC-015",
+        slug="measurement_domain_tamper",
+        title="Tamper Mode: Measurement-Domain Tamper",
+        description=(
+            "Alter a deterministic raw k-space patch while leaving the asserted AI claim "
+            "surfaces unchanged."
+        ),
+        scenario_family=SCENARIO_FAMILY_RECONSTRUCTION_INTEGRITY,
+        scenario_surface=SCENARIO_SURFACE_SINGLE_SERIES_RECONSTRUCTION,
+        corpus_status=THREAT_CORPUS_STATUS_ACTIVE,
+        technical_failure_mechanism="raw_measurement_patch_mutation",
+        clinical_hazard="measurement_domain_integrity_distortion",
+        downstream_effect=(
+            "A raw-domain mutation can poison every downstream proof surface unless "
+            "measurement anchoring fails first."
+        ),
+        hazard_severity=HAZARD_SEVERITY_MAJOR,
+        mitigation_mapping=_measurement_integrity_controls(),
+        determinism_contract={
+            "builder_id": "single_series.measurement_domain_tamper",
+            "fixed_inputs": {
+                "z": [0, 2],
+                "ky": [0, 4],
+                "kx": [10, 14],
+                "real_delta": 0.18,
+                "imag_delta": -0.11,
+            },
+            "seed_strategy": "no_rng",
+            "coordinate_contract": {"mutated_coefficients": 32},
+        },
+        expected_decision_class="blocked_physical",
+        expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_MEASUREMENT_INTEGRITY,
+        expected_block_category="proof_failure",
+        expected_primary_reason_family="raw_measurement_inconsistency",
+        state=state,
+        evidence_tests=("test_measurement_domain_tamper_fixes_primary_proof_stage",),
+        evidence_traces=(
+            "manifest.measurement_integrity_proof",
+            "contracts.proof_core_evidence_trace",
         ),
     )
 
@@ -689,7 +808,7 @@ def _build_subtle_distributed_perturbation_entry(
         clinical_hazard="image_integrity_distortion",
         downstream_effect="Boundary-hugging corruption that may look visually benign.",
         hazard_severity=HAZARD_SEVERITY_MAJOR,
-        mitigation_mapping=_reconstruction_integrity_controls(),
+        mitigation_mapping=_reconstruction_parity_controls(),
         determinism_contract={
             "builder_id": "single_series.subtle_distributed_perturbation",
             "fixed_inputs": {"global_delta": 9e-10},
@@ -698,6 +817,8 @@ def _build_subtle_distributed_perturbation_entry(
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_RECONSTRUCTION_PARITY,
         expected_block_category="proof_failure",
         expected_primary_reason_family=_INTENSITY_REASON_FAMILY,
         state=state,
@@ -705,7 +826,7 @@ def _build_subtle_distributed_perturbation_entry(
             "test_rejects_distributed_low_amplitude_attack_by_global_l2_bound",
         ),
         evidence_traces=(
-            "manifest.ai_reconstruction_match.metrics.global_relative_l2_error",
+            "manifest.reconstruction_parity_proof.metrics.global_relative_l2_error",
             "decision.success_modifiers.near_proof_threshold",
         ),
     )
@@ -731,7 +852,7 @@ def _build_structured_ringing_artefact_entry(
         clinical_hazard="image_integrity_distortion",
         downstream_effect="Spurious haloing around anatomy can bias human review.",
         hazard_severity=HAZARD_SEVERITY_MAJOR,
-        mitigation_mapping=_reconstruction_integrity_controls(),
+        mitigation_mapping=_reconstruction_parity_controls(),
         determinism_contract={
             "builder_id": "single_series.structured_ringing_artefact",
             "fixed_inputs": {"amplitude": 0.22, "period_x": 3.0},
@@ -740,9 +861,11 @@ def _build_structured_ringing_artefact_entry(
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_RECONSTRUCTION_PARITY,
         state=state,
         evidence_tests=("test_tamper_mode_scenarios_surface_expected_primary_failures",),
-        evidence_traces=("manifest.ai_reconstruction_match",),
+        evidence_traces=("manifest.reconstruction_parity_proof",),
     )
 
 
@@ -766,7 +889,7 @@ def _build_slice_local_anomaly_injection_entry(
         clinical_hazard="false_positive_finding",
         downstream_effect="False lesion cue on one slice can trigger avoidable escalation.",
         hazard_severity=HAZARD_SEVERITY_MAJOR,
-        mitigation_mapping=_reconstruction_integrity_controls(),
+        mitigation_mapping=_reconstruction_parity_controls(),
         determinism_contract={
             "builder_id": "single_series.slice_local_anomaly_injection",
             "fixed_inputs": {"slice_index": 1, "y": [9, 15], "x": [9, 15], "delta": 0.85},
@@ -775,9 +898,11 @@ def _build_slice_local_anomaly_injection_entry(
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_RECONSTRUCTION_PARITY,
         state=state,
         evidence_tests=("test_rejects_ai_reconstruction_with_invented_pixels",),
-        evidence_traces=("manifest.ai_reconstruction_match",),
+        evidence_traces=("manifest.reconstruction_parity_proof",),
     )
 
 
@@ -807,10 +932,12 @@ def _build_mask_erosion_entry(base_case: dict[str, Any]) -> dict[str, Any]:
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_SEGMENTATION_POLICY,
         expected_primary_reason_family=_MASK_REASON_FAMILY,
         state=state,
         evidence_tests=("test_rejects_ai_mask_with_fake_tumour_voxel",),
-        evidence_traces=("manifest.mask_verification.comparison",),
+        evidence_traces=("manifest.segmentation_policy_proof.comparison",),
     )
 
 
@@ -840,10 +967,12 @@ def _build_mask_dilation_entry(base_case: dict[str, Any]) -> dict[str, Any]:
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_SEGMENTATION_POLICY,
         expected_primary_reason_family=_MASK_REASON_FAMILY,
         state=state,
         evidence_tests=("test_rejects_ai_mask_with_fake_tumour_voxel",),
-        evidence_traces=("manifest.mask_verification.comparison",),
+        evidence_traces=("manifest.segmentation_policy_proof.comparison",),
     )
 
 
@@ -872,11 +1001,13 @@ def _build_volume_rounding_attack_entry(base_case: dict[str, Any]) -> dict[str, 
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_VOLUME_COMPUTATION,
         expected_block_category="proof_failure",
         expected_primary_reason_family=_QUANT_REASON_FAMILY,
         state=state,
         evidence_tests=("test_rejects_incorrect_tumor_volume_claim",),
-        evidence_traces=("manifest.tumor_volume_proof", "VerifiedReconstructionTrace"),
+        evidence_traces=("manifest.volume_computation_proof", "ProofCoreEvidenceTrace"),
     )
 
 
@@ -900,7 +1031,7 @@ def _build_mixed_frequency_perturbation_entry(
         clinical_hazard="image_integrity_distortion",
         downstream_effect="Hybrid artefacts can escape purely local visual heuristics.",
         hazard_severity=HAZARD_SEVERITY_MAJOR,
-        mitigation_mapping=_reconstruction_integrity_controls(),
+        mitigation_mapping=_reconstruction_parity_controls(),
         determinism_contract={
             "builder_id": "single_series.mixed_frequency_perturbation",
             "fixed_inputs": {"low_amplitude": 0.09, "high_amplitude": 0.08},
@@ -909,9 +1040,11 @@ def _build_mixed_frequency_perturbation_entry(
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_RECONSTRUCTION_PARITY,
         state=state,
         evidence_tests=("test_rejects_distributed_low_amplitude_attack_by_global_l2_bound",),
-        evidence_traces=("manifest.ai_reconstruction_match",),
+        evidence_traces=("manifest.reconstruction_parity_proof",),
     )
 
 
@@ -942,6 +1075,8 @@ def _build_stale_mask_replay_entry(base_case: dict[str, Any]) -> dict[str, Any]:
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_SEGMENTATION_POLICY,
         expected_primary_reason_family=_MASK_REASON_FAMILY,
         provenance_scope=(
             "State-level semantic mismatch only. Not manifest tampering, bundle replay "
@@ -949,7 +1084,7 @@ def _build_stale_mask_replay_entry(base_case: dict[str, Any]) -> dict[str, Any]:
         ),
         state=state,
         evidence_tests=("test_rejects_ai_mask_with_fake_tumour_voxel",),
-        evidence_traces=("manifest.mask_verification.comparison",),
+        evidence_traces=("manifest.segmentation_policy_proof.comparison",),
     )
 
 
@@ -990,6 +1125,7 @@ def _build_cross_series_misregistration_entry() -> dict[str, Any]:
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
         expected_block_category="positive_lesion_corroboration_failed",
         expected_primary_reason_family=_CORROBORATION_REASON_FAMILY,
         state=state,
@@ -1032,6 +1168,8 @@ def _build_component_micro_island_entry() -> dict[str, Any]:
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_SEGMENTATION_POLICY,
         expected_primary_reason_family=_MASK_REASON_FAMILY,
         state=state,
         evidence_tests=("test_component_profile_tamper_mode_surfaces_micro_island_mismatch",),
@@ -1068,6 +1206,8 @@ def _build_slice_single_slice_island_entry() -> dict[str, Any]:
         },
         expected_decision_class="blocked_physical",
         expected_failure_route=THREAT_ROUTE_PHYSICAL,
+        pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
+        proof_stage=PROOF_STAGE_SEGMENTATION_POLICY,
         expected_primary_reason_family=_MASK_REASON_FAMILY,
         state=state,
         evidence_tests=("test_slice_profile_tamper_mode_surfaces_single_slice_island_mismatch",),
@@ -1083,6 +1223,7 @@ def build_verification_threat_corpus(
     entries = (
         _build_fake_tumour_entry(base_case),
         _build_shifted_mask_entry(base_case),
+        _build_measurement_domain_tamper_entry(base_case),
         _build_intensity_manipulation_entry(base_case),
         _build_subtle_distributed_perturbation_entry(base_case),
         _build_structured_ringing_artefact_entry(base_case),

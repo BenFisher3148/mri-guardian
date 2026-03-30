@@ -403,7 +403,7 @@ def build_mock_pacs_submission(
                 "decision_class": report["decision_summary"]["decision_class"],
                 "canonical_decision": deepcopy(report["decision"]),
                 "primary_reason": _primary_reason_summary(report),
-                "tier_statuses": _tier_statuses(report),
+                "pipeline_phase_statuses": _pipeline_phase_statuses(report),
                 "proof_status": report["decision_summary"]["proof_status"],
                 "profile_policy_status": report["decision_summary"]["profile_policy_status"],
                 "released_series_ids": report["analysis"]["released_series_ids"],
@@ -490,7 +490,7 @@ def build_mock_pacs_submission(
             "decision_class": report["decision_summary"]["decision_class"],
             "canonical_decision": deepcopy(report["decision"]),
             "primary_reason": _primary_reason_summary(report),
-            "tier_statuses": _tier_statuses(report),
+            "pipeline_phase_statuses": _pipeline_phase_statuses(report),
             "proof_status": report["decision_summary"]["proof_status"],
             "profile_policy_status": report["decision_summary"]["profile_policy_status"],
             "pixel_source": workstation_payload["pixel_source"],
@@ -551,7 +551,7 @@ def build_mock_pacs_block_notice(
                 "decision": "blocked",
                 "decision_class": report["decision_summary"]["decision_class"],
                 "canonical_decision": deepcopy(report["decision"]),
-                "tier_statuses": _tier_statuses(report),
+                "pipeline_phase_statuses": _pipeline_phase_statuses(report),
                 "proof_status": report["decision_summary"]["proof_status"],
                 "profile_policy_status": report["decision_summary"]["profile_policy_status"],
                 "released_series_ids": report["analysis"]["released_series_ids"],
@@ -611,7 +611,7 @@ def build_mock_pacs_block_notice(
             "decision": "blocked",
             "decision_class": report["decision_summary"]["decision_class"],
             "canonical_decision": deepcopy(report["decision"]),
-            "tier_statuses": _tier_statuses(report),
+            "pipeline_phase_statuses": _pipeline_phase_statuses(report),
             "proof_status": report["decision_summary"]["proof_status"],
             "profile_policy_status": report["decision_summary"]["profile_policy_status"],
             "verified_tumor_volume_mm3": analysis.get("computed_tumor_volume_mm3"),
@@ -674,7 +674,7 @@ def build_mock_integration_trace(
                 "decision_class": report["decision_summary"]["decision_class"],
                 "canonical_decision": deepcopy(report["decision"]),
                 "primary_reason": _primary_reason_summary(report),
-                "tier_statuses": _tier_statuses(report),
+                "pipeline_phase_statuses": _pipeline_phase_statuses(report),
                 "study_temporal_disposition": report["analysis"]["study_temporal_aggregation"][
                     "final_temporal_disposition"
                 ],
@@ -729,7 +729,7 @@ def build_mock_integration_trace(
                 "decision_class": report["decision_summary"]["decision_class"],
                 "canonical_decision": deepcopy(report["decision"]),
                 "primary_reason": _primary_reason_summary(report),
-                "tier_statuses": _tier_statuses(report),
+                "pipeline_phase_statuses": _pipeline_phase_statuses(report),
                 **_single_series_temporal_summary(report),
             },
             {
@@ -821,8 +821,11 @@ def build_guardian_integration_narrative(
     }
 
 
-def _tier_statuses(report: dict[str, Any]) -> dict[str, str]:
-    return {key: tier["status"] for key, tier in report["verification_tiers"].items()}
+def _pipeline_phase_statuses(report: dict[str, Any]) -> dict[str, str]:
+    return {
+        key: phase["status"]
+        for key, phase in report["verification_pipeline"]["phases"].items()
+    }
 
 
 def _primary_reason_summary(report: dict[str, Any]) -> str:
@@ -849,7 +852,11 @@ def _single_series_proof_contracts(report: dict[str, Any]) -> dict[str, Any]:
     if "ai_claim_envelope" in contracts:
         payload["ai_claim_envelope"] = contracts["ai_claim_envelope"]
     for key in (
-        "verified_reconstruction_trace",
+        "measurement_integrity_proof",
+        "reconstruction_parity_proof",
+        "segmentation_policy_proof",
+        "volume_computation_proof",
+        "proof_core_evidence_trace",
         "mask_derivation_policy",
         "verification_tolerance_policy",
         "longitudinal_selection_trace",

@@ -433,26 +433,7 @@ class VerificationTolerancePolicy:
             "policy_scope": "attack_aware_numeric_tolerances",
             "guard_band_fraction": self.guard_band_fraction,
             "rules": {
-                "ai_reconstruction_match": {
-                    "domain": "spatial_image_domain",
-                    "attack_surface": (
-                        "Distributed low-amplitude voxel perturbations are checked with a "
-                        "global norm in addition to a per-voxel maximum."
-                    ),
-                    "metrics": [
-                        {
-                            "metric": "per_voxel_abs_error_max",
-                            "scope": "per_voxel",
-                            "threshold": self.spatial_per_voxel_abs_error,
-                        },
-                        {
-                            "metric": "global_relative_l2_error",
-                            "scope": "global_norm",
-                            "threshold": self.spatial_global_relative_l2_error,
-                        },
-                    ],
-                },
-                "measurement_consistency": {
+                "measurement_integrity_proof": {
                     "domain": "frequency_domain",
                     "attack_surface": (
                         "Distributed low-amplitude k-space perturbations are checked with a "
@@ -476,18 +457,26 @@ class VerificationTolerancePolicy:
                         },
                     ],
                 },
-                "tumor_volume_proof": {
-                    "domain": "scalar_volume",
-                    "attack_surface": "Scalar claim delta is checked as an absolute error.",
+                "reconstruction_parity_proof": {
+                    "domain": "spatial_image_domain",
+                    "attack_surface": (
+                        "Distributed low-amplitude voxel perturbations are checked with a "
+                        "global norm in addition to a per-voxel maximum."
+                    ),
                     "metrics": [
                         {
-                            "metric": "absolute_error",
-                            "scope": "global_scalar",
-                            "threshold": self.volume_absolute_error,
-                        }
+                            "metric": "per_voxel_abs_error_max",
+                            "scope": "per_voxel",
+                            "threshold": self.spatial_per_voxel_abs_error,
+                        },
+                        {
+                            "metric": "global_relative_l2_error",
+                            "scope": "global_norm",
+                            "threshold": self.spatial_global_relative_l2_error,
+                        },
                     ],
                 },
-                "mask_verification": {
+                "segmentation_policy_proof": {
                     "domain": "binary_mask",
                     "attack_surface": "No numeric tolerance is allowed; the mask must match exactly.",
                     "metrics": [
@@ -498,13 +487,24 @@ class VerificationTolerancePolicy:
                         }
                     ],
                 },
+                "volume_computation_proof": {
+                    "domain": "scalar_volume",
+                    "attack_surface": "Scalar claim delta is checked as an absolute error.",
+                    "metrics": [
+                        {
+                            "metric": "absolute_error",
+                            "scope": "global_scalar",
+                            "threshold": self.volume_absolute_error,
+                        }
+                    ],
+                },
             },
         }
 
 
 @dataclass(frozen=True)
-class VerifiedReconstructionTrace:
-    """Proof trace from raw sensor data to the verified reconstruction outputs."""
+class MeasurementIntegrityProof:
+    """Proof that the derived reconstruction remains measurement-anchored within policy."""
 
     case_id: str
     profile_name: str
@@ -512,26 +512,94 @@ class VerifiedReconstructionTrace:
     profile_digest: str
     icsd_policy_id: str
     icsd_policy_version: str
+    claim_envelope_hash: str
+    tolerance_policy_hash: str
     raw_kspace_hash: str
     derived_reconstruction_hash: str
     forward_projection_hash: str
-    verified_mask_hash: str
-    computed_tumor_volume_mm3: float
-    claim_envelope_hash: str
-    mask_derivation_policy_hash: str
-    tolerance_policy_hash: str
-    max_measurement_abs_error: float
-    relative_measurement_l2_error: float
-    max_imaginary_leakage: float
-    max_ai_abs_error: float
-    relative_ai_l2_error: float
-    mask_voxel_delta: int
+    verified: bool
+    metrics: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "interface_type": "VerifiedReconstructionTrace",
+            "interface_type": "MeasurementIntegrityProof",
             "interface_version": "2026.03",
-            "trace_scope": "raw_kspace_to_verified_reconstruction_mask_volume",
+            "proof_scope": "derived_reconstruction_measurement_domain_anchoring",
+            "case_id": self.case_id,
+            "profile_name": self.profile_name,
+            "profile_revision": self.profile_revision,
+            "profile_digest": self.profile_digest,
+            "icsd_policy_id": self.icsd_policy_id,
+            "icsd_policy_version": self.icsd_policy_version,
+            "claim_envelope_hash": self.claim_envelope_hash,
+            "tolerance_policy_hash": self.tolerance_policy_hash,
+            "raw_kspace_hash": self.raw_kspace_hash,
+            "derived_reconstruction_hash": self.derived_reconstruction_hash,
+            "forward_projection_hash": self.forward_projection_hash,
+            "verified": self.verified,
+            "metrics": deepcopy(self.metrics),
+        }
+
+
+@dataclass(frozen=True)
+class ReconstructionParityProof:
+    """Proof that the AI reconstruction matches the derived reconstruction within policy."""
+
+    case_id: str
+    profile_name: str
+    profile_revision: str
+    profile_digest: str
+    icsd_policy_id: str
+    icsd_policy_version: str
+    claim_envelope_hash: str
+    tolerance_policy_hash: str
+    ai_reconstruction_hash: str
+    derived_reconstruction_hash: str
+    verified: bool
+    metrics: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "ReconstructionParityProof",
+            "interface_version": "2026.03",
+            "proof_scope": "ai_reconstruction_to_derived_reconstruction_parity",
+            "case_id": self.case_id,
+            "profile_name": self.profile_name,
+            "profile_revision": self.profile_revision,
+            "profile_digest": self.profile_digest,
+            "icsd_policy_id": self.icsd_policy_id,
+            "icsd_policy_version": self.icsd_policy_version,
+            "claim_envelope_hash": self.claim_envelope_hash,
+            "tolerance_policy_hash": self.tolerance_policy_hash,
+            "ai_reconstruction_hash": self.ai_reconstruction_hash,
+            "derived_reconstruction_hash": self.derived_reconstruction_hash,
+            "verified": self.verified,
+            "metrics": deepcopy(self.metrics),
+        }
+
+
+@dataclass(frozen=True)
+class SegmentationPolicyProof:
+    """Proof that the AI mask matches the policy-derived verified mask exactly."""
+
+    case_id: str
+    profile_name: str
+    profile_revision: str
+    profile_digest: str
+    icsd_policy_id: str
+    icsd_policy_version: str
+    claim_envelope_hash: str
+    mask_derivation_policy_hash: str
+    ai_mask_hash: str
+    verified_mask_hash: str
+    verified: bool
+    comparison: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "SegmentationPolicyProof",
+            "interface_version": "2026.03",
+            "proof_scope": "policy_derived_mask_exact_match",
             "case_id": self.case_id,
             "profile_name": self.profile_name,
             "profile_revision": self.profile_revision,
@@ -540,22 +608,84 @@ class VerifiedReconstructionTrace:
             "icsd_policy_version": self.icsd_policy_version,
             "claim_envelope_hash": self.claim_envelope_hash,
             "mask_derivation_policy_hash": self.mask_derivation_policy_hash,
-            "tolerance_policy_hash": self.tolerance_policy_hash,
-            "raw_kspace_hash": self.raw_kspace_hash,
-            "derived_reconstruction_hash": self.derived_reconstruction_hash,
-            "forward_projection_hash": self.forward_projection_hash,
+            "ai_mask_hash": self.ai_mask_hash,
             "verified_mask_hash": self.verified_mask_hash,
+            "verified": self.verified,
+            "comparison": deepcopy(self.comparison),
+        }
+
+
+@dataclass(frozen=True)
+class VolumeComputationProof:
+    """Proof that the claimed scalar volume matches the verified mask geometry within policy."""
+
+    case_id: str
+    profile_name: str
+    profile_revision: str
+    profile_digest: str
+    icsd_policy_id: str
+    icsd_policy_version: str
+    claim_envelope_hash: str
+    verified_mask_hash: str
+    verified: bool
+    claimed_tumor_volume_mm3: float
+    computed_tumor_volume_mm3: float
+    verified_mask_voxel_count: int
+    voxel_volume_mm3: float
+    tolerance_metric: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "VolumeComputationProof",
+            "interface_version": "2026.03",
+            "proof_scope": "verified_mask_geometry_scalar_volume_check",
+            "case_id": self.case_id,
+            "profile_name": self.profile_name,
+            "profile_revision": self.profile_revision,
+            "profile_digest": self.profile_digest,
+            "icsd_policy_id": self.icsd_policy_id,
+            "icsd_policy_version": self.icsd_policy_version,
+            "claim_envelope_hash": self.claim_envelope_hash,
+            "verified_mask_hash": self.verified_mask_hash,
+            "verified": self.verified,
+            "claimed_tumor_volume_mm3": self.claimed_tumor_volume_mm3,
             "computed_tumor_volume_mm3": self.computed_tumor_volume_mm3,
-            "measurement_consistency": {
-                "max_abs_error": self.max_measurement_abs_error,
-                "relative_l2_error": self.relative_measurement_l2_error,
-                "max_imaginary_leakage": self.max_imaginary_leakage,
-            },
-            "claim_comparison": {
-                "max_ai_abs_error": self.max_ai_abs_error,
-                "relative_l2_error": self.relative_ai_l2_error,
-                "mask_voxel_delta": self.mask_voxel_delta,
-            },
+            "verified_mask_voxel_count": self.verified_mask_voxel_count,
+            "voxel_volume_mm3": self.voxel_volume_mm3,
+            "tolerance_metric": deepcopy(self.tolerance_metric),
+        }
+
+
+@dataclass(frozen=True)
+class ProofCoreEvidenceTrace:
+    """Strictly derived aggregation of already-materialized proof-stage artefacts."""
+
+    case_id: str
+    profile_name: str
+    profile_revision: str
+    profile_digest: str
+    icsd_policy_id: str
+    icsd_policy_version: str
+    verification_profile_descriptor_hash: str
+    ai_claim_envelope_hash: str
+    canonical_stage_order: tuple[str, ...]
+    proof_stage_hashes: dict[str, str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "ProofCoreEvidenceTrace",
+            "interface_version": "2026.03",
+            "trace_scope": "strictly_derived_proof_core_aggregation",
+            "case_id": self.case_id,
+            "profile_name": self.profile_name,
+            "profile_revision": self.profile_revision,
+            "profile_digest": self.profile_digest,
+            "icsd_policy_id": self.icsd_policy_id,
+            "icsd_policy_version": self.icsd_policy_version,
+            "verification_profile_descriptor_hash": self.verification_profile_descriptor_hash,
+            "ai_claim_envelope_hash": self.ai_claim_envelope_hash,
+            "canonical_stage_order": list(self.canonical_stage_order),
+            "proof_stage_hashes": dict(self.proof_stage_hashes),
         }
 
 
@@ -1101,7 +1231,7 @@ def build_verification_tolerance_policy(
     ).to_dict()
 
 
-def build_verified_reconstruction_trace(
+def build_measurement_integrity_proof(
     *,
     case_id: str,
     profile_name: str,
@@ -1109,42 +1239,165 @@ def build_verified_reconstruction_trace(
     profile_digest: str,
     icsd_policy_id: str,
     icsd_policy_version: str,
+    claim_envelope: Mapping[str, Any],
+    tolerance_policy: Mapping[str, Any],
     raw_kspace_hash: str,
     derived_reconstruction_hash: str,
     forward_projection_hash: str,
-    verified_mask_hash: str,
-    computed_tumor_volume_mm3: float,
-    claim_envelope: dict[str, Any],
-    mask_derivation_policy: dict[str, Any],
-    tolerance_policy: dict[str, Any],
-    max_measurement_abs_error: float,
-    relative_measurement_l2_error: float,
-    max_imaginary_leakage: float,
-    max_ai_abs_error: float,
-    relative_ai_l2_error: float,
-    mask_voxel_delta: int,
+    verified: bool,
+    metrics: Mapping[str, Any],
 ) -> dict[str, Any]:
-    return VerifiedReconstructionTrace(
-        case_id=case_id,
-        profile_name=profile_name,
-        profile_revision=profile_revision,
-        profile_digest=profile_digest,
-        icsd_policy_id=icsd_policy_id,
-        icsd_policy_version=icsd_policy_version,
-        raw_kspace_hash=raw_kspace_hash,
-        derived_reconstruction_hash=derived_reconstruction_hash,
-        forward_projection_hash=forward_projection_hash,
-        verified_mask_hash=verified_mask_hash,
+    return MeasurementIntegrityProof(
+        case_id=str(case_id),
+        profile_name=str(profile_name),
+        profile_revision=str(profile_revision),
+        profile_digest=str(profile_digest),
+        icsd_policy_id=str(icsd_policy_id),
+        icsd_policy_version=str(icsd_policy_version),
+        claim_envelope_hash=hash_canonical_json(dict(claim_envelope)),
+        tolerance_policy_hash=hash_canonical_json(dict(tolerance_policy)),
+        raw_kspace_hash=str(raw_kspace_hash),
+        derived_reconstruction_hash=str(derived_reconstruction_hash),
+        forward_projection_hash=str(forward_projection_hash),
+        verified=bool(verified),
+        metrics=dict(metrics),
+    ).to_dict()
+
+
+def build_reconstruction_parity_proof(
+    *,
+    case_id: str,
+    profile_name: str,
+    profile_revision: str,
+    profile_digest: str,
+    icsd_policy_id: str,
+    icsd_policy_version: str,
+    claim_envelope: Mapping[str, Any],
+    tolerance_policy: Mapping[str, Any],
+    ai_reconstruction_hash: str,
+    derived_reconstruction_hash: str,
+    verified: bool,
+    metrics: Mapping[str, Any],
+) -> dict[str, Any]:
+    return ReconstructionParityProof(
+        case_id=str(case_id),
+        profile_name=str(profile_name),
+        profile_revision=str(profile_revision),
+        profile_digest=str(profile_digest),
+        icsd_policy_id=str(icsd_policy_id),
+        icsd_policy_version=str(icsd_policy_version),
+        claim_envelope_hash=hash_canonical_json(dict(claim_envelope)),
+        tolerance_policy_hash=hash_canonical_json(dict(tolerance_policy)),
+        ai_reconstruction_hash=str(ai_reconstruction_hash),
+        derived_reconstruction_hash=str(derived_reconstruction_hash),
+        verified=bool(verified),
+        metrics=dict(metrics),
+    ).to_dict()
+
+
+def build_segmentation_policy_proof(
+    *,
+    case_id: str,
+    profile_name: str,
+    profile_revision: str,
+    profile_digest: str,
+    icsd_policy_id: str,
+    icsd_policy_version: str,
+    claim_envelope: Mapping[str, Any],
+    mask_derivation_policy: Mapping[str, Any],
+    ai_mask_hash: str,
+    verified_mask_hash: str,
+    verified: bool,
+    comparison: Mapping[str, Any],
+) -> dict[str, Any]:
+    return SegmentationPolicyProof(
+        case_id=str(case_id),
+        profile_name=str(profile_name),
+        profile_revision=str(profile_revision),
+        profile_digest=str(profile_digest),
+        icsd_policy_id=str(icsd_policy_id),
+        icsd_policy_version=str(icsd_policy_version),
+        claim_envelope_hash=hash_canonical_json(dict(claim_envelope)),
+        mask_derivation_policy_hash=hash_canonical_json(dict(mask_derivation_policy)),
+        ai_mask_hash=str(ai_mask_hash),
+        verified_mask_hash=str(verified_mask_hash),
+        verified=bool(verified),
+        comparison=dict(comparison),
+    ).to_dict()
+
+
+def build_volume_computation_proof(
+    *,
+    case_id: str,
+    profile_name: str,
+    profile_revision: str,
+    profile_digest: str,
+    icsd_policy_id: str,
+    icsd_policy_version: str,
+    claim_envelope: Mapping[str, Any],
+    verified_mask_hash: str,
+    verified: bool,
+    claimed_tumor_volume_mm3: float,
+    computed_tumor_volume_mm3: float,
+    verified_mask_voxel_count: int,
+    voxel_volume_mm3: float,
+    tolerance_metric: Mapping[str, Any],
+) -> dict[str, Any]:
+    return VolumeComputationProof(
+        case_id=str(case_id),
+        profile_name=str(profile_name),
+        profile_revision=str(profile_revision),
+        profile_digest=str(profile_digest),
+        icsd_policy_id=str(icsd_policy_id),
+        icsd_policy_version=str(icsd_policy_version),
+        claim_envelope_hash=hash_canonical_json(dict(claim_envelope)),
+        verified_mask_hash=str(verified_mask_hash),
+        verified=bool(verified),
+        claimed_tumor_volume_mm3=float(claimed_tumor_volume_mm3),
         computed_tumor_volume_mm3=float(computed_tumor_volume_mm3),
-        claim_envelope_hash=hash_canonical_json(claim_envelope),
-        mask_derivation_policy_hash=hash_canonical_json(mask_derivation_policy),
-        tolerance_policy_hash=hash_canonical_json(tolerance_policy),
-        max_measurement_abs_error=float(max_measurement_abs_error),
-        relative_measurement_l2_error=float(relative_measurement_l2_error),
-        max_imaginary_leakage=float(max_imaginary_leakage),
-        max_ai_abs_error=float(max_ai_abs_error),
-        relative_ai_l2_error=float(relative_ai_l2_error),
-        mask_voxel_delta=int(mask_voxel_delta),
+        verified_mask_voxel_count=int(verified_mask_voxel_count),
+        voxel_volume_mm3=float(voxel_volume_mm3),
+        tolerance_metric=dict(tolerance_metric),
+    ).to_dict()
+
+
+def build_proof_core_evidence_trace(
+    *,
+    case_id: str,
+    profile_name: str,
+    profile_revision: str,
+    profile_digest: str,
+    icsd_policy_id: str,
+    icsd_policy_version: str,
+    verification_profile_descriptor: Mapping[str, Any],
+    ai_claim_envelope: Mapping[str, Any],
+    measurement_integrity_proof: Mapping[str, Any],
+    reconstruction_parity_proof: Mapping[str, Any],
+    segmentation_policy_proof: Mapping[str, Any],
+    volume_computation_proof: Mapping[str, Any],
+) -> dict[str, Any]:
+    stage_contracts = {
+        "MeasurementIntegrityProof": dict(measurement_integrity_proof),
+        "ReconstructionParityProof": dict(reconstruction_parity_proof),
+        "SegmentationPolicyProof": dict(segmentation_policy_proof),
+        "VolumeComputationProof": dict(volume_computation_proof),
+    }
+    return ProofCoreEvidenceTrace(
+        case_id=str(case_id),
+        profile_name=str(profile_name),
+        profile_revision=str(profile_revision),
+        profile_digest=str(profile_digest),
+        icsd_policy_id=str(icsd_policy_id),
+        icsd_policy_version=str(icsd_policy_version),
+        verification_profile_descriptor_hash=hash_canonical_json(
+            dict(verification_profile_descriptor)
+        ),
+        ai_claim_envelope_hash=hash_canonical_json(dict(ai_claim_envelope)),
+        canonical_stage_order=tuple(stage_contracts.keys()),
+        proof_stage_hashes={
+            proof_stage: hash_canonical_json(contract)
+            for proof_stage, contract in stage_contracts.items()
+        },
     ).to_dict()
 
 

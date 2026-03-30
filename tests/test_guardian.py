@@ -659,18 +659,18 @@ class MriGuardianHarnessTests(unittest.TestCase):
             manifest["profile_digest"],
         )
         self.assertEqual(
-            manifest["mask_verification"]["policy"]["algorithm"],
+            manifest["segmentation_policy_proof"]["policy"]["algorithm"],
             THRESHOLD_ALGORITHM,
         )
-        self.assertTrue(manifest["mask_verification"]["comparison"]["verified"])
-        self.assertEqual(manifest["mask_verification"]["comparison"]["voxel_delta"], 0)
-        self.assertEqual(manifest["mask_verification"]["threshold"], 2.5)
+        self.assertTrue(manifest["segmentation_policy_proof"]["comparison"]["verified"])
+        self.assertEqual(manifest["segmentation_policy_proof"]["comparison"]["voxel_delta"], 0)
+        self.assertEqual(manifest["segmentation_policy_proof"]["threshold"], 2.5)
         self.assertEqual(
             manifest["verification_tolerance_policy"]["icsd_policy_id"],
             manifest["icsd_policy_id"],
         )
         self.assertEqual(
-            manifest["verified_reconstruction_trace"]["profile_revision"],
+            manifest["proof_core_evidence_trace"]["profile_revision"],
             manifest["profile_revision"],
         )
         self.assertEqual(workstation_payload["profile_name"], DEFAULT_PROFILE_NAME)
@@ -680,12 +680,18 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertTrue(report["release_eligible"])
         self.assertEqual(report["contracts"]["verification_profile_descriptor"], report["profile"])
         self.assertEqual(
-            report["contracts"]["verified_reconstruction_trace"]["claim_envelope_hash"],
+            report["contracts"]["proof_core_evidence_trace"]["ai_claim_envelope_hash"],
             hash_canonical_json(report["contracts"]["ai_claim_envelope"]),
         )
         self.assertEqual(
-            report["contracts"]["verified_reconstruction_trace"]["tolerance_policy_hash"],
+            report["contracts"]["measurement_integrity_proof"]["tolerance_policy_hash"],
             hash_canonical_json(report["contracts"]["verification_tolerance_policy"]),
+        )
+        self.assertEqual(
+            report["contracts"]["proof_core_evidence_trace"]["proof_stage_hashes"][
+                "MeasurementIntegrityProof"
+            ],
+            hash_canonical_json(report["contracts"]["measurement_integrity_proof"]),
         )
         self.assertEqual(state["verification_profile_descriptor"], report["profile"])
 
@@ -1379,7 +1385,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
             hash_canonical_json(provenance_report["contracts"]["ai_claim_envelope"]),
         )
         self.assertEqual(
-            provenance_report["contracts"]["verified_reconstruction_trace"]["claim_envelope_hash"],
+            provenance_report["contracts"]["proof_core_evidence_trace"]["ai_claim_envelope_hash"],
             hash_canonical_json(provenance_report["contracts"]["ai_claim_envelope"]),
         )
 
@@ -1549,7 +1555,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
     def test_morphology_profile_releases_and_keeps_mask_policy_nested(self) -> None:
         _, result = self._release_demo_case(profile_name="brain_t1_morphology_review")
         manifest = result.after_state["verified_manifest"]
-        mask_verification = manifest["mask_verification"]
+        mask_verification = manifest["segmentation_policy_proof"]
 
         self.assertEqual(manifest["profile_name"], "brain_t1_morphology_review")
         self.assertEqual(
@@ -1574,7 +1580,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
     def test_component_profile_releases_and_keeps_mask_policy_nested(self) -> None:
         _, result = self._release_demo_case(profile_name="brain_t1_component_review")
         manifest = result.after_state["verified_manifest"]
-        mask_verification = manifest["mask_verification"]
+        mask_verification = manifest["segmentation_policy_proof"]
 
         self.assertEqual(manifest["profile_name"], "brain_t1_component_review")
         self.assertEqual(
@@ -1596,7 +1602,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
     def test_slice_profile_releases_and_keeps_mask_policy_nested(self) -> None:
         _, result = self._release_demo_case(profile_name="brain_t1_slice_review")
         manifest = result.after_state["verified_manifest"]
-        mask_verification = manifest["mask_verification"]
+        mask_verification = manifest["segmentation_policy_proof"]
 
         self.assertEqual(manifest["profile_name"], "brain_t1_slice_review")
         self.assertEqual(
@@ -1666,7 +1672,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(report["decision_summary"]["block_category"], "none")
         self.assertTrue(report["decision_summary"]["operator_review_required"])
         self.assertEqual(report["decision"]["decision_class"], "verified_with_advisory")
-        self.assertEqual(report["decision"]["evaluation_stage"], "clinical_plausibility")
+        self.assertEqual(report["decision"]["pipeline_phase"], "clinical_plausibility")
         self.assertTrue(report["decision"]["success_modifiers"]["has_non_blocking_advisory"])
         self.assertEqual(report["manifest"]["clinical_plausibility"]["warning_count"], 2)
         self.assertEqual(report["manifest"]["clinical_plausibility"]["status"], "warning")
@@ -1685,7 +1691,10 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertTrue(report["release_eligible"])
         self.assertTrue(report["decision_summary"]["operator_review_required"])
         self.assertEqual(report["decision"]["decision_class"], "verified_with_advisory")
-        self.assertEqual(report["verification_tiers"]["level_3"]["status"], "warning")
+        self.assertEqual(
+            report["verification_pipeline"]["phases"]["clinical_plausibility"]["status"],
+            "warning",
+        )
         self.assertEqual(report["manifest"]["clinical_plausibility"]["warning_count"], 1)
         self.assertEqual(view_model["verification"]["headline"], "Verification PASSED WITH ADVISORY")
         self.assertEqual(view_model["verification"]["tiers"][2]["status_label"], "ADVISORY WARN")
@@ -1699,11 +1708,14 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(report["decision_summary"]["profile_policy_status"], "blocked")
         self.assertEqual(report["decision_summary"]["block_category"], "heuristic_block")
         self.assertEqual(report["decision"]["decision_class"], "blocked_policy")
-        self.assertEqual(report["decision"]["evaluation_stage"], "policy_evaluation")
+        self.assertEqual(report["decision"]["pipeline_phase"], "policy_evaluation")
         self.assertEqual(report["failure_reasons"][0]["category"], "heuristic_block")
         self.assertEqual(report["failure_reasons"][0]["code"], "slice_span")
         self.assertEqual(report["manifest"]["clinical_plausibility"]["blocking_failure_count"], 1)
-        self.assertEqual(report["verification_tiers"]["level_3"]["status"], "failed")
+        self.assertEqual(
+            report["verification_pipeline"]["phases"]["policy_evaluation"]["status"],
+            "blocked",
+        )
 
     def test_fast_triage_profile_is_non_final_and_rejected_for_release(self) -> None:
         state = build_demo_case(profile_name="fast_triage_mode")
@@ -1781,20 +1793,23 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(report["decision_summary"]["proof_status"], "failed")
         self.assertEqual(report["decision_summary"]["block_category"], "proof_failure")
         self.assertEqual(report["decision"]["decision_class"], "blocked_physical")
-        self.assertEqual(report["decision"]["evaluation_stage"], "physical_consistency")
+        self.assertEqual(report["decision"]["pipeline_phase"], "proof_core")
+        self.assertEqual(report["decision"]["proof_stage"], "ReconstructionParityProof")
         self.assertTrue(report["decision"]["success_modifiers"]["near_proof_threshold"])
         self.assertEqual(report["failure_reasons"][0]["code"], "intensity_manipulation_detected")
         self.assertEqual(report["analysis"]["reconstruction_mismatch_voxel_count"], 0)
         self.assertLess(report["analysis"]["max_ai_abs_error"], 1e-9)
         self.assertGreater(report["analysis"]["relative_ai_l2_error"], 1e-12)
         self.assertEqual(
-            report["manifest"]["ai_reconstruction_match"]["metrics"]["per_voxel_abs_error"][
+            report["manifest"]["reconstruction_parity_proof"]["metrics"]["per_voxel_abs_error"][
                 "boundary_status"
             ],
             "near_boundary",
         )
         self.assertEqual(
-            report["manifest"]["ai_reconstruction_match"]["metrics"]["global_relative_l2_error"][
+            report["manifest"]["reconstruction_parity_proof"]["metrics"][
+                "global_relative_l2_error"
+            ][
                 "boundary_status"
             ],
             "exceeded",
@@ -1815,7 +1830,8 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
         self.assertTrue(report["release_eligible"])
         self.assertEqual(report["decision"]["decision_class"], "verified_boundary_hugging")
-        self.assertEqual(report["decision"]["evaluation_stage"], "physical_consistency")
+        self.assertEqual(report["decision"]["pipeline_phase"], "proof_core")
+        self.assertEqual(report["decision"]["proof_stage"], "VolumeComputationProof")
         self.assertTrue(report["decision"]["success_modifiers"]["near_proof_threshold"])
         self.assertFalse(report["decision"]["success_modifiers"]["has_non_blocking_advisory"])
         self.assertIn(
@@ -1849,7 +1865,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
         self.assertFalse(report["release_eligible"])
         self.assertEqual(report["decision"]["decision_class"], "blocked_structural")
-        self.assertEqual(report["decision"]["evaluation_stage"], "intake_validation")
+        self.assertEqual(report["decision"]["pipeline_phase"], "intake_validation")
         self.assertEqual(report["decision_summary"]["block_category"], "structural_failure")
         self.assertIsNotNone(report["analysis"]["input_state_hash"])
         self.assertEqual(view_model["verification"]["headline"], "Structural BLOCKED")
@@ -1887,8 +1903,11 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
         self.assertFalse(report["release_eligible"])
         self.assertEqual(report["decision"]["decision_class"], "blocked_structural")
-        self.assertEqual(report["decision"]["evaluation_stage"], "structural_validity")
-        self.assertEqual(report["verification_tiers"]["level_2"]["status"], "not_evaluated")
+        self.assertEqual(report["decision"]["pipeline_phase"], "structural_validity")
+        self.assertEqual(
+            report["verification_pipeline"]["phases"]["proof_core"]["status"],
+            "not_evaluated",
+        )
         self.assertEqual(pacs_block["study"]["case_id"], "unknown-case")
         self.assertEqual(
             pacs_block["verification_summary"]["canonical_decision"]["decision_class"],
@@ -2270,7 +2289,9 @@ class MriGuardianHarnessTests(unittest.TestCase):
             MORPHOLOGY_ALGORITHM,
         )
         self.assertGreater(
-            morphology_report["manifest"]["mask_verification"]["comparison"]["voxel_delta"],
+            morphology_report["manifest"]["segmentation_policy_proof"]["comparison"][
+                "voxel_delta"
+            ],
             0,
         )
 
@@ -2298,7 +2319,9 @@ class MriGuardianHarnessTests(unittest.TestCase):
             CONNECTED_COMPONENT_ALGORITHM,
         )
         self.assertGreater(
-            component_report["manifest"]["mask_verification"]["comparison"]["voxel_delta"],
+            component_report["manifest"]["segmentation_policy_proof"]["comparison"][
+                "voxel_delta"
+            ],
             0,
         )
 
@@ -2326,7 +2349,9 @@ class MriGuardianHarnessTests(unittest.TestCase):
             SLICE_CONSISTENCY_ALGORITHM,
         )
         self.assertGreater(
-            slice_report["manifest"]["mask_verification"]["comparison"]["voxel_delta"],
+            slice_report["manifest"]["segmentation_policy_proof"]["comparison"][
+                "voxel_delta"
+            ],
             0,
         )
 
@@ -2895,7 +2920,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertIn("Verification FAILED", html)
         self.assertIn("mask_voxel_mismatch", html)
         self.assertIn("Level 1: Structural Validity", html)
-        self.assertIn("Level 2: Physical Consistency", html)
+        self.assertIn("Level 2: Proof Core", html)
         self.assertIn("Level 3: Clinical Plausibility", html)
         self.assertIn("Streaming / Partial Validation", html)
 
@@ -2975,6 +3000,29 @@ class MriGuardianHarnessTests(unittest.TestCase):
             SLICE_CONSISTENCY_ALGORITHM,
         )
 
+    def test_measurement_domain_tamper_fixes_primary_proof_stage(self) -> None:
+        entry = next(
+            item
+            for item in build_verification_threat_corpus()["entries"]
+            if item["slug"] == "measurement_domain_tamper"
+        )
+        report = build_case_verification_report(
+            entry["state"],
+            profile_name=entry["profile_name"],
+        )
+
+        self.assertFalse(report["release_eligible"])
+        self.assertEqual(report["decision"]["decision_class"], "blocked_physical")
+        self.assertEqual(report["decision"]["pipeline_phase"], "proof_core")
+        self.assertEqual(report["decision"]["proof_stage"], "MeasurementIntegrityProof")
+        self.assertEqual(report["failure_reasons"][0]["code"], "raw_measurement_inconsistency")
+        self.assertEqual(
+            report["verification_pipeline"]["phases"]["proof_core"]["proof_stages"][0][
+                "proof_stage"
+            ],
+            "MeasurementIntegrityProof",
+        )
+
     def test_verification_threat_corpus_lists_required_entries_with_valid_metadata(
         self,
     ) -> None:
@@ -2994,6 +3042,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
             {
                 "fake_tumour",
                 "shifted_mask",
+                "measurement_domain_tamper",
                 "intensity_manipulation",
                 "subtle_distributed_perturbation",
                 "structured_ringing_artefact",
@@ -3042,6 +3091,22 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 self.assertIn("builder_id", contract)
                 self.assertIn("fixed_inputs", contract)
                 self.assertIn("seed_strategy", contract)
+                self.assertIn(
+                    entry["pipeline_phase"],
+                    {"proof_core", "multi_series_aggregation"},
+                )
+                if entry["pipeline_phase"] == "proof_core":
+                    self.assertIn(
+                        entry["proof_stage"],
+                        {
+                            "MeasurementIntegrityProof",
+                            "ReconstructionParityProof",
+                            "SegmentationPolicyProof",
+                            "VolumeComputationProof",
+                        },
+                    )
+                else:
+                    self.assertNotIn("proof_stage", entry)
                 roles = {item["control_role"] for item in entry["mitigation_mapping"]}
                 if entry["corpus_status"] == "active":
                     self.assertTrue(
@@ -3119,6 +3184,14 @@ class MriGuardianHarnessTests(unittest.TestCase):
                     route_by_decision_class[report["decision"]["decision_class"]],
                     entry["normative_invariants"]["expected_failure_route"],
                 )
+                self.assertEqual(
+                    report["decision"]["pipeline_phase"],
+                    entry["pipeline_phase"],
+                )
+                if "proof_stage" in entry:
+                    self.assertEqual(report["decision"]["proof_stage"], entry["proof_stage"])
+                else:
+                    self.assertNotIn("proof_stage", report["decision"])
                 expected_block_category = entry["observational_expectations"].get(
                     "expected_block_category"
                 )
@@ -3151,6 +3224,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
             {
                 "fake_tumour",
                 "shifted_mask",
+                "measurement_domain_tamper",
                 "intensity_manipulation",
                 "subtle_distributed_perturbation",
                 "mask_erosion",
@@ -3177,9 +3251,10 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
 
         self.assertEqual(report["decision"]["decision_class"], "blocked_physical")
-        self.assertEqual(report["decision"]["evaluation_stage"], "physical_consistency")
+        self.assertEqual(report["decision"]["pipeline_phase"], "proof_core")
+        self.assertEqual(report["decision"]["proof_stage"], "SegmentationPolicyProof")
         self.assertIn(
-            {"stage": "structural_validity", "outcome": "passed"},
+            {"pipeline_phase": "structural_validity", "outcome": "passed"},
             report["decision"]["decision_lineage"],
         )
         self.assertEqual(report["failure_reasons"][0]["code"], "mask_voxel_mismatch")

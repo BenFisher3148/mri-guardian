@@ -77,7 +77,7 @@ The verified-mask layer uses a fixed approved algorithm catalogue and canonical 
 | [`mri_guardian/harness.py`](../mri_guardian/harness.py) | Core verification transition, deterministic reconstruction, release gate, and manifest generation. |
 | [`mri_guardian/mask_engine.py`](../mri_guardian/mask_engine.py) | Fixed approved mask-algorithm catalogue, canonical parameter normalization, and deterministic dispatcher. |
 | [`mri_guardian/profiles.py`](../mri_guardian/profiles.py) | Runtime profile registry, canonical descriptor hashing, and mapping to ICSD invariant policy identities. |
-| [`mri_guardian/contracts.py`](../mri_guardian/contracts.py) | Explicit claim-to-proof interfaces: `AIClaimEnvelope`, `MaskDerivationPolicy`, `VerificationTolerancePolicy`, `VerifiedReconstructionTrace`, `PriorVerifiedContext`, and `TemporalConsistencyTrace`. |
+| [`mri_guardian/contracts.py`](../mri_guardian/contracts.py) | Explicit claim-to-proof interfaces: `AIClaimEnvelope`, `MaskDerivationPolicy`, `VerificationTolerancePolicy`, the four proof-core contracts, strictly derived `ProofCoreEvidenceTrace`, `PriorVerifiedContext`, and `TemporalConsistencyTrace`. |
 | [`mri_guardian/integration.py`](../mri_guardian/integration.py) | Mocked DICOM ingress, PACS egress, and hospital integration narrative. |
 | [`mri_guardian/bundle.py`](../mri_guardian/bundle.py) | Portable `.mri-guard-bundle` writer and deterministic replay verifier. |
 | [`mri_guardian/timing.py`](../mri_guardian/timing.py) | Benchmark ladder, worst-case bound derivation, and streaming-validation strategy. |
@@ -90,11 +90,12 @@ The verified-mask layer uses a fixed approved algorithm catalogue and canonical 
 1. Ingest raw k-space, AI reconstruction, AI mask, voxel spacing, and claimed tumour volume.
 2. Run Level 1 structural validity checks over identifiers, tensor shape, numeric finiteness, and release-state shape.
 3. Reconstruct the image from raw k-space with an inverse FFT.
-4. Reproject that reconstruction into frequency space and compare it with the supplied measurements.
-5. Compare the AI reconstruction with the raw-derived reconstruction using explicit per-voxel and global-norm tolerances.
-6. Resolve the runtime profile's mask policy canonically, derive the verified mask with the approved dispatcher, and compare it with the AI mask.
-7. Recompute tumour volume from verified voxels and voxel spacing.
-8. Optionally evaluate Level 3 longitudinal context:
+4. Materialize `MeasurementIntegrityProof` by reprojecting that reconstruction into frequency space and comparing it with the supplied measurements under policy.
+5. Materialize `ReconstructionParityProof` by comparing the AI reconstruction with the raw-derived reconstruction using explicit per-voxel and global-norm tolerances.
+6. Materialize `SegmentationPolicyProof` by resolving the runtime profile's mask policy canonically, deriving the verified mask with the approved dispatcher, and comparing it with the AI mask.
+7. Materialize `VolumeComputationProof` by recomputing tumour volume from verified voxels and voxel spacing.
+8. Derive `ProofCoreEvidenceTrace` only from the already-materialized proof-stage artefacts plus claim/profile identity.
+9. Optionally evaluate Level 3 longitudinal context:
    - deterministically canonicalize `prior_verified_contexts` or the legacy single `prior_verified_context`
    - select an admissible primary prior with `LongitudinalSelectionTrace`
    - compute `TemporalTrajectoryTrace` over the selected multi-prior history
@@ -106,13 +107,13 @@ The verified-mask layer uses a fixed approved algorithm catalogue and canonical 
    - affine-only mismatches may upgrade into deterministic `registered` comparison when registration quality passes the profile floor
    - geometry-limited cases may otherwise fall back to scalar `volume_only` comparison
    - interval `> 3650` days suppresses all temporal comparison by policy
-9. If deterministic proof passes and the selected profile permits final release, emit:
+10. If deterministic proof passes and the selected profile permits final release, emit:
    - `verified_manifest`
    - `workstation_payload`
    - ICSD evidence
    - transparency receipt
    - portable bundle
-10. If proof fails, a blocking heuristic fails, or the profile is non-final, block the Guardian handoff and emit explicit failure reasons with separate `proof_failure`, `heuristic_block`, or `profile_policy_block` categories.
+11. If proof fails, a blocking heuristic fails, or the profile is non-final, block the Guardian handoff and emit explicit failure reasons with separate `proof_failure`, `heuristic_block`, or `profile_policy_block` categories.
 
 ## Decision Contract
 
@@ -122,15 +123,24 @@ The report contract now separates hard release semantics from richer monitoring 
 - `decision.decision_class` is the canonical semantic class for dashboards, summaries, and trend analysis.
 - `decision_summary` remains available for compatibility, but it should not be the source of truth for new logic.
 
-Fixed `decision.evaluation_stage` values:
+The canonical `verification_pipeline` is the assurance-flow schema and evidence-ordering model. It does not mandate runtime execution topology.
+
+Fixed `decision.pipeline_phase` values:
 
 - `intake_validation`
 - `structural_validity`
-- `physical_consistency`
+- `proof_core`
 - `clinical_plausibility`
 - `policy_evaluation`
 - `multi_series_aggregation`
 - `release_control`
+
+Inside `proof_core`, the canonical ordered proof stages are:
+
+- `MeasurementIntegrityProof`
+- `ReconstructionParityProof`
+- `SegmentationPolicyProof`
+- `VolumeComputationProof`
 
 Deterministic reason ordering:
 
@@ -161,7 +171,7 @@ Deterministic reason ordering:
 | Tier | Purpose | Blocking |
 | --- | --- | --- |
 | Level 1 | Structural validity for ICSD and state-shape correctness | Yes |
-| Level 2 | Physical consistency from raw k-space to reconstruction, mask, and volume | Yes |
+| Level 2 | Proof core over measurement anchoring, reconstruction parity, segmentation policy, and volume computation | Yes |
 | Level 3 | Profile-scoped clinical plausibility heuristics | Profile-dependent |
 
 Within Level 3, longitudinal verification is now a first-class single-series sub-path. It consumes one or more `PriorVerifiedContext` payloads, produces `LongitudinalSelectionTrace`, `TemporalTrajectoryTrace`, `LongitudinalRegistrationTrace`, and `TemporalConsistencyTrace`, and surfaces `comparison_status`, `comparison_scope`, and `spatial_comparison_mode` explicitly so viewer, integration, and replay code do not infer temporal meaning from prose.
@@ -185,7 +195,7 @@ The Guardian Layer emits several artifact classes:
 
 - state artifacts: `released_state.json`, `workstation_payload.json`
 - proof artifacts: `evidence.json`, `bundle_verification.json`, `.mri-guard-bundle`
-- contract artifacts: `verification_profile.json`, `verification_profile_descriptor.json`, `ai_claim_envelope.json`, `verified_reconstruction_trace.json`, `mask_derivation_policy.json`, `verification_tolerance_policy.json`, plus longitudinal artifacts such as `prior_verified_contexts.json`, `prior_verified_context.json`, `longitudinal_selection_trace.json`, `temporal_trajectory_trace.json`, `longitudinal_registration_trace.json`, and `temporal_consistency_trace.json` when longitudinal context is supplied
+- contract artifacts: `verification_profile.json`, `verification_profile_descriptor.json`, `ai_claim_envelope.json`, `measurement_integrity_proof.json`, `reconstruction_parity_proof.json`, `segmentation_policy_proof.json`, `volume_computation_proof.json`, `proof_core_evidence_trace.json`, `mask_derivation_policy.json`, `verification_tolerance_policy.json`, plus longitudinal artifacts such as `prior_verified_contexts.json`, `prior_verified_context.json`, `longitudinal_selection_trace.json`, `temporal_trajectory_trace.json`, `longitudinal_registration_trace.json`, and `temporal_consistency_trace.json` when longitudinal context is supplied
 - integration artifacts: `dicom_input.json`, `integration_narrative.json`, `pacs_submission.json`, `integration_trace.json`
 - performance artifacts: `performance_profile.json`
 

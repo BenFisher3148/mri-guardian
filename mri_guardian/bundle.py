@@ -75,6 +75,21 @@ _OPTIONAL_BUNDLE_MEMBERS = (
 )
 
 
+def _pipeline_phase_statuses(report: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        key: str(value["status"])
+        for key, value in report["verification_pipeline"]["phases"].items()
+    }
+
+
+def _proof_stage_statuses(report: Mapping[str, Any]) -> dict[str, str]:
+    proof_core = report["verification_pipeline"]["phases"].get("proof_core", {})
+    return {
+        str(item["proof_stage"]): str(item["status"])
+        for item in proof_core.get("proof_stages", [])
+    }
+
+
 def write_portable_evidence_bundle(
     *,
     result: TransitionResult,
@@ -379,8 +394,9 @@ def _build_bundle_manifest(
         "verification_tolerance_policy_hash": hash_canonical_json(
             contracts["verification_tolerance_policy"]
         ),
-        "verified_reconstruction_trace_hash": hash_canonical_json(
-            contracts["verified_reconstruction_trace"]
+        "proof_stage_hashes": dict(contracts["proof_core_evidence_trace"]["proof_stage_hashes"]),
+        "proof_core_evidence_trace_hash": hash_canonical_json(
+            contracts["proof_core_evidence_trace"]
         ),
         "temporal_consistency_trace_hash": hash_canonical_json(
             contracts["temporal_consistency_trace"]
@@ -435,9 +451,8 @@ def _build_bundle_manifest(
             "decision": report["decision"],
             "decision_summary": report["decision_summary"],
             "failure_reasons": report["failure_reasons"],
-            "tiers": {
-                key: value["status"] for key, value in report["verification_tiers"].items()
-            },
+            "pipeline_phase_statuses": _pipeline_phase_statuses(report),
+            "proof_stage_statuses": _proof_stage_statuses(report),
         },
         "deterministic_replay": {
             "supported": True,
@@ -467,7 +482,7 @@ def _build_bundle_transcript(
     evidence_payload: Mapping[str, Any],
     receipt_entry: Mapping[str, Any],
     checkpoint: str | None,
-) -> dict[str, Any]:
+ ) -> dict[str, Any]:
     if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
         return _build_multi_series_bundle_transcript(
             state=state,
@@ -478,7 +493,8 @@ def _build_bundle_transcript(
         )
     analysis = report["analysis"]
     manifest = report["manifest"]
-    tiers = report["verification_tiers"]
+    verification_pipeline = report["verification_pipeline"]
+    proof_core = verification_pipeline["phases"]["proof_core"]
     return {
         "schema_version": _BUNDLE_SCHEMA_VERSION,
         "transcript_type": "portable_mri_guard_transcript",
@@ -507,36 +523,84 @@ def _build_bundle_transcript(
                 },
             },
             {
-                "stage": "reconstruction",
-                "summary": "Recomputed the Guardian Layer reconstruction directly from raw k-space.",
+                "stage": "measurement_integrity_proof",
+                "summary": (
+                    "Materialized the measurement-domain proof that anchors the derived "
+                    "reconstruction to the supplied raw measurements within policy."
+                ),
                 "details": {
                     "reconstruction_hash": analysis["derived_reconstruction_hash"],
                     "forward_projection_hash": analysis["forward_projection_hash"],
                     "max_measurement_abs_error": analysis["max_measurement_abs_error"],
+                    "relative_measurement_l2_error": analysis["relative_measurement_l2_error"],
                     "max_imaginary_leakage": analysis["max_imaginary_leakage"],
                 },
             },
             {
-                "stage": "mask_and_volume",
-                "summary": "Checked the AI tumour claim against the deterministic verified mask and voxel geometry.",
+                "stage": "reconstruction_parity_proof",
+                "summary": (
+                    "Materialized the reconstruction-parity proof between the AI image "
+                    "and the raw-derived reconstruction."
+                ),
+                "details": {
+                    "ai_reconstruction_hash": analysis["ai_reconstruction_hash"],
+                    "derived_reconstruction_hash": analysis["derived_reconstruction_hash"],
+                    "max_ai_abs_error": analysis["max_ai_abs_error"],
+                    "relative_ai_l2_error": analysis["relative_ai_l2_error"],
+                },
+            },
+            {
+                "stage": "segmentation_policy_proof",
+                "summary": (
+                    "Materialized the segmentation-policy proof between the AI mask and "
+                    "the policy-derived verified mask."
+                ),
                 "details": {
                     "ai_mask_hash": analysis["ai_mask_hash"],
                     "verified_mask_hash": analysis["verified_mask_hash"],
                     "mask_voxel_delta": analysis["mask_voxel_delta"],
-                    "claimed_tumor_volume_mm3": manifest["tumor_volume_proof"]["claimed_mm3"],
-                    "verified_tumor_volume_mm3": manifest["tumor_volume_proof"]["computed_mm3"],
                 },
             },
             {
-                "stage": "verification_tiers",
-                "summary": "Applied Level 1 structural validity, Level 2 physical consistency, and Level 3 clinical plausibility.",
+                "stage": "volume_computation_proof",
+                "summary": (
+                    "Materialized the volume-computation proof from the verified mask, "
+                    "voxel geometry, and claimed scalar quantity."
+                ),
                 "details": {
-                    key: {
-                        "title": tier["title"],
-                        "status": tier["status"],
-                        "summary": tier["summary"],
-                    }
-                    for key, tier in tiers.items()
+                    "claimed_tumor_volume_mm3": manifest["volume_computation_proof"][
+                        "claimed_mm3"
+                    ],
+                    "verified_tumor_volume_mm3": manifest["volume_computation_proof"][
+                        "computed_mm3"
+                    ],
+                    "verified_mask_voxel_count": manifest["volume_computation_proof"][
+                        "voxel_count"
+                    ],
+                    "voxel_volume_mm3": manifest["volume_computation_proof"][
+                        "voxel_volume_mm3"
+                    ],
+                },
+            },
+            {
+                "stage": "proof_core_evidence_trace",
+                "summary": (
+                    "Aggregated the already-materialized proof-stage artefacts into the "
+                    "strictly derived proof-core evidence trace."
+                ),
+                "details": dict(report["contracts"]["proof_core_evidence_trace"]),
+            },
+            {
+                "stage": "verification_pipeline",
+                "summary": (
+                    "Recorded the canonical assurance-flow schema and evidence-ordering "
+                    "model for this case."
+                ),
+                "details": {
+                    "ordering_semantics": verification_pipeline["ordering_semantics"],
+                    "pipeline_phase_statuses": _pipeline_phase_statuses(report),
+                    "proof_stage_statuses": _proof_stage_statuses(report),
+                    "proof_core_status": proof_core["status"],
                 },
             },
             {
@@ -1016,9 +1080,7 @@ def _build_multi_series_bundle_manifest(
             "decision": report["decision"],
             "decision_summary": report["decision_summary"],
             "failure_reasons": report["failure_reasons"],
-            "tiers": {
-                key: value["status"] for key, value in report["verification_tiers"].items()
-            },
+            "pipeline_phase_statuses": _pipeline_phase_statuses(report),
             "released_series_ids": report["analysis"]["released_series_ids"],
             "withheld_series_ids": report["analysis"]["withheld_series_ids"],
         },

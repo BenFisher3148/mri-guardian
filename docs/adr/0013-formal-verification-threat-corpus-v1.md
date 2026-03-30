@@ -42,6 +42,8 @@ Introduce an additive formal verification threat corpus in
   - human-facing `slug`, `title`, and `description`
   - `scenario_family`
   - controlled `scenario_surface`
+  - canonical `pipeline_phase`
+  - optional canonical `proof_stage` when `pipeline_phase = proof_core`
   - `corpus_status`
   - `technical_failure_mechanism`
   - `clinical_hazard`
@@ -81,6 +83,9 @@ Introduce an additive formal verification threat corpus in
   - structurally admissible
   - blocked because lesion corroboration fails
   - distinct from `required_series_geometry_mismatch`
+- `measurement_domain_tamper` is added as an active executable scenario so
+  `MeasurementIntegrityProof` has direct corpus coverage rather than only
+  implied upstream coverage.
 
 ## Consequences
 
@@ -88,8 +93,9 @@ Introduce an additive formal verification threat corpus in
   outputs, tests, and documentation.
 - Threat metadata is queryable and stable enough for clinical-risk mapping and
   future coverage checks.
-- Existing tamper-mode consumers keep the curated compatibility subset without
-  needing proof-contract or decision-schema changes.
+- Existing tamper-mode consumers keep the curated compatibility subset even
+  though the canonical decision and proof schema now use `verification_pipeline`
+  plus optional `decision.proof_stage`.
 - Future threat additions must preserve the normative/observational expectation
   split and the deterministic-builder boundary rather than accumulating
   free-form scenario text.

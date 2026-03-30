@@ -54,7 +54,7 @@ The core rule is simple: the downstream PACS/workstation never receives AI-suppl
 The verification envelope is now split into three explainability tiers:
 
 - Level 1: Structural validity. ICSD-facing checks over identifiers, numeric tensors, voxel geometry, and release-state shape.
-- Level 2: Physical consistency. Raw k-space reprojection, deterministic reconstruction parity, mask parity, and tumour-volume proof.
+- Level 2: Proof core. Measurement anchoring, deterministic reconstruction parity, segmentation policy, and tumour-volume proof.
 - Level 3: Clinical plausibility. Profile-scoped heuristics over the verified anatomy, with centrally defined `disabled`, `advisory`, `warning`, and `blocking` semantics.
 
 The repository now also supports an additive `multi_series_v2` study container. In that path:
@@ -167,7 +167,7 @@ in a qualifying no-gap run of consecutive slices, not by label rank.
 ## Structure
 
 - [mri_guardian/bundle.py](mri_guardian/bundle.py) builds and verifies portable `.mri-guard-bundle` proof artifacts.
-- [mri_guardian/contracts.py](mri_guardian/contracts.py) defines the reusable claim/proof and longitudinal interfaces, including `AIClaimEnvelope`, `VerifiedReconstructionTrace`, `PriorVerifiedContext`, and `TemporalConsistencyTrace`.
+- [mri_guardian/contracts.py](mri_guardian/contracts.py) defines the reusable claim/proof and longitudinal interfaces, including `AIClaimEnvelope`, the four proof-core contracts, strictly derived `ProofCoreEvidenceTrace`, `PriorVerifiedContext`, and `TemporalConsistencyTrace`.
 - [mri_guardian/harness.py](mri_guardian/harness.py) defines the release transition, invariants, deterministic reconstruction checks, and manifest generation.
 - [mri_guardian/integration.py](mri_guardian/integration.py) mocks the DICOM ingress and PACS egress contracts around the verification proxy.
 - [mri_guardian/mask_engine.py](mri_guardian/mask_engine.py) defines the fixed approved mask-algorithm catalogue, canonical parameter resolution, and deterministic dispatcher.
@@ -258,7 +258,11 @@ Inspect the explicit claim-to-proof interfaces:
 - `demo_artifacts/ai_claim_envelope.json`
 - `demo_artifacts/verification_profile.json`
 - `demo_artifacts/verification_profile_descriptor.json`
-- `demo_artifacts/verified_reconstruction_trace.json`
+- `demo_artifacts/measurement_integrity_proof.json`
+- `demo_artifacts/reconstruction_parity_proof.json`
+- `demo_artifacts/segmentation_policy_proof.json`
+- `demo_artifacts/volume_computation_proof.json`
+- `demo_artifacts/proof_core_evidence_trace.json`
 - `demo_artifacts/mask_derivation_policy.json`
 - `demo_artifacts/verification_tolerance_policy.json`
 - `demo_artifacts/prior_verified_contexts.json` when longitudinal source priors are supplied
@@ -323,7 +327,11 @@ That interface is now explicit rather than implied. The harness emits:
 - `MaskDerivationPolicy`: the approved deterministic algorithm identity and canonical resolved parameters that turn a raw-derived reconstruction into the admissible mask
 - `VerificationTolerancePolicy`: the attack-aware tolerance contract that states which metrics are per-voxel, global-norm, and frequency-domain
 - `VerificationProfileDescriptor`: the canonical runtime profile contract with `profile_name`, `profile_revision`, `profile_digest`, release semantics, authority requirements, heuristics, and performance expectations
-- `VerifiedReconstructionTrace`: the proof object that links the raw measurements, derived reconstruction, mask policy, and verified volume back to the original claim
+- `MeasurementIntegrityProof`: the proof that the raw-derived reconstruction remains anchored to the measurement domain within policy
+- `ReconstructionParityProof`: the proof that the AI reconstruction matches the raw-derived reconstruction within policy
+- `SegmentationPolicyProof`: the proof that the AI mask matches the policy-derived verified mask
+- `VolumeComputationProof`: the proof that the claimed scalar volume matches verified-mask geometry
+- `ProofCoreEvidenceTrace`: a strictly derived aggregation of the already-materialized proof-stage artefacts; it contains no independent verdicts and does not recompute proof outcomes
 - `PriorVerifiedContext`: the compact canonical summary of one admissible prior Guardian-verified comparator
 - `LongitudinalSelectionTrace`: deterministic primary-prior selection over the supplied longitudinal source set
 - `TemporalTrajectoryTrace`: deterministic multi-prior trajectory classification, usable-interval summaries, and trajectory flags
@@ -345,15 +353,26 @@ Verification reports now expose two decision layers:
 - the hard handoff gate remains `release_eligible` plus the final released/blocked disposition
 - the additive canonical `decision` object carries the richer monitoring class used by new dashboards and summaries
 
-The canonical `decision` object fixes `evaluation_stage` to one of:
+The canonical `verification_pipeline` is the assurance-flow schema and evidence-ordering model. It does not mandate runtime execution topology.
+
+Its fixed pipeline phases are:
 
 - `intake_validation`
 - `structural_validity`
-- `physical_consistency`
+- `proof_core`
 - `clinical_plausibility`
 - `policy_evaluation`
 - `multi_series_aggregation`
 - `release_control`
+
+Inside `proof_core`, the ordered non-skippable proof stages are:
+
+- `MeasurementIntegrityProof`
+- `ReconstructionParityProof`
+- `SegmentationPolicyProof`
+- `VolumeComputationProof`
+
+The canonical `decision` object now uses `pipeline_phase` plus optional `proof_stage` rather than the older `evaluation_stage` field.
 
 The canonical `decision.decision_class` values are:
 

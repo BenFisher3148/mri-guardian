@@ -105,7 +105,11 @@ Defined in [`../mri_guardian/contracts.py`](../mri_guardian/contracts.py).
 | `AIClaimEnvelope` | AI-side claim over reconstruction, mask, volume, and optional declared AI stack identity | case identity, `raw_kspace_hash`, AI output hashes, claimed volume, optional `ai_stack_identity` |
 | `MaskDerivationPolicy` | Deterministic mapping from raw-derived reconstruction to verified mask | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, proof-significant `algorithm`, and canonical resolved `parameters` |
 | `VerificationTolerancePolicy` | Explicit numeric tolerance contract | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, per-voxel, per-frequency, global-norm, imaginary leakage, and volume tolerances |
-| `VerifiedReconstructionTrace` | Proof trace from raw k-space to verified reconstruction, mask, and volume | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, raw hash, derived hash, verified mask hash, measurement metrics, claim comparison metrics |
+| `MeasurementIntegrityProof` | Proof that the raw-derived reconstruction remains anchored to the measurement domain within policy | `raw_kspace_hash`, `derived_reconstruction_hash`, `forward_projection_hash`, `verified`, `metrics`, claim/profile linkage hashes |
+| `ReconstructionParityProof` | Proof that the AI reconstruction matches the raw-derived reconstruction within policy | `ai_reconstruction_hash`, `derived_reconstruction_hash`, `verified`, `metrics`, claim/profile linkage hashes |
+| `SegmentationPolicyProof` | Proof that the AI mask matches the policy-derived verified mask | `ai_mask_hash`, `verified_mask_hash`, `verified`, `comparison`, claim/profile linkage hashes |
+| `VolumeComputationProof` | Proof that the claimed scalar volume matches verified-mask geometry within policy | claimed/computed volume, verified voxel count, voxel volume, tolerance metric, verified flag |
+| `ProofCoreEvidenceTrace` | Strictly derived replay spine over the already-materialized proof-stage artefacts | `verification_profile_descriptor_hash`, `ai_claim_envelope_hash`, canonical proof-stage order, `proof_stage_hashes` |
 | `PriorVerifiedContext` | Compact canonical summary of one admissible prior Guardian-verified comparator | prior bundle/report hashes, prior profile identity, prior release class, prior verified mask, verified volume, timestamp provenance, and geometry |
 | `TemporalConsistencyTrace` | Deterministic single-series Level 3 temporal trace | `comparison_status`, `comparison_scope`, `prior_admissibility`, `chronology_assessment`, `geometry_assessment`, `computed_metrics`, `flags`, `skipped_metrics` |
 | `LongitudinalSelectionTrace` | Deterministic selection trace over supplied prior contexts | supplied count, selected count, primary-selection mode, per-prior admissibility and selection outcomes |
@@ -154,14 +158,14 @@ Defined in [`../mri_guardian/contracts.py`](../mri_guardian/contracts.py).
 - Slice-consistency overlap is evaluated as non-empty intersection of adjacent components' `(y, x)` footprint sets on slices `z` and `z+1`; skipped-slice bridging is not permitted.
 - Runtime metadata from mask execution, such as timing or internal operation counts, is intentionally excluded from proof artifacts.
 
-### Mask Verification Shape
+### Segmentation Policy Proof Shape
 
-Released manifests expose `mask_verification` in two logical sections:
+Released manifests expose `segmentation_policy_proof` in two logical sections:
 
 - `policy`: canonical `algorithm` plus canonical resolved `parameters`
 - `comparison`: exact-match outcome over AI vs verified mask, including voxel counts and deltas
 
-Flat compatibility aliases may still appear during the transition, but future non-threshold families should rely on canonical `mask_rules` and `policy`/`comparison` structure rather than `mask_threshold`.
+The older `mask_verification` naming is retired from the canonical manifest schema.
 
 ### Longitudinal Verification Shape
 
@@ -215,11 +219,12 @@ Flat compatibility aliases may still appear during the transition, but future no
 | `final_disposition` | `str` | `released` or `blocked`. Mirrors the hard handoff outcome and does not replace `release_eligible`. |
 | `decision_class` | `str` | Canonical semantic class: `verified_clean`, `verified_boundary_hugging`, `verified_with_advisory`, `blocked_structural`, `blocked_physical`, or `blocked_policy`. |
 | `severity` | `str` | `info`, `warning`, `error`, or `critical`. |
-| `evaluation_stage` | `str` | Fixed stage enum: `intake_validation`, `structural_validity`, `physical_consistency`, `clinical_plausibility`, `policy_evaluation`, `multi_series_aggregation`, or `release_control`. |
+| `pipeline_phase` | `str` | Fixed assurance-flow phase enum: `intake_validation`, `structural_validity`, `proof_core`, `clinical_plausibility`, `policy_evaluation`, `multi_series_aggregation`, or `release_control`. |
+| `proof_stage` | `str \| null` | Optional proof-core stage identifier: `MeasurementIntegrityProof`, `ReconstructionParityProof`, `SegmentationPolicyProof`, or `VolumeComputationProof`. Present only when `pipeline_phase = proof_core`. |
 | `reason_codes` | `list[str]` | Deterministically ordered machine-readable reason codes. |
-| `decision_reasons` | `list[dict]` | Structured reasons with `code`, `stage`, `severity`, and `message`. |
+| `decision_reasons` | `list[dict]` | Structured reasons with `code`, `pipeline_phase`, optional `proof_stage`, `severity`, and `message`. |
 | `success_modifiers` | `dict` | Secondary flags such as `near_proof_threshold` and `has_non_blocking_advisory`, plus supporting code/id lists. |
-| `decision_lineage` | `list[dict]` | Ordered stage/outcome trace used for replay, debugging, and viewer summaries. |
+| `decision_lineage` | `list[dict]` | Ordered phase/outcome trace used for replay, debugging, and viewer summaries; proof-core entries also carry `proof_stage`. |
 
 Ordering rule for `reason_codes` and `decision_reasons`:
 
@@ -242,9 +247,9 @@ Minimal structural block reports guarantee at least:
 - `release_eligible`
 - available case identifiers
 - `analysis.input_state_hash` when it can be computed
-- structural verification tiers
+- structural verification pipeline phases
 
-They do not guarantee full proof artifacts such as reconstruction traces or verified-mask hashes.
+They do not guarantee full proof-core artifacts such as stage contracts or verified-mask hashes.
 
 ## Integration Artifacts
 

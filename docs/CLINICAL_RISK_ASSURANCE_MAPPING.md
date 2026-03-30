@@ -27,8 +27,8 @@ Canonical executable threat references use the `VFTC-*` corpus identifiers defin
         v
 [Guardian Layer] -> in scope
   - intake_validation / structural_validity
-  - physical_consistency
-  - optional clinical_plausibility, temporal, and multi-series checks
+  - proof_core
+  - optional clinical_plausibility, temporal, policy, and multi-series checks
   - release_control
         |
         v
@@ -67,25 +67,26 @@ Canonical executable threat references use the `VFTC-*` corpus identifiers defin
 
 | Repo surface | Safety-language interpretation | Control type | Assurance contribution |
 | --- | --- | --- | --- |
-| `physical_consistency` | Hard proof layer from raw measurements to releasable output | Both | Detects mismatch and blocks release when reconstruction, mask, or volume cannot be justified from supplied data. |
-| `VerifiedReconstructionTrace` | Traceable reconstruction assurance record | Detective | Provides a machine-readable proof trace from raw k-space to verified reconstruction, verified mask, and verified volume. |
+| `proof_core` | Hard proof layer from raw measurements to releasable output | Both | Detects mismatch and blocks release when measurement anchoring, reconstruction parity, segmentation policy, or volume computation cannot be justified from supplied data. |
+| `ProofCoreEvidenceTrace` | Strictly derived proof-core replay spine | Detective | Aggregates already-materialized proof-stage artefacts for replay and evidence transport without introducing independent verdict logic. |
 | `VerificationTolerancePolicy` | Explicit mismatch acceptance envelope | Both | Pins down per-voxel, per-frequency, global relative L2, and volume tolerances so borderline cases are governed explicitly rather than heuristically. |
-| `manifest.ai_reconstruction_match` | Image-parity evidence surface | Detective | Records whether the AI reconstruction matches the raw-derived reconstruction and which metrics passed, neared, or exceeded thresholds. |
+| `manifest.measurement_integrity_proof` | Measurement-domain evidence surface | Detective | Records whether the raw-derived reconstruction remains anchored to the measurement domain within policy. |
+| `manifest.reconstruction_parity_proof` | Image-parity evidence surface | Detective | Records whether the AI reconstruction matches the raw-derived reconstruction and which metrics passed, neared, or exceeded thresholds. |
 
 ### AI Output Constraints
 
 | Repo surface | Safety-language interpretation | Control type | Assurance contribution |
 | --- | --- | --- | --- |
 | `MaskDerivationPolicy` | Approved deterministic segmentation constraint | Both | Constrains verified masks to one canonical algorithm identity plus resolved parameters bound to the active profile. |
-| `manifest.mask_verification` | Segmentation parity evidence surface | Detective | Records exact AI-versus-verified mask comparison, including voxel deltas and canonical policy identity. |
-| `manifest.tumor_volume_proof` | Quantitative measurement validation | Detective | Confirms whether the claimed tumour volume equals the verified mask volume on the measured grid. |
+| `manifest.segmentation_policy_proof` | Segmentation parity evidence surface | Detective | Records exact AI-versus-verified mask comparison, including voxel deltas and canonical policy identity. |
+| `manifest.volume_computation_proof` | Quantitative measurement validation | Detective | Confirms whether the claimed tumour volume equals the verified mask volume on the measured grid. |
 | `decision.success_modifiers.near_proof_threshold` | Near-miss escalation signal | Detective | Preserves evidence that proof passed close to a configured threshold rather than treating all passes as equally comfortable. |
 
 ### Aggregation and Temporal Controls
 
 | Repo surface | Safety-language interpretation | Control type | Assurance contribution |
 | --- | --- | --- | --- |
-| `clinical_plausibility` | Optional higher-layer plausibility review | Both | Adds profile-scoped heuristic review without changing the underlying Level 2 proof model. |
+| `clinical_plausibility` | Optional higher-layer plausibility review | Both | Adds profile-scoped heuristic review without changing the underlying proof-core model. |
 | `TemporalConsistencyTrace` | Longitudinal comparison assurance record | Detective | Makes prior admissibility, chronology trust, geometry scope, and skipped metrics explicit so temporal findings are reviewable. |
 | `LongitudinalRegistrationTrace` | Registration quality assurance record | Detective | Separates the fact of using registered comparison from the quality and admissibility of that registration. |
 | `StudyTemporalAggregationTrace` | Study-level temporal coverage summary | Detective | Shows which required series have usable temporal context and how that affects study-level temporal posture. |
@@ -103,10 +104,11 @@ Canonical executable threat references use the `VFTC-*` corpus identifiers defin
 
 | Failure Mode | Adversarial Scenario (if applicable) | Clinical hazard | Potential clinical impact | System control(s) | Control type | System response (decision class) | Residual risk | Evidence (tests / traces) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| False positive lesion propagated to downstream handoff | Fake tumour injection (`VFTC-001`) | False positive imaging finding | Unnecessary diagnostic escalation; possible invasive follow-on; increased workload | `MaskDerivationPolicy`; `manifest.mask_verification.comparison`; `VerifiedReconstructionTrace`; `release_control` | Both | `blocked_physical` | Low in the Guardian path; residual risk remains if upstream raw data or acquisition is wrong but still internally consistent | `test_rejects_ai_mask_with_fake_tumour_voxel`; `manifest.mask_verification`; `VerifiedReconstructionTrace` |
-| Unsupported image content accepted as measured reality | Local intensity manipulation (`VFTC-003`) | False or misleading image appearance | False positive or false negative interpretation; inappropriate review burden | `VerificationTolerancePolicy`; `manifest.ai_reconstruction_match`; `VerifiedReconstructionTrace`; `release_control` | Both | `blocked_physical` | Low in the Guardian path; residual risk depends on correctness of supplied raw data and tolerance calibration | `test_rejects_ai_reconstruction_with_invented_pixels`; `manifest.ai_reconstruction_match`; `VerifiedReconstructionTrace` |
-| Incorrect quantitative lesion burden reported | Incorrect tumour-volume claim | False quantitative finding | Incorrect trend interpretation; inappropriate follow-up or treatment framing | `manifest.tumor_volume_proof`; `manifest.mask_verification`; `VerifiedReconstructionTrace`; `release_control` | Both | `blocked_physical` | Residual risk remains if upstream voxel spacing or acquisition geometry is wrong but structurally valid | `test_rejects_incorrect_tumor_volume_claim`; `manifest.tumor_volume_proof`; `VerifiedReconstructionTrace` |
-| Subtle numeric manipulation not obvious on per-voxel inspection | Distributed low-amplitude attack (`VFTC-004`) | Hidden image alteration close to tolerance boundary | Missed manipulation or overconfidence in borderline data | `VerificationTolerancePolicy`; `manifest.ai_reconstruction_match`; `decision.success_modifiers.near_proof_threshold`; `release_control` | Both | `blocked_physical` when tolerance is exceeded | Residual risk depends on scanner-specific tolerance suitability and profile calibration | `test_rejects_distributed_low_amplitude_attack_by_global_l2_bound`; `manifest.ai_reconstruction_match.metrics`; `decision.success_modifiers.near_proof_threshold` |
+| False positive lesion propagated to downstream handoff | Fake tumour injection (`VFTC-001`) | False positive imaging finding | Unnecessary diagnostic escalation; possible invasive follow-on; increased workload | `MaskDerivationPolicy`; `manifest.segmentation_policy_proof.comparison`; `ProofCoreEvidenceTrace`; `release_control` | Both | `blocked_physical` | Low in the Guardian path; residual risk remains if upstream raw data or acquisition is wrong but still internally consistent | `test_rejects_ai_mask_with_fake_tumour_voxel`; `manifest.segmentation_policy_proof`; `ProofCoreEvidenceTrace` |
+| Unsupported measurement domain accepted as if it supported the claim | Measurement-domain tamper (`VFTC-015`) | Measurement-domain integrity distortion | Raw-domain corruption could poison all downstream proof surfaces | `VerificationTolerancePolicy`; `manifest.measurement_integrity_proof`; `ProofCoreEvidenceTrace`; `release_control` | Both | `blocked_physical` | Low in the Guardian path; residual risk depends on correctness of supplied raw data and tolerance calibration | `test_measurement_domain_tamper_fixes_primary_proof_stage`; `manifest.measurement_integrity_proof`; `ProofCoreEvidenceTrace` |
+| Unsupported image content accepted as measured reality | Local intensity manipulation (`VFTC-003`) | False or misleading image appearance | False positive or false negative interpretation; inappropriate review burden | `VerificationTolerancePolicy`; `manifest.reconstruction_parity_proof`; `ProofCoreEvidenceTrace`; `release_control` | Both | `blocked_physical` | Low in the Guardian path; residual risk depends on correctness of supplied raw data and tolerance calibration | `test_rejects_ai_reconstruction_with_invented_pixels`; `manifest.reconstruction_parity_proof`; `ProofCoreEvidenceTrace` |
+| Incorrect quantitative lesion burden reported | Incorrect tumour-volume claim | False quantitative finding | Incorrect trend interpretation; inappropriate follow-up or treatment framing | `manifest.volume_computation_proof`; `manifest.segmentation_policy_proof`; `ProofCoreEvidenceTrace`; `release_control` | Both | `blocked_physical` | Residual risk remains if upstream voxel spacing or acquisition geometry is wrong but structurally valid | `test_rejects_incorrect_tumor_volume_claim`; `manifest.volume_computation_proof`; `ProofCoreEvidenceTrace` |
+| Subtle numeric manipulation not obvious on per-voxel inspection | Distributed low-amplitude attack (`VFTC-004`) | Hidden image alteration close to tolerance boundary | Missed manipulation or overconfidence in borderline data | `VerificationTolerancePolicy`; `manifest.reconstruction_parity_proof`; `decision.success_modifiers.near_proof_threshold`; `release_control` | Both | `blocked_physical` when tolerance is exceeded | Residual risk depends on scanner-specific tolerance suitability and profile calibration | `test_rejects_distributed_low_amplitude_attack_by_global_l2_bound`; `manifest.reconstruction_parity_proof.metrics`; `decision.success_modifiers.near_proof_threshold` |
 | Unsafe or malformed profile/input state accepted into the proof path | Not attack-specific | Misconfigured verification process | False assurance from a structurally invalid case or profile | `intake_validation`; `structural_validity`; `VerificationProfileDescriptor`; `release_control` | Preventative | `blocked_structural` | Residual risk remains if upstream acquisition is semantically wrong but still passes structural checks | `test_invalid_embedded_profile_descriptor_returns_structural_block_report`; `decision.decision_class`; `decision_summary.block_category` |
 | Non-final output released as if it were final | Non-final profile selection | Premature downstream reliance on non-final output | Inappropriate clinical action on triage-only output | `policy_evaluation`; `VerificationProfileDescriptor.release_semantics`; `release_control` | Preventative | `blocked_policy` | Residual risk sits in external workflows outside the Guardian path, not in the Guardian release decision | `test_fast_triage_profile_is_non_final_and_rejected_for_release`; `decision_summary.block_category = profile_policy_block`; `decision.decision_class` |
 | Configured blocking heuristic ignored after proof passes | Blocking heuristic failure in `strict_research_mode` | Clinically concerning verified pattern allowed through despite configured block | Unsafe automation or undertriaged output under a stricter profile | `clinical_plausibility`; `policy_evaluation`; `decision.decision_class`; `release_control` | Both | `blocked_policy` | Residual risk depends on heuristic specificity and the narrowness of the configured blocking rules | `test_strict_research_mode_blocks_on_heuristic_failure`; `manifest.clinical_plausibility.blocking_failures`; `decision.decision_class` |
@@ -134,15 +136,15 @@ Canonical executable threat references use the `VFTC-*` corpus identifiers defin
 - Adversarial scenario: the AI tumour mask contains unsupported positive voxels.
 - Clinical hazard: a false positive clinical finding is presented as if it were supported by measured data.
 - Potential clinical impact: unnecessary escalation, potentially invasive follow-on work, and increased clinical workload.
-- System controls: `MaskDerivationPolicy`, `manifest.mask_verification.comparison`, `VerifiedReconstructionTrace`, and `release_control`.
+- System controls: `MaskDerivationPolicy`, `manifest.segmentation_policy_proof.comparison`, `ProofCoreEvidenceTrace`, and `release_control`.
 - Control type: Both. The system detects the mismatch and prevents downstream release through the Guardian path.
 - System response: the case is blocked with `decision.decision_class = blocked_physical`.
-- Concrete trace and manifest references: `manifest.mask_verification.comparison.verified = false`, a non-zero voxel delta in `manifest.mask_verification.comparison`, and the verified-mask linkage carried in `VerifiedReconstructionTrace`.
+- Concrete trace and manifest references: `manifest.segmentation_policy_proof.comparison.verified = false`, a non-zero voxel delta in `manifest.segmentation_policy_proof.comparison`, and the verified-mask linkage carried in `ProofCoreEvidenceTrace`.
 - Executable evidence reference: `test_rejects_ai_mask_with_fake_tumour_voxel`.
 
 ## Longitudinal Controls
 
-- `TemporalConsistencyTrace` is additive to the hard Level 2 proof gate. It does not replace reconstruction, mask, or volume proof.
+- `TemporalConsistencyTrace` is additive to the hard proof-core gate. It does not replace measurement anchoring, reconstruction parity, segmentation policy, or volume computation proof.
 - Prior use is explicit and bounded: `PriorVerifiedContext` admissibility, chronology provenance, geometry comparability, and skipped metrics are all surfaced rather than inferred.
 - Registered comparison is explicit rather than hidden. `LongitudinalRegistrationTrace` records whether registration was used and whether spatial use was allowed.
 - Temporal findings are profile-controlled. In the shipped profiles, `strict_research_mode` can promote selected temporal findings into blocking behavior, while other profiles keep temporal findings advisory.

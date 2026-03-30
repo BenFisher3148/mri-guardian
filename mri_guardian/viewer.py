@@ -62,7 +62,7 @@ def build_side_by_side_view_model(
     analysis = report["analysis"]
     manifest = report["manifest"]
     reasons = report["failure_reasons"]
-    tiers = report["verification_tiers"]
+    tiers = _derived_explainability_tiers(report)
     decision_summary = report["decision_summary"]
     longitudinal = _build_longitudinal_summary(report)
     ai_reconstruction = np.asarray(arrays["ai_reconstruction"], dtype=np.float64)
@@ -81,7 +81,7 @@ def build_side_by_side_view_model(
         )
     intensity_mismatch_mask = (
         np.abs(ai_reconstruction - verified_reconstruction)
-        > float(manifest["ai_reconstruction_match"]["max_abs_tolerance"])
+        > float(manifest["reconstruction_parity_proof"]["max_abs_tolerance"])
     )
     rejected_mask = ((ai_mask == 1) & (verified_mask == 0)).astype(np.int64)
     missing_mask = ((ai_mask == 0) & (verified_mask == 1)).astype(np.int64)
@@ -148,7 +148,7 @@ def build_side_by_side_view_model(
         intensity_mismatch_count=intensity_mismatch_count,
         claimed_volume=_round_float(float(state["tumor_volume_mm3"])),
         computed_volume=analysis["computed_tumor_volume_mm3"],
-        volume_verified=bool(manifest["tumor_volume_proof"]["verified"]),
+        volume_verified=bool(manifest["volume_computation_proof"]["verified"]),
     )
     integration = _build_integration_summary(
         release_eligible=bool(report["release_eligible"]),
@@ -188,9 +188,11 @@ def build_side_by_side_view_model(
             "verified_mask_voxel_count": int(analysis["verified_mask_voxel_count"]),
             "claimed_tumor_volume_mm3": _round_float(float(state["tumor_volume_mm3"])),
             "verified_tumor_volume_mm3": analysis["computed_tumor_volume_mm3"],
-            "volume_verified": manifest["tumor_volume_proof"]["verified"],
-            "max_ai_abs_error": manifest["ai_reconstruction_match"]["max_abs_error"],
-            "max_measurement_abs_error": manifest["measurement_consistency"]["max_abs_error"],
+            "volume_verified": manifest["volume_computation_proof"]["verified"],
+            "max_ai_abs_error": manifest["reconstruction_parity_proof"]["max_abs_error"],
+            "max_measurement_abs_error": manifest["measurement_integrity_proof"][
+                "max_abs_error"
+            ],
         },
         "intensity_window": {
             "min": intensity_min,
@@ -239,7 +241,7 @@ def _build_multi_series_view_model(state: dict[str, Any]) -> dict[str, Any]:
                     "status": value["status"],
                     "summary": value["summary"],
                 }
-                for key, value in report["verification_tiers"].items()
+                for key, value in _derived_explainability_tiers(report).items()
             ],
         },
         "study": {
@@ -292,7 +294,7 @@ def _build_minimal_single_series_view_model(
     verification = _build_verification_summary(
         report=report,
         reasons=report["failure_reasons"],
-        tiers=report["verification_tiers"],
+        tiers=_derived_explainability_tiers(report),
         release_eligible=False,
     )
     case_id = state.get("case_id")
@@ -2496,6 +2498,76 @@ def _verification_headline(report: dict[str, Any]) -> str:
     return "Verification PASSED"
 
 
+def _derived_explainability_tiers(report: dict[str, Any]) -> dict[str, Any]:
+    phases = report["verification_pipeline"]["phases"]
+    intake_phase = phases["intake_validation"]
+    structural_phase = phases["structural_validity"]
+    proof_core_phase = phases["proof_core"]
+    clinical_phase = phases["clinical_plausibility"]
+    policy_phase = phases["policy_evaluation"]
+    level_3_status = (
+        "failed" if policy_phase["status"] == "blocked" else clinical_phase["status"]
+    )
+    level_3_summary = (
+        policy_phase["summary"] if policy_phase["status"] == "blocked" else clinical_phase["summary"]
+    )
+    level_3_blocking = bool(clinical_phase["blocking"]) or policy_phase["status"] == "blocked"
+    level_3_checks = list(clinical_phase.get("checks", []))
+    level_3_checks.append(
+        {
+            "code": "policy_evaluation",
+            "label": "Policy evaluation",
+            "status": policy_phase["status"],
+            "message": policy_phase["summary"],
+        }
+    )
+    return {
+        "level_1": {
+            "code": "level_1",
+            "title": "Level 1: Structural Validity",
+            "subtitle": "Intake validation plus structural validity",
+            "status": structural_phase["status"],
+            "summary": structural_phase["summary"],
+            "blocking": True,
+            "checks": [
+                {
+                    "code": "intake_validation",
+                    "label": "Intake validation",
+                    "status": intake_phase["status"],
+                    "message": intake_phase["summary"],
+                },
+                *list(structural_phase.get("checks", [])),
+            ],
+        },
+        "level_2": {
+            "code": "level_2",
+            "title": "Level 2: Proof Core",
+            "subtitle": "Ordered proof stages inside proof_core",
+            "status": proof_core_phase["status"],
+            "summary": proof_core_phase["summary"],
+            "blocking": True,
+            "checks": [
+                {
+                    "code": item["proof_stage"],
+                    "label": item["title"],
+                    "status": item["status"],
+                    "message": item["summary"],
+                }
+                for item in proof_core_phase.get("proof_stages", [])
+            ],
+        },
+        "level_3": {
+            "code": "level_3",
+            "title": "Level 3: Clinical Plausibility",
+            "subtitle": "Clinical plausibility plus policy evaluation",
+            "status": level_3_status,
+            "summary": level_3_summary,
+            "blocking": level_3_blocking,
+            "checks": level_3_checks,
+        },
+    }
+
+
 def _ordered_tiers(tiers: dict[str, Any]) -> list[dict[str, Any]]:
     return [tiers[key] for key in ("level_1", "level_2", "level_3")]
 
@@ -2518,6 +2590,7 @@ def _tier_view_model(tier: dict[str, Any]) -> dict[str, Any]:
     }
     return {
         **tier,
+        "subtitle": str(tier.get("subtitle", "")),
         "scope_label": "Blocking gate" if tier["blocking"] else "Advisory only",
         "status_label": status_label_map.get(status, status.upper()),
         "status_class": status_class_map.get(status, "tier-status-warn"),

@@ -25,14 +25,18 @@ from .contracts import (
     build_longitudinal_registration_trace,
     build_longitudinal_selection_trace,
     build_mask_derivation_policy,
+    build_measurement_integrity_proof,
     build_multi_series_verification_profile_descriptor_set,
     build_prior_verified_context,
+    build_proof_core_evidence_trace,
+    build_reconstruction_parity_proof,
+    build_segmentation_policy_proof,
     build_study_temporal_aggregation_trace,
     build_temporal_consistency_trace,
     build_temporal_trajectory_trace,
     build_verification_profile_contract,
     build_verification_tolerance_policy,
-    build_verified_reconstruction_trace,
+    build_volume_computation_proof,
     canonicalise_prior_verified_context,
     canonicalise_prior_verified_contexts,
     canonicalise_ai_stack_identity,
@@ -71,13 +75,32 @@ MULTI_SERIES_CORROBORATION_RULE = (
 )
 _AUTHORITY_REQUIREMENT_MAP = build_authority_requirement_map()
 
-EVALUATION_STAGE_INTAKE_VALIDATION = "intake_validation"
-EVALUATION_STAGE_STRUCTURAL_VALIDITY = "structural_validity"
-EVALUATION_STAGE_PHYSICAL_CONSISTENCY = "physical_consistency"
-EVALUATION_STAGE_CLINICAL_PLAUSIBILITY = "clinical_plausibility"
-EVALUATION_STAGE_POLICY_EVALUATION = "policy_evaluation"
-EVALUATION_STAGE_MULTI_SERIES_AGGREGATION = "multi_series_aggregation"
-EVALUATION_STAGE_RELEASE_CONTROL = "release_control"
+PIPELINE_PHASE_INTAKE_VALIDATION = "intake_validation"
+PIPELINE_PHASE_STRUCTURAL_VALIDITY = "structural_validity"
+PIPELINE_PHASE_PROOF_CORE = "proof_core"
+PIPELINE_PHASE_CLINICAL_PLAUSIBILITY = "clinical_plausibility"
+PIPELINE_PHASE_POLICY_EVALUATION = "policy_evaluation"
+PIPELINE_PHASE_MULTI_SERIES_AGGREGATION = "multi_series_aggregation"
+PIPELINE_PHASE_RELEASE_CONTROL = "release_control"
+
+PROOF_STAGE_MEASUREMENT_INTEGRITY = "MeasurementIntegrityProof"
+PROOF_STAGE_RECONSTRUCTION_PARITY = "ReconstructionParityProof"
+PROOF_STAGE_SEGMENTATION_POLICY = "SegmentationPolicyProof"
+PROOF_STAGE_VOLUME_COMPUTATION = "VolumeComputationProof"
+_PROOF_STAGE_ORDER = (
+    PROOF_STAGE_MEASUREMENT_INTEGRITY,
+    PROOF_STAGE_RECONSTRUCTION_PARITY,
+    PROOF_STAGE_SEGMENTATION_POLICY,
+    PROOF_STAGE_VOLUME_COMPUTATION,
+)
+
+EVALUATION_STAGE_INTAKE_VALIDATION = PIPELINE_PHASE_INTAKE_VALIDATION
+EVALUATION_STAGE_STRUCTURAL_VALIDITY = PIPELINE_PHASE_STRUCTURAL_VALIDITY
+EVALUATION_STAGE_PHYSICAL_CONSISTENCY = PIPELINE_PHASE_PROOF_CORE
+EVALUATION_STAGE_CLINICAL_PLAUSIBILITY = PIPELINE_PHASE_CLINICAL_PLAUSIBILITY
+EVALUATION_STAGE_POLICY_EVALUATION = PIPELINE_PHASE_POLICY_EVALUATION
+EVALUATION_STAGE_MULTI_SERIES_AGGREGATION = PIPELINE_PHASE_MULTI_SERIES_AGGREGATION
+EVALUATION_STAGE_RELEASE_CONTROL = PIPELINE_PHASE_RELEASE_CONTROL
 
 DECISION_CLASS_VERIFIED_CLEAN = "verified_clean"
 DECISION_CLASS_VERIFIED_BOUNDARY_HUGGING = "verified_boundary_hugging"
@@ -320,15 +343,23 @@ def build_case_verification_report(
         descriptor,
         temporal_consistency=temporal_consistency,
     )
+    contracts = _materialize_proof_core_contracts(
+        state=state,
+        analysis=analysis,
+        manifest=manifest,
+        contracts=contracts,
+        descriptor=descriptor,
+    )
+    manifest["proof_core_evidence_trace"] = contracts["proof_core_evidence_trace"]
     reasons = _build_failure_reasons(state, analysis, manifest)
-    tiers = manifest["verification_tiers"]
+    verification_pipeline = manifest["verification_pipeline"]
     decision_summary = manifest["decision_summary"]
     report = {
         "profile": profile_contract,
         "analysis": analysis,
         "contracts": contracts,
         "manifest": manifest,
-        "verification_tiers": tiers,
+        "verification_pipeline": verification_pipeline,
         "failure_reasons": reasons,
         "decision_summary": decision_summary,
         "release_eligible": bool(decision_summary["final_release_allowed"]),
@@ -564,43 +595,59 @@ def _default_success_modifiers() -> dict[str, Any]:
     }
 
 
-def _decision_lineage_entry(stage: str, outcome: str) -> dict[str, str]:
-    return {"stage": stage, "outcome": outcome}
+def _decision_lineage_entry(
+    pipeline_phase: str,
+    outcome: str,
+    *,
+    proof_stage: str | None = None,
+) -> dict[str, str]:
+    entry = {"pipeline_phase": pipeline_phase, "outcome": outcome}
+    if proof_stage is not None:
+        entry["proof_stage"] = proof_stage
+    return entry
 
 
 def _decision_reason(
     *,
     code: str,
-    stage: str,
+    pipeline_phase: str,
     severity: str,
     message: str,
     band: str,
+    proof_stage: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    item = {
         "code": code,
-        "stage": stage,
+        "pipeline_phase": pipeline_phase,
         "severity": severity,
         "message": message,
         "_band": band,
     }
+    if proof_stage is not None:
+        item["proof_stage"] = proof_stage
+    return item
 
 
-def _decision_reason_sort_key(reason: Mapping[str, Any]) -> tuple[int, str, str, str]:
+def _decision_reason_sort_key(reason: Mapping[str, Any]) -> tuple[int, str, str, str, str]:
     return (
         _DECISION_REASON_BAND_ORDER[str(reason["_band"])],
         str(reason["code"]),
-        str(reason["stage"]),
+        str(reason["pipeline_phase"]),
+        str(reason.get("proof_stage", "")),
         str(reason["message"]),
     )
 
 
 def _strip_decision_reason_metadata(reason: Mapping[str, Any]) -> dict[str, str]:
-    return {
+    item = {
         "code": str(reason["code"]),
-        "stage": str(reason["stage"]),
+        "pipeline_phase": str(reason["pipeline_phase"]),
         "severity": str(reason["severity"]),
         "message": str(reason["message"]),
     }
+    if "proof_stage" in reason:
+        item["proof_stage"] = str(reason["proof_stage"])
+    return item
 
 
 def _ordered_unique_reason_codes(reasons: list[dict[str, str]]) -> list[str]:
@@ -617,25 +664,29 @@ def _build_decision(
     final_disposition: str,
     decision_class: str,
     severity: str,
-    evaluation_stage: str,
+    pipeline_phase: str,
     reasons: list[dict[str, Any]],
     success_modifiers: dict[str, Any],
     decision_lineage: list[dict[str, str]],
+    proof_stage: str | None = None,
 ) -> dict[str, Any]:
     ordered_reasons = [
         _strip_decision_reason_metadata(reason)
         for reason in sorted(reasons, key=_decision_reason_sort_key)
     ]
-    return {
+    decision = {
         "final_disposition": final_disposition,
         "decision_class": decision_class,
         "severity": severity,
-        "evaluation_stage": evaluation_stage,
+        "pipeline_phase": pipeline_phase,
         "reason_codes": _ordered_unique_reason_codes(ordered_reasons),
         "decision_reasons": ordered_reasons,
         "success_modifiers": deepcopy(success_modifiers),
         "decision_lineage": deepcopy(decision_lineage),
     }
+    if proof_stage is not None:
+        decision["proof_stage"] = proof_stage
+    return decision
 
 
 def _resolve_report_descriptor(
@@ -652,7 +703,7 @@ def _resolve_report_descriptor(
         descriptor = get_verification_profile(DEFAULT_PROFILE_NAME)
         return descriptor, _decision_reason(
             code="unknown_runtime_profile",
-            stage=EVALUATION_STAGE_INTAKE_VALIDATION,
+            pipeline_phase=EVALUATION_STAGE_INTAKE_VALIDATION,
             severity=DECISION_SEVERITY_ERROR,
             message=str(exc),
             band=DECISION_REASON_BAND_PRIMARY,
@@ -667,7 +718,7 @@ def _resolve_report_descriptor(
     except ValueError as exc:
         return descriptor, _decision_reason(
             code="invalid_profile_descriptor",
-            stage=EVALUATION_STAGE_INTAKE_VALIDATION,
+            pipeline_phase=EVALUATION_STAGE_INTAKE_VALIDATION,
             severity=DECISION_SEVERITY_ERROR,
             message=str(exc),
             band=DECISION_REASON_BAND_PRIMARY,
@@ -678,49 +729,100 @@ def _structural_profile_contract(descriptor: Any) -> dict[str, Any]:
     return build_verification_profile_contract(descriptor.profile_name)
 
 
-def _build_structural_verification_tiers(
+def _build_structural_verification_pipeline(
     structural_checks: list[dict[str, Any]],
     *,
     intake_blocked: bool,
 ) -> dict[str, Any]:
     structural_status = _tier_status_from_checks(structural_checks)
-    gating_message = (
-        "Intake validation blocked proof construction before physical consistency could be evaluated."
+    proof_core_summary = (
+        "Intake validation blocked proof-core construction before proof stages could be evaluated."
         if intake_blocked
-        else "Structural validity failed before physical consistency could be evaluated."
+        else "Structural validity failed before proof-core stages could be evaluated."
     )
     return {
-        "level_1": {
-            "level": 1,
-            "title": "Level 1: Structural Validity",
-            "subtitle": "ICSD envelope",
-            "blocking": True,
-            "status": structural_status,
-            "summary": (
-                "ICSD structural checks passed for identifiers, numeric fields, voxel geometry, "
-                "and release payload shape."
-                if structural_status == "passed"
-                else "ICSD structural checks failed before mathematical verification can be trusted."
+        "schema": "canonical_assurance_flow",
+        "ordering_semantics": (
+            "Canonical assurance-flow schema and evidence-ordering model. "
+            "It does not mandate runtime execution topology."
+        ),
+        "phase_order": [
+            PIPELINE_PHASE_INTAKE_VALIDATION,
+            PIPELINE_PHASE_STRUCTURAL_VALIDITY,
+            PIPELINE_PHASE_PROOF_CORE,
+            PIPELINE_PHASE_CLINICAL_PLAUSIBILITY,
+            PIPELINE_PHASE_POLICY_EVALUATION,
+            PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
+            PIPELINE_PHASE_RELEASE_CONTROL,
+        ],
+        "phases": {
+            PIPELINE_PHASE_INTAKE_VALIDATION: _phase_entry(
+                title="Intake Validation",
+                status="failed" if intake_blocked else "passed",
+                summary=(
+                    "Runtime-profile intake blocked report preparation."
+                    if intake_blocked
+                    else "Input intake completed."
+                ),
+                blocking=True,
             ),
-            "checks": structural_checks,
-        },
-        "level_2": {
-            "level": 2,
-            "title": "Level 2: Physical Consistency",
-            "subtitle": "k-space reconstruction",
-            "blocking": True,
-            "status": "not_evaluated",
-            "summary": gating_message,
-            "checks": [],
-        },
-        "level_3": {
-            "level": 3,
-            "title": "Level 3: Clinical Plausibility",
-            "subtitle": "Runtime profile heuristics",
-            "blocking": False,
-            "status": "not_evaluated",
-            "summary": "Clinical plausibility was not evaluated because the case did not clear structural intake checks.",
-            "checks": [],
+            PIPELINE_PHASE_STRUCTURAL_VALIDITY: _phase_entry(
+                title="Structural Validity",
+                status=structural_status,
+                summary=(
+                    "ICSD structural checks passed for identifiers, numeric fields, voxel geometry, "
+                    "and release payload shape."
+                    if structural_status == "passed"
+                    else "ICSD structural checks failed before proof-core results could be trusted."
+                ),
+                blocking=True,
+                checks=structural_checks,
+            ),
+            PIPELINE_PHASE_PROOF_CORE: _phase_entry(
+                title="Proof Core",
+                status="not_evaluated",
+                summary=proof_core_summary,
+                blocking=True,
+                proof_stages=[
+                    _proof_stage_result(
+                        proof_stage=proof_stage,
+                        title=title,
+                        verified=None,
+                        summary=proof_core_summary,
+                    )
+                    for proof_stage, title in (
+                        (PROOF_STAGE_MEASUREMENT_INTEGRITY, "Measurement Integrity"),
+                        (PROOF_STAGE_RECONSTRUCTION_PARITY, "Reconstruction Parity"),
+                        (PROOF_STAGE_SEGMENTATION_POLICY, "Segmentation Policy"),
+                        (PROOF_STAGE_VOLUME_COMPUTATION, "Volume Computation"),
+                    )
+                ],
+            ),
+            PIPELINE_PHASE_CLINICAL_PLAUSIBILITY: _phase_entry(
+                title="Clinical Plausibility",
+                status="not_evaluated",
+                summary="Clinical plausibility was not evaluated because proof-core construction did not run.",
+                blocking=False,
+                checks=[],
+            ),
+            PIPELINE_PHASE_POLICY_EVALUATION: _phase_entry(
+                title="Policy Evaluation",
+                status="not_evaluated",
+                summary="Policy evaluation was not reached.",
+                blocking=True,
+            ),
+            PIPELINE_PHASE_MULTI_SERIES_AGGREGATION: _phase_entry(
+                title="Multi-Series Aggregation",
+                status="not_applicable",
+                summary="Single-series reports do not execute study-level aggregation.",
+                blocking=True,
+            ),
+            PIPELINE_PHASE_RELEASE_CONTROL: _phase_entry(
+                title="Release Control",
+                status="blocked",
+                summary="Release control blocked downstream release.",
+                blocking=True,
+            ),
         },
     }
 
@@ -755,7 +857,14 @@ def _build_structural_failure_reasons(
             "summary": reason["message"],
             "delta": None,
             "message": reason["message"],
-            "details": {"stage": reason["stage"]},
+            "details": {
+                "pipeline_phase": reason["pipeline_phase"],
+                **(
+                    {"proof_stage": reason["proof_stage"]}
+                    if "proof_stage" in reason
+                    else {}
+                ),
+            },
         }
         for reason in decision["decision_reasons"]
     ]
@@ -764,22 +873,30 @@ def _build_structural_failure_reasons(
 def _build_structural_block_lineage(
     structural_checks: list[dict[str, Any]],
     *,
-    evaluation_stage: str,
+    pipeline_phase: str,
 ) -> list[dict[str, str]]:
     structural_outcome = _tier_status_from_checks(structural_checks)
-    intake_outcome = "failed" if evaluation_stage == EVALUATION_STAGE_INTAKE_VALIDATION else "passed"
+    intake_outcome = "failed" if pipeline_phase == EVALUATION_STAGE_INTAKE_VALIDATION else "passed"
     return [
-        _decision_lineage_entry(EVALUATION_STAGE_INTAKE_VALIDATION, intake_outcome),
+        _decision_lineage_entry(PIPELINE_PHASE_INTAKE_VALIDATION, intake_outcome),
         _decision_lineage_entry(
-            EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+            PIPELINE_PHASE_STRUCTURAL_VALIDITY,
             "not_evaluated"
-            if evaluation_stage == EVALUATION_STAGE_INTAKE_VALIDATION and structural_outcome == "passed"
+            if pipeline_phase == EVALUATION_STAGE_INTAKE_VALIDATION and structural_outcome == "passed"
             else structural_outcome,
         ),
-        _decision_lineage_entry(EVALUATION_STAGE_PHYSICAL_CONSISTENCY, "not_evaluated"),
-        _decision_lineage_entry(EVALUATION_STAGE_CLINICAL_PLAUSIBILITY, "not_evaluated"),
-        _decision_lineage_entry(EVALUATION_STAGE_POLICY_EVALUATION, "not_evaluated"),
-        _decision_lineage_entry(EVALUATION_STAGE_RELEASE_CONTROL, "blocked"),
+        *[
+            _decision_lineage_entry(
+                PIPELINE_PHASE_PROOF_CORE,
+                "not_evaluated",
+                proof_stage=proof_stage,
+            )
+            for proof_stage in _PROOF_STAGE_ORDER
+        ],
+        _decision_lineage_entry(PIPELINE_PHASE_CLINICAL_PLAUSIBILITY, "not_evaluated"),
+        _decision_lineage_entry(PIPELINE_PHASE_POLICY_EVALUATION, "not_evaluated"),
+        _decision_lineage_entry(PIPELINE_PHASE_MULTI_SERIES_AGGREGATION, "not_applicable"),
+        _decision_lineage_entry(PIPELINE_PHASE_RELEASE_CONTROL, "blocked"),
     ]
 
 
@@ -788,7 +905,7 @@ def _build_structural_block_report(
     *,
     descriptor: Any,
     structural_checks: list[dict[str, Any]],
-    evaluation_stage: str,
+    pipeline_phase: str,
     primary_reason: dict[str, Any],
     secondary_reasons: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -801,20 +918,20 @@ def _build_structural_block_report(
         "final_release_allowed": False,
         "operator_review_required": False,
     }
-    tiers = _build_structural_verification_tiers(
+    verification_pipeline = _build_structural_verification_pipeline(
         structural_checks,
-        intake_blocked=evaluation_stage == EVALUATION_STAGE_INTAKE_VALIDATION,
+        intake_blocked=pipeline_phase == EVALUATION_STAGE_INTAKE_VALIDATION,
     )
     decision = _build_decision(
         final_disposition="blocked",
         decision_class=DECISION_CLASS_BLOCKED_STRUCTURAL,
         severity=DECISION_SEVERITY_ERROR,
-        evaluation_stage=evaluation_stage,
+        pipeline_phase=pipeline_phase,
         reasons=reasons,
         success_modifiers=_default_success_modifiers(),
         decision_lineage=_build_structural_block_lineage(
             structural_checks,
-            evaluation_stage=evaluation_stage,
+            pipeline_phase=pipeline_phase,
         ),
     )
     profile_contract = _structural_profile_contract(descriptor)
@@ -830,7 +947,7 @@ def _build_structural_block_report(
         "input_state_hash": analysis["input_state_hash"],
         "decision_summary": deepcopy(decision_summary),
         "decision": deepcopy(decision),
-        "verification_tiers": deepcopy(tiers),
+        "verification_pipeline": deepcopy(verification_pipeline),
     }
     failure_reasons = _build_structural_failure_reasons(decision)
     return {
@@ -840,7 +957,7 @@ def _build_structural_block_report(
             "verification_profile_descriptor": profile_contract,
         },
         "manifest": manifest,
-        "verification_tiers": tiers,
+        "verification_pipeline": verification_pipeline,
         "failure_reasons": failure_reasons,
         "decision_summary": decision_summary,
         "decision": decision,
@@ -864,7 +981,7 @@ def _prepare_single_series_report(
         failed_structural_checks = [
             _decision_reason(
                 code=str(check["code"]),
-                stage=EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+                pipeline_phase=EVALUATION_STAGE_STRUCTURAL_VALIDITY,
                 severity=DECISION_SEVERITY_ERROR,
                 message=str(check["message"]),
                 band=DECISION_REASON_BAND_SECONDARY_MODIFIER,
@@ -876,7 +993,7 @@ def _prepare_single_series_report(
             state,
             descriptor=descriptor,
             structural_checks=structural_checks,
-            evaluation_stage=EVALUATION_STAGE_INTAKE_VALIDATION,
+            pipeline_phase=EVALUATION_STAGE_INTAKE_VALIDATION,
             primary_reason=intake_reason,
             secondary_reasons=failed_structural_checks,
         )
@@ -888,10 +1005,10 @@ def _prepare_single_series_report(
             state,
             descriptor=descriptor,
             structural_checks=structural_checks,
-            evaluation_stage=EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+            pipeline_phase=EVALUATION_STAGE_STRUCTURAL_VALIDITY,
             primary_reason=_decision_reason(
                 code=str(primary_check["code"]),
-                stage=EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+                pipeline_phase=EVALUATION_STAGE_STRUCTURAL_VALIDITY,
                 severity=DECISION_SEVERITY_ERROR,
                 message=str(primary_check["message"]),
                 band=DECISION_REASON_BAND_PRIMARY,
@@ -899,7 +1016,7 @@ def _prepare_single_series_report(
             secondary_reasons=[
                 _decision_reason(
                     code=str(check["code"]),
-                    stage=EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+                    pipeline_phase=EVALUATION_STAGE_STRUCTURAL_VALIDITY,
                     severity=DECISION_SEVERITY_ERROR,
                     message=str(check["message"]),
                     band=DECISION_REASON_BAND_SAME_STAGE,
@@ -1476,7 +1593,7 @@ def _build_multi_series_failure_reasons(
     return reasons
 
 
-def _build_multi_series_verification_tiers(
+def _build_multi_series_verification_pipeline(
     *,
     series_reports: list[dict[str, Any]],
     missing_required_series_ids: tuple[str, ...],
@@ -1485,54 +1602,149 @@ def _build_multi_series_verification_tiers(
     final_release_allowed: bool,
 ) -> dict[str, Any]:
     required_reports = [report for report in series_reports if report["gating_status"] == "required"]
-    required_passed = all(report["series_release_eligible"] for report in required_reports)
+    required_proof_phases = [
+        report["verification_pipeline"]["phases"][PIPELINE_PHASE_PROOF_CORE]
+        for report in required_reports
+    ]
+    required_passed = all(phase["status"] == "passed" for phase in required_proof_phases)
+    policy_blocked = any(
+        item["decision"]["decision_class"] == DECISION_CLASS_BLOCKED_POLICY
+        for item in required_reports
+    )
+    clinical_statuses = [
+        item["verification_pipeline"]["phases"][PIPELINE_PHASE_CLINICAL_PLAUSIBILITY]["status"]
+        for item in required_reports
+    ]
+    clinical_status = "passed"
+    if any(status == "failed" for status in clinical_statuses):
+        clinical_status = "failed"
+    elif any(status == "warning" for status in clinical_statuses):
+        clinical_status = "warning"
+    elif any(status == "advisory" for status in clinical_statuses):
+        clinical_status = "advisory"
     auxiliary_failures = [
         report["series_id"]
         for report in series_reports
         if report["gating_status"] == "auxiliary" and not report["series_release_eligible"]
     ]
     return {
-        "study_shape": {
-            "title": "Study Shape",
-            "status": "passed" if not missing_required_series_ids else "failed",
-            "summary": (
-                "Study-level payload shape and required-series references are structurally coherent."
-                if not missing_required_series_ids
-                else "The study-level policy references required series that are missing from the payload."
+        "schema": "canonical_assurance_flow",
+        "ordering_semantics": (
+            "Canonical assurance-flow schema and evidence-ordering model. "
+            "It does not mandate runtime execution topology."
+        ),
+        "phase_order": [
+            PIPELINE_PHASE_INTAKE_VALIDATION,
+            PIPELINE_PHASE_STRUCTURAL_VALIDITY,
+            PIPELINE_PHASE_PROOF_CORE,
+            PIPELINE_PHASE_CLINICAL_PLAUSIBILITY,
+            PIPELINE_PHASE_POLICY_EVALUATION,
+            PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
+            PIPELINE_PHASE_RELEASE_CONTROL,
+        ],
+        "phases": {
+            PIPELINE_PHASE_INTAKE_VALIDATION: _phase_entry(
+                title="Intake Validation",
+                status="passed",
+                summary="Study intake completed without blocking descriptor faults.",
+                blocking=True,
+            ),
+            PIPELINE_PHASE_STRUCTURAL_VALIDITY: _phase_entry(
+                title="Structural Validity",
+                status="passed" if not missing_required_series_ids else "failed",
+                summary=(
+                    "Study-level payload shape and required-series references are structurally coherent."
+                    if not missing_required_series_ids
+                    else "The study-level policy references required series that are missing from the payload."
+                ),
+                blocking=True,
+            ),
+            PIPELINE_PHASE_PROOF_CORE: _phase_entry(
+                title="Proof Core",
+                status="passed" if required_passed else "failed",
+                summary=(
+                    "Every required series passed its own proof core."
+                    if required_passed
+                    else "At least one required series did not pass its own proof core."
+                ),
+                blocking=True,
+                checks=[
+                    {
+                        "code": "required_series_proof",
+                        "label": "Required series proof core",
+                        "status": "passed" if required_passed else "failed",
+                        "message": (
+                            "Every required series passed its own proof core."
+                            if required_passed
+                            else "At least one required series did not pass its own proof core."
+                        ),
+                    }
+                ],
+            ),
+            PIPELINE_PHASE_CLINICAL_PLAUSIBILITY: _phase_entry(
+                title="Clinical Plausibility",
+                status=clinical_status,
+                summary=(
+                    "Required-series clinical plausibility findings were aggregated from per-series reports."
+                ),
+                blocking=True,
+            ),
+            PIPELINE_PHASE_POLICY_EVALUATION: _phase_entry(
+                title="Policy Evaluation",
+                status="blocked" if policy_blocked else "passed",
+                summary=(
+                    "A required series carried a policy-level block."
+                    if policy_blocked
+                    else "No required series carried a policy-level block."
+                ),
+                blocking=True,
+            ),
+            PIPELINE_PHASE_MULTI_SERIES_AGGREGATION: _phase_entry(
+                title="Multi-Series Aggregation",
+                status="passed" if final_release_allowed else "failed",
+                summary=(
+                    "Study aggregation verified required-series geometry, corroboration, and merged release."
+                    if final_release_allowed
+                    else "Study aggregation did not verify required-series geometry, corroboration, or merged release."
+                ),
+                blocking=True,
+                checks=[
+                    {
+                        "code": "cross_series_geometry",
+                        "label": "Required-series geometry",
+                        "status": "passed" if geometry_verification["verified"] else "failed",
+                        "message": str(geometry_verification["message"]),
+                    },
+                    {
+                        "code": "lesion_corroboration",
+                        "label": "Positive-lesion corroboration",
+                        "status": "passed" if lesion_corroboration["verified"] else "failed",
+                        "message": str(lesion_corroboration["message"]),
+                    },
+                    {
+                        "code": "merged_release",
+                        "label": "Merged release",
+                        "status": "passed" if final_release_allowed else "failed",
+                        "message": (
+                            "The study passed the merged release gate."
+                            if final_release_allowed
+                            else "The study did not pass the merged release gate."
+                        ),
+                    },
+                ],
+            ),
+            PIPELINE_PHASE_RELEASE_CONTROL: _phase_entry(
+                title="Release Control",
+                status="released" if final_release_allowed else "blocked",
+                summary=(
+                    "The study passed release control."
+                    if final_release_allowed
+                    else "The study did not pass release control."
+                ),
+                blocking=True,
             ),
         },
-        "series_proof": {
-            "title": "Per-Series Proof",
-            "status": "passed" if required_passed else "failed",
-            "summary": (
-                "Every required series passed its own proof and profile gate."
-                if required_passed
-                else "At least one required series failed its own proof or profile gate."
-            ),
-            "auxiliary_failures": auxiliary_failures,
-        },
-        "cross_series_consistency": {
-            "title": "Cross-Series Consistency",
-            "status": (
-                "passed"
-                if geometry_verification["verified"] and lesion_corroboration["verified"]
-                else "failed"
-            ),
-            "summary": (
-                "Required-series geometry and positive-lesion corroboration both verified."
-                if geometry_verification["verified"] and lesion_corroboration["verified"]
-                else "Required-series geometry or positive-lesion corroboration did not verify."
-            ),
-        },
-        "merged_release": {
-            "title": "Merged Release",
-            "status": "passed" if final_release_allowed else "failed",
-            "summary": (
-                "The study passed the merged release gate."
-                if final_release_allowed
-                else "The study did not pass the merged release gate."
-            ),
-        },
+        "auxiliary_failures": auxiliary_failures,
     }
 
 
@@ -1753,7 +1965,7 @@ def _build_multi_series_study_report(
             if report["downstream_release_allowed"]
         ),
     }
-    verification_tiers = _build_multi_series_verification_tiers(
+    verification_pipeline = _build_multi_series_verification_pipeline(
         series_reports=updated_series_reports,
         missing_required_series_ids=missing_required,
         geometry_verification=geometry_verification,
@@ -1774,7 +1986,7 @@ def _build_multi_series_study_report(
             _build_multi_series_series_manifest(report) for report in updated_series_reports
         ],
         "decision_summary": decision_summary,
-        "verification_tiers": verification_tiers,
+        "verification_pipeline": verification_pipeline,
     }
     report = {
         "case_kind": MULTI_SERIES_CASE_KIND,
@@ -1814,7 +2026,7 @@ def _build_multi_series_study_report(
         },
         "series_reports": updated_series_reports,
         "manifest": manifest,
-        "verification_tiers": verification_tiers,
+        "verification_pipeline": verification_pipeline,
         "failure_reasons": failure_reasons,
         "decision_summary": decision_summary,
         "release_eligible": final_release_allowed,
@@ -4819,6 +5031,12 @@ def _build_verified_manifest(
         "final_release_allowed": final_release_allowed,
         "operator_review_required": clinical_plausibility["operator_review_required"],
     }
+    proof_stage_verification = {
+        PROOF_STAGE_MEASUREMENT_INTEGRITY: consistency_verified,
+        PROOF_STAGE_RECONSTRUCTION_PARITY: ai_match_verified,
+        PROOF_STAGE_SEGMENTATION_POLICY: mask_verified,
+        PROOF_STAGE_VOLUME_COMPUTATION: volume_verified,
+    }
     manifest = {
         "profile_name": descriptor.profile_name,
         "profile_revision": descriptor.profile_revision,
@@ -4828,7 +5046,6 @@ def _build_verified_manifest(
         "raw_hash": analysis["raw_hash"],
         "verification_profile_descriptor": contracts["verification_profile_descriptor"],
         "ai_claim_envelope": contracts["ai_claim_envelope"],
-        "verified_reconstruction_trace": contracts["verified_reconstruction_trace"],
         "mask_derivation_policy": contracts["mask_derivation_policy"],
         "verification_tolerance_policy": contracts["verification_tolerance_policy"],
         "derived_reconstruction_hash": analysis["derived_reconstruction_hash"],
@@ -4838,18 +5055,17 @@ def _build_verified_manifest(
         "performance_expectations": contracts["verification_profile_descriptor"][
             "performance_expectations"
         ],
-        "mask_verification": _build_mask_verification_manifest(
-            analysis=analysis,
-            verified=mask_verified,
-            mask_derivation_policy=contracts["mask_derivation_policy"],
-        ),
-        "measurement_consistency": {
+        "measurement_integrity_proof": {
             "verified": consistency_verified,
             "domain": "frequency_domain",
+            "proof_scope": "derived_reconstruction_measurement_domain_anchoring",
             "attack_surface": (
                 "Distributed low-amplitude k-space perturbations are checked with a "
                 "global norm in addition to the per-frequency maximum."
             ),
+            "raw_kspace_hash": analysis["raw_hash"],
+            "derived_reconstruction_hash": analysis["derived_reconstruction_hash"],
+            "forward_projection_hash": analysis["forward_projection_hash"],
             "max_abs_error": analysis["max_measurement_abs_error"],
             "relative_l2_error": analysis["relative_measurement_l2_error"],
             "max_imaginary_leakage": analysis["max_imaginary_leakage"],
@@ -4862,15 +5078,17 @@ def _build_verified_manifest(
             ),
             "guard_band_fraction": descriptor.guard_band_fraction,
             "metrics": measurement_metrics,
-            "forward_projection_hash": analysis["forward_projection_hash"],
         },
-        "ai_reconstruction_match": {
+        "reconstruction_parity_proof": {
             "verified": ai_match_verified,
             "domain": "spatial_image_domain",
+            "proof_scope": "ai_reconstruction_to_derived_reconstruction_parity",
             "attack_surface": (
                 "Distributed low-amplitude voxel perturbations are checked with a "
                 "global norm in addition to the per-voxel maximum."
             ),
+            "ai_reconstruction_hash": analysis["ai_reconstruction_hash"],
+            "derived_reconstruction_hash": analysis["derived_reconstruction_hash"],
             "max_abs_error": analysis["max_ai_abs_error"],
             "relative_l2_error": analysis["relative_ai_l2_error"],
             "max_abs_tolerance": descriptor.tolerance("spatial_per_voxel_abs_error"),
@@ -4880,23 +5098,37 @@ def _build_verified_manifest(
             "guard_band_fraction": descriptor.guard_band_fraction,
             "metrics": ai_match_metrics,
         },
-        "tumor_volume_proof": {
+        "segmentation_policy_proof": _build_segmentation_policy_proof_manifest(
+            analysis=analysis,
+            verified=mask_verified,
+            mask_derivation_policy=contracts["mask_derivation_policy"],
+        ),
+        "volume_computation_proof": {
             "verified": volume_verified,
+            "proof_scope": "verified_mask_geometry_scalar_volume_check",
             "claimed_mm3": claimed_volume,
             "computed_mm3": analysis["computed_tumor_volume_mm3"],
             "voxel_count": analysis["verified_mask_voxel_count"],
             "voxel_volume_mm3": analysis["voxel_volume_mm3"],
+            "verified_mask_hash": analysis["verified_mask_hash"],
             "tolerance_metric": volume_metric,
         },
-        "no_invented_pixels": {
-            "verified": consistency_verified and ai_match_verified,
-            "pixel_source": "harness_reconstructed_from_raw_kspace",
-            "ai_render_passthrough_allowed": False,
+        "proof_core_summary": {
+            "verified": proof_status == "passed",
+            "no_invented_pixels": consistency_verified and ai_match_verified,
+            "canonical_stage_order": list(_PROOF_STAGE_ORDER),
+            "earliest_failing_proof_stage": _earliest_failing_proof_stage(
+                proof_stage_verification
+            ),
         },
         "clinical_plausibility": clinical_plausibility,
         "decision_summary": decision_summary,
     }
-    manifest["verification_tiers"] = _build_verification_tiers(state, manifest, descriptor)
+    manifest["verification_pipeline"] = _build_verification_pipeline(
+        state,
+        manifest,
+        descriptor,
+    )
     return manifest
 
 
@@ -5044,15 +5276,113 @@ def _build_clinical_plausibility_manifest(
     }
 
 
-def _build_verification_tiers(
+def _phase_entry(
+    *,
+    title: str,
+    status: str,
+    summary: str,
+    blocking: bool,
+    checks: list[dict[str, Any]] | None = None,
+    proof_stages: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "title": title,
+        "status": status,
+        "summary": summary,
+        "blocking": blocking,
+    }
+    if checks is not None:
+        payload["checks"] = checks
+    if proof_stages is not None:
+        payload["proof_stage_order"] = list(_PROOF_STAGE_ORDER)
+        payload["proof_stages"] = proof_stages
+    return payload
+
+
+def _proof_stage_result(
+    *,
+    proof_stage: str,
+    title: str,
+    verified: bool | None,
+    summary: str,
+) -> dict[str, Any]:
+    if verified is None:
+        status = "not_evaluated"
+    else:
+        status = "passed" if verified else "failed"
+    return {
+        "proof_stage": proof_stage,
+        "title": title,
+        "status": status,
+        "summary": summary,
+    }
+
+
+def _earliest_failing_proof_stage(stage_verification: Mapping[str, bool]) -> str | None:
+    for proof_stage in _PROOF_STAGE_ORDER:
+        if not bool(stage_verification.get(proof_stage, False)):
+            return proof_stage
+    return None
+
+
+def _build_proof_core_stage_results(
+    manifest: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    measurement = manifest["measurement_integrity_proof"]
+    reconstruction = manifest["reconstruction_parity_proof"]
+    segmentation = manifest["segmentation_policy_proof"]
+    volume = manifest["volume_computation_proof"]
+    return [
+        _proof_stage_result(
+            proof_stage=PROOF_STAGE_MEASUREMENT_INTEGRITY,
+            title="Measurement Integrity",
+            verified=bool(measurement["verified"]),
+            summary=(
+                "The derived reconstruction remained anchored to the supplied raw measurements within policy."
+                if measurement["verified"]
+                else "The derived reconstruction could not be justified against the supplied raw measurements within policy."
+            ),
+        ),
+        _proof_stage_result(
+            proof_stage=PROOF_STAGE_RECONSTRUCTION_PARITY,
+            title="Reconstruction Parity",
+            verified=bool(reconstruction["verified"]),
+            summary=(
+                "The AI reconstruction matched the derived reconstruction within policy."
+                if reconstruction["verified"]
+                else "The AI reconstruction diverged from the derived reconstruction beyond policy."
+            ),
+        ),
+        _proof_stage_result(
+            proof_stage=PROOF_STAGE_SEGMENTATION_POLICY,
+            title="Segmentation Policy",
+            verified=bool(segmentation["verified"]),
+            summary=(
+                "The AI mask matched the policy-derived verified mask."
+                if segmentation["verified"]
+                else "The AI mask diverged from the policy-derived verified mask."
+            ),
+        ),
+        _proof_stage_result(
+            proof_stage=PROOF_STAGE_VOLUME_COMPUTATION,
+            title="Volume Computation",
+            verified=bool(volume["verified"]),
+            summary=(
+                "The claimed scalar volume matched the verified mask geometry within policy."
+                if volume["verified"]
+                else "The claimed scalar volume did not match the verified mask geometry within policy."
+            ),
+        ),
+    ]
+
+
+def _build_verification_pipeline(
     state: Mapping[str, Any],
     manifest: Mapping[str, Any],
     descriptor: Any,
 ) -> dict[str, Any]:
     structural_checks = _build_structural_validity_checks(state)
     structural_status = _tier_status_from_checks(structural_checks)
-    physical_checks = _build_physical_consistency_checks(manifest)
-    physical_status = _tier_status_from_checks(physical_checks)
     clinical_section = manifest["clinical_plausibility"]
     clinical_checks = [
         {
@@ -5063,43 +5393,87 @@ def _build_verification_tiers(
         }
         for entry in clinical_section["heuristics"]
     ]
+    proof_stages = _build_proof_core_stage_results(manifest)
+    proof_core_status = _tier_status_from_checks(proof_stages)
+    profile_policy_status = manifest["decision_summary"]["profile_policy_status"]
     return {
-        "level_1": {
-            "level": 1,
-            "title": "Level 1: Structural Validity",
-            "subtitle": "ICSD envelope",
-            "blocking": True,
-            "status": structural_status,
-            "summary": (
-                "ICSD structural checks passed for identifiers, numeric fields, voxel geometry, "
-                "and release payload shape."
-                if structural_status == "passed"
-                else "ICSD structural checks failed before mathematical verification can be trusted."
+        "schema": "canonical_assurance_flow",
+        "ordering_semantics": (
+            "Canonical assurance-flow schema and evidence-ordering model. "
+            "It does not mandate runtime execution topology."
+        ),
+        "phase_order": [
+            PIPELINE_PHASE_INTAKE_VALIDATION,
+            PIPELINE_PHASE_STRUCTURAL_VALIDITY,
+            PIPELINE_PHASE_PROOF_CORE,
+            PIPELINE_PHASE_CLINICAL_PLAUSIBILITY,
+            PIPELINE_PHASE_POLICY_EVALUATION,
+            PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
+            PIPELINE_PHASE_RELEASE_CONTROL,
+        ],
+        "phases": {
+            PIPELINE_PHASE_INTAKE_VALIDATION: _phase_entry(
+                title="Intake Validation",
+                status="passed",
+                summary="Profile selection and input intake completed without blocking intake faults.",
+                blocking=True,
             ),
-            "checks": structural_checks,
-        },
-        "level_2": {
-            "level": 2,
-            "title": "Level 2: Physical Consistency",
-            "subtitle": "k-space reconstruction",
-            "blocking": True,
-            "status": physical_status,
-            "summary": (
-                "Raw k-space, deterministic reconstruction, verified mask, and tumour volume "
-                "all agree."
-                if physical_status == "passed"
-                else "Raw-derived physical consistency failed; the AI claim diverges from measured reality."
+            PIPELINE_PHASE_STRUCTURAL_VALIDITY: _phase_entry(
+                title="Structural Validity",
+                status=structural_status,
+                summary=(
+                    "ICSD structural checks passed for identifiers, numeric fields, voxel geometry, "
+                    "and release payload shape."
+                    if structural_status == "passed"
+                    else "ICSD structural checks failed before proof-core results could be trusted."
+                ),
+                blocking=True,
+                checks=structural_checks,
             ),
-            "checks": physical_checks,
-        },
-        "level_3": {
-            "level": 3,
-            "title": "Level 3: Clinical Plausibility",
-            "subtitle": "Runtime profile heuristics",
-            "blocking": clinical_section["blocking_configured"],
-            "status": clinical_section["status"],
-            "summary": clinical_section["summary"],
-            "checks": clinical_checks,
+            PIPELINE_PHASE_PROOF_CORE: _phase_entry(
+                title="Proof Core",
+                status=proof_core_status,
+                summary=(
+                    "Measurement anchoring, reconstruction parity, segmentation policy, and volume computation all verified."
+                    if proof_core_status == "passed"
+                    else "At least one proof-core stage failed."
+                ),
+                blocking=True,
+                proof_stages=proof_stages,
+            ),
+            PIPELINE_PHASE_CLINICAL_PLAUSIBILITY: _phase_entry(
+                title="Clinical Plausibility",
+                status=str(clinical_section["status"]),
+                summary=str(clinical_section["summary"]),
+                blocking=bool(clinical_section["blocking_configured"]),
+                checks=clinical_checks,
+            ),
+            PIPELINE_PHASE_POLICY_EVALUATION: _phase_entry(
+                title="Policy Evaluation",
+                status="blocked" if profile_policy_status == "blocked" else "passed",
+                summary=(
+                    "A configured non-proof policy blocked final release."
+                    if profile_policy_status == "blocked"
+                    else "No non-proof policy blocked final release."
+                ),
+                blocking=True,
+            ),
+            PIPELINE_PHASE_MULTI_SERIES_AGGREGATION: _phase_entry(
+                title="Multi-Series Aggregation",
+                status="not_applicable",
+                summary="Single-series reports do not execute study-level aggregation.",
+                blocking=True,
+            ),
+            PIPELINE_PHASE_RELEASE_CONTROL: _phase_entry(
+                title="Release Control",
+                status="released" if manifest["decision_summary"]["final_release_allowed"] else "blocked",
+                summary=(
+                    "The case passed release control."
+                    if manifest["decision_summary"]["final_release_allowed"]
+                    else "The case did not pass release control."
+                ),
+                blocking=True,
+            ),
         },
     }
 
@@ -5261,14 +5635,14 @@ def _numeric_field_check(
     }
 
 
-def _build_physical_consistency_checks(
+def _build_proof_core_checks(
     manifest: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     return [
         _physical_check_result(
-            code="measurement_consistency",
+            code="measurement_integrity_proof",
             label="Raw k-space re-projection",
-            verified=manifest["measurement_consistency"]["verified"],
+            verified=manifest["measurement_integrity_proof"]["verified"],
             success_message=(
                 "The deterministic reconstruction reprojects back to the supplied raw k-space."
             ),
@@ -5278,9 +5652,9 @@ def _build_physical_consistency_checks(
             ),
         ),
         _physical_check_result(
-            code="ai_reconstruction_match",
+            code="reconstruction_parity_proof",
             label="AI reconstruction parity",
-            verified=manifest["ai_reconstruction_match"]["verified"],
+            verified=manifest["reconstruction_parity_proof"]["verified"],
             success_message=(
                 "The AI reconstruction matches the deterministic reconstruction on the measured grid."
             ),
@@ -5289,18 +5663,18 @@ def _build_physical_consistency_checks(
             ),
         ),
         _physical_check_result(
-            code="mask_verification",
+            code="segmentation_policy_proof",
             label="Verified mask parity",
-            verified=manifest["mask_verification"]["verified"],
+            verified=manifest["segmentation_policy_proof"]["verified"],
             success_message="The AI tumour mask matches the deterministic verified mask.",
             failure_message=(
                 "The AI tumour mask diverges from the deterministic verified mask."
             ),
         ),
         _physical_check_result(
-            code="tumor_volume_proof",
+            code="volume_computation_proof",
             label="Tumour volume proof",
-            verified=manifest["tumor_volume_proof"]["verified"],
+            verified=manifest["volume_computation_proof"]["verified"],
             success_message=(
                 "The submitted tumour volume equals the verified voxel count times voxel spacing."
             ),
@@ -5311,7 +5685,7 @@ def _build_physical_consistency_checks(
         _physical_check_result(
             code="no_invented_pixels",
             label="Invented pixel guard",
-            verified=manifest["no_invented_pixels"]["verified"],
+            verified=manifest["proof_core_summary"]["no_invented_pixels"],
             success_message="No AI-supplied pixels bypass the raw-derived verification-layer path.",
             failure_message=(
                 "The downstream PACS/workstation path is no longer fully explained "
@@ -5513,11 +5887,10 @@ def _extract_arrays(
 
 def _release_gate_sections() -> tuple[str, ...]:
     return (
-        "measurement_consistency",
-        "ai_reconstruction_match",
-        "mask_verification",
-        "tumor_volume_proof",
-        "no_invented_pixels",
+        "measurement_integrity_proof",
+        "reconstruction_parity_proof",
+        "segmentation_policy_proof",
+        "volume_computation_proof",
     )
 
 
@@ -5527,26 +5900,32 @@ def _build_failure_reasons(
     manifest: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     reasons: list[dict[str, Any]] = []
-    mask_delta = int(analysis["mask_voxel_delta"])
-    if mask_delta:
+    if not manifest["measurement_integrity_proof"]["verified"]:
         reasons.append(
             {
-                "code": "mask_voxel_mismatch",
+                "code": "raw_measurement_inconsistency",
                 "category": "proof_failure",
-                "summary": f"mask_voxel_mismatch (delta = {mask_delta} voxels)",
-                "delta": mask_delta,
+                "summary": (
+                    "raw_measurement_inconsistency "
+                    f"(max |Δ| = {_format_metric_for_summary(analysis['max_measurement_abs_error'])}; "
+                    f"relative_l2_error = {_format_metric_for_summary(analysis['relative_measurement_l2_error'])})"
+                ),
+                "delta": analysis["max_measurement_abs_error"],
                 "message": (
-                    "The AI tumour mask does not match the profile-derived verified mask "
-                    "computed from the raw-derived reconstruction."
+                    "The derived reconstruction could not be justified against the supplied raw "
+                    "measurements under the explicit per-frequency and global-norm tolerance policy."
                 ),
                 "details": {
-                    "false_positive_count": int(analysis["mask_false_positive_count"]),
-                    "false_negative_count": int(analysis["mask_false_negative_count"]),
+                    "pipeline_phase": PIPELINE_PHASE_PROOF_CORE,
+                    "proof_stage": PROOF_STAGE_MEASUREMENT_INTEGRITY,
+                    "relative_l2_error": analysis["relative_measurement_l2_error"],
+                    "max_imaginary_leakage": analysis["max_imaginary_leakage"],
+                    "metrics": manifest["measurement_integrity_proof"]["metrics"],
                 },
             }
         )
     intensity_delta = int(analysis["reconstruction_mismatch_voxel_count"])
-    if not manifest["ai_reconstruction_match"]["verified"]:
+    if not manifest["reconstruction_parity_proof"]["verified"]:
         if intensity_delta:
             summary = (
                 "intensity_manipulation_detected "
@@ -5571,15 +5950,37 @@ def _build_failure_reasons(
                     "tolerance contract."
                 ),
                 "details": {
+                    "pipeline_phase": PIPELINE_PHASE_PROOF_CORE,
+                    "proof_stage": PROOF_STAGE_RECONSTRUCTION_PARITY,
                     "max_abs_error": analysis["max_ai_abs_error"],
                     "relative_l2_error": analysis["relative_ai_l2_error"],
-                    "metrics": manifest["ai_reconstruction_match"]["metrics"],
+                    "metrics": manifest["reconstruction_parity_proof"]["metrics"],
                 },
             }
         )
-    if not manifest["tumor_volume_proof"]["verified"]:
+    mask_delta = int(analysis["mask_voxel_delta"])
+    if mask_delta:
+        reasons.append(
+            {
+                "code": "mask_voxel_mismatch",
+                "category": "proof_failure",
+                "summary": f"mask_voxel_mismatch (delta = {mask_delta} voxels)",
+                "delta": mask_delta,
+                "message": (
+                    "The AI tumour mask does not match the profile-derived verified mask "
+                    "computed from the raw-derived reconstruction."
+                ),
+                "details": {
+                    "pipeline_phase": PIPELINE_PHASE_PROOF_CORE,
+                    "proof_stage": PROOF_STAGE_SEGMENTATION_POLICY,
+                    "false_positive_count": int(analysis["mask_false_positive_count"]),
+                    "false_negative_count": int(analysis["mask_false_negative_count"]),
+                },
+            }
+        )
+    if not manifest["volume_computation_proof"]["verified"]:
         claimed_volume = _round_float(float(state["tumor_volume_mm3"]))
-        verified_volume = manifest["tumor_volume_proof"]["computed_mm3"]
+        verified_volume = manifest["volume_computation_proof"]["computed_mm3"]
         reasons.append(
             {
                 "code": "tumor_volume_mismatch",
@@ -5591,31 +5992,10 @@ def _build_failure_reasons(
                 "delta": _round_float(abs(claimed_volume - verified_volume)),
                 "message": "The submitted tumour volume does not match the verified mask volume.",
                 "details": {
+                    "pipeline_phase": PIPELINE_PHASE_PROOF_CORE,
+                    "proof_stage": PROOF_STAGE_VOLUME_COMPUTATION,
                     "claimed_mm3": claimed_volume,
                     "verified_mm3": verified_volume,
-                },
-            }
-        )
-    if not manifest["measurement_consistency"]["verified"]:
-        reasons.append(
-            {
-                "code": "raw_measurement_inconsistency",
-                "category": "proof_failure",
-                "summary": (
-                    "raw_measurement_inconsistency "
-                    f"(max |Δ| = {_format_metric_for_summary(analysis['max_measurement_abs_error'])}; "
-                    f"relative_l2_error = {_format_metric_for_summary(analysis['relative_measurement_l2_error'])})"
-                ),
-                "delta": analysis["max_measurement_abs_error"],
-                "message": (
-                    "The deterministic reconstruction cannot be cleanly reprojected back "
-                    "to the supplied raw measurements under the explicit per-frequency and "
-                    "global-norm tolerance policy."
-                ),
-                "details": {
-                    "relative_l2_error": analysis["relative_measurement_l2_error"],
-                    "max_imaginary_leakage": analysis["max_imaginary_leakage"],
-                    "metrics": manifest["measurement_consistency"]["metrics"],
                 },
             }
         )
@@ -5627,7 +6007,10 @@ def _build_failure_reasons(
                 "summary": f"{entry['code']} (blocking heuristic)",
                 "delta": None,
                 "message": entry["message"],
-                "details": {"source": "clinical_plausibility"},
+                "details": {
+                    "pipeline_phase": PIPELINE_PHASE_CLINICAL_PLAUSIBILITY,
+                    "source": "clinical_plausibility",
+                },
             }
         )
     if not manifest["decision_summary"]["final_release_allowed"] and manifest["decision_summary"][
@@ -5647,6 +6030,7 @@ def _build_failure_reasons(
                     "released state or portable evidence bundle."
                 ),
                 "details": {
+                    "pipeline_phase": PIPELINE_PHASE_POLICY_EVALUATION,
                     "profile_name": manifest["profile_name"],
                     "decision_class": manifest["decision_summary"]["decision_class"],
                 },
@@ -5658,10 +6042,11 @@ def _build_failure_reasons(
 def _decision_reasons_from_failure_reasons(
     failure_reasons: list[dict[str, Any]],
     *,
-    stage: str,
+    pipeline_phase: str,
     severity: str,
     primary_code: str | None = None,
     primary_message: str | None = None,
+    proof_stage: str | None = None,
 ) -> list[dict[str, Any]]:
     if not failure_reasons and primary_code is None:
         return []
@@ -5670,10 +6055,11 @@ def _decision_reasons_from_failure_reasons(
         reasons.append(
             _decision_reason(
                 code=primary_code,
-                stage=stage,
+                pipeline_phase=pipeline_phase,
                 severity=severity,
                 message=primary_message,
                 band=DECISION_REASON_BAND_PRIMARY,
+                proof_stage=proof_stage,
             )
         )
         supporting = sorted(failure_reasons, key=lambda item: str(item["code"]))
@@ -5682,20 +6068,28 @@ def _decision_reasons_from_failure_reasons(
         reasons.append(
             _decision_reason(
                 code=str(primary["code"]),
-                stage=stage,
+                pipeline_phase=str(
+                    primary.get("details", {}).get("pipeline_phase", pipeline_phase)
+                ),
                 severity=severity,
                 message=str(primary["message"]),
                 band=DECISION_REASON_BAND_PRIMARY,
+                proof_stage=str(primary.get("details", {}).get("proof_stage", proof_stage))
+                if primary.get("details", {}).get("proof_stage", proof_stage) is not None
+                else None,
             )
         )
         supporting = sorted(failure_reasons[1:], key=lambda item: str(item["code"]))
     reasons.extend(
         _decision_reason(
             code=str(item["code"]),
-            stage=stage,
+            pipeline_phase=str(item.get("details", {}).get("pipeline_phase", pipeline_phase)),
             severity=severity,
             message=str(item["message"]),
             band=DECISION_REASON_BAND_SAME_STAGE,
+            proof_stage=str(item.get("details", {}).get("proof_stage", proof_stage))
+            if item.get("details", {}).get("proof_stage", proof_stage) is not None
+            else None,
         )
         for item in supporting
     )
@@ -5705,47 +6099,53 @@ def _decision_reasons_from_failure_reasons(
 def _collect_near_boundary_metric_reasons(manifest: Mapping[str, Any]) -> list[dict[str, str]]:
     metric_specs = (
         (
-            "measurement_consistency",
+            "measurement_integrity_proof",
             "per_frequency_complex_abs_error",
             "measurement_per_frequency_complex_abs_error_near_boundary",
             "The frequency-domain per-coefficient absolute error remained within tolerance but inside the configured guard band.",
+            PROOF_STAGE_MEASUREMENT_INTEGRITY,
         ),
         (
-            "measurement_consistency",
+            "measurement_integrity_proof",
             "global_relative_l2_error",
             "measurement_global_relative_l2_error_near_boundary",
             "The frequency-domain global relative L2 error remained within tolerance but inside the configured guard band.",
+            PROOF_STAGE_MEASUREMENT_INTEGRITY,
         ),
         (
-            "measurement_consistency",
+            "measurement_integrity_proof",
             "spatial_imaginary_leakage",
             "measurement_spatial_imaginary_leakage_near_boundary",
             "The inverse-FFT imaginary leakage remained within tolerance but inside the configured guard band.",
+            PROOF_STAGE_MEASUREMENT_INTEGRITY,
         ),
         (
-            "ai_reconstruction_match",
+            "reconstruction_parity_proof",
             "per_voxel_abs_error",
             "ai_reconstruction_per_voxel_abs_error_near_boundary",
             "The AI reconstruction per-voxel absolute error remained within tolerance but inside the configured guard band.",
+            PROOF_STAGE_RECONSTRUCTION_PARITY,
         ),
         (
-            "ai_reconstruction_match",
+            "reconstruction_parity_proof",
             "global_relative_l2_error",
             "ai_reconstruction_global_relative_l2_error_near_boundary",
             "The AI reconstruction global relative L2 error remained within tolerance but inside the configured guard band.",
+            PROOF_STAGE_RECONSTRUCTION_PARITY,
         ),
     )
     reasons: list[dict[str, str]] = []
-    for section_name, metric_name, code, message in metric_specs:
+    for section_name, metric_name, code, message, proof_stage in metric_specs:
         metric = manifest[section_name]["metrics"][metric_name]
         if metric["within_tolerance"] and metric["boundary_status"] == "near_boundary":
-            reasons.append({"code": code, "message": message})
-    volume_metric = manifest["tumor_volume_proof"]["tolerance_metric"]
+            reasons.append({"code": code, "message": message, "proof_stage": proof_stage})
+    volume_metric = manifest["volume_computation_proof"]["tolerance_metric"]
     if volume_metric["within_tolerance"] and volume_metric["boundary_status"] == "near_boundary":
         reasons.append(
             {
                 "code": "tumor_volume_absolute_error_near_boundary",
                 "message": "The tumour-volume absolute error remained within tolerance but inside the configured guard band.",
+                "proof_stage": PROOF_STAGE_VOLUME_COMPUTATION,
             }
         )
     return reasons
@@ -5773,29 +6173,39 @@ def _collect_non_blocking_clinical_reasons(
 
 
 def _build_single_series_decision_lineage(report: Mapping[str, Any]) -> list[dict[str, str]]:
-    decision_summary = report["decision_summary"]
-    tiers = report["verification_tiers"]
+    phases = report["verification_pipeline"]["phases"]
     return [
-        _decision_lineage_entry(EVALUATION_STAGE_INTAKE_VALIDATION, "passed"),
         _decision_lineage_entry(
-            EVALUATION_STAGE_STRUCTURAL_VALIDITY,
-            str(tiers["level_1"]["status"]),
+            PIPELINE_PHASE_INTAKE_VALIDATION,
+            str(phases[PIPELINE_PHASE_INTAKE_VALIDATION]["status"]),
         ),
         _decision_lineage_entry(
-            EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
-            str(tiers["level_2"]["status"]),
+            PIPELINE_PHASE_STRUCTURAL_VALIDITY,
+            str(phases[PIPELINE_PHASE_STRUCTURAL_VALIDITY]["status"]),
+        ),
+        *[
+            _decision_lineage_entry(
+                PIPELINE_PHASE_PROOF_CORE,
+                str(stage["status"]),
+                proof_stage=str(stage["proof_stage"]),
+            )
+            for stage in phases[PIPELINE_PHASE_PROOF_CORE]["proof_stages"]
+        ],
+        _decision_lineage_entry(
+            PIPELINE_PHASE_CLINICAL_PLAUSIBILITY,
+            str(phases[PIPELINE_PHASE_CLINICAL_PLAUSIBILITY]["status"]),
         ),
         _decision_lineage_entry(
-            EVALUATION_STAGE_CLINICAL_PLAUSIBILITY,
-            str(tiers["level_3"]["status"]),
+            PIPELINE_PHASE_POLICY_EVALUATION,
+            str(phases[PIPELINE_PHASE_POLICY_EVALUATION]["status"]),
         ),
         _decision_lineage_entry(
-            EVALUATION_STAGE_POLICY_EVALUATION,
-            "blocked" if decision_summary["profile_policy_status"] == "blocked" else "passed",
+            PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
+            str(phases[PIPELINE_PHASE_MULTI_SERIES_AGGREGATION]["status"]),
         ),
         _decision_lineage_entry(
-            EVALUATION_STAGE_RELEASE_CONTROL,
-            "released" if report["release_eligible"] else "blocked",
+            PIPELINE_PHASE_RELEASE_CONTROL,
+            str(phases[PIPELINE_PHASE_RELEASE_CONTROL]["status"]),
         ),
     ]
 
@@ -5811,13 +6221,23 @@ def _build_single_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
     success_modifiers["has_non_blocking_advisory"] = bool(advisory_reasons)
     success_modifiers["near_boundary_metrics"] = [item["code"] for item in boundary_reasons]
     success_modifiers["advisory_reason_codes"] = [item["code"] for item in advisory_reasons]
+    ordered_boundary_reasons = sorted(
+        boundary_reasons,
+        key=lambda entry: (
+            _PROOF_STAGE_ORDER.index(str(entry["proof_stage"])),
+            str(entry["code"]),
+        ),
+    )
+    primary_boundary_stage = (
+        None if not ordered_boundary_reasons else str(ordered_boundary_reasons[0]["proof_stage"])
+    )
 
     if report["release_eligible"]:
         if advisory_reasons:
             reasons = [
                 _decision_reason(
                     code="clinical_plausibility_non_blocking_finding",
-                    stage=EVALUATION_STAGE_CLINICAL_PLAUSIBILITY,
+                    pipeline_phase=PIPELINE_PHASE_CLINICAL_PLAUSIBILITY,
                     severity=DECISION_SEVERITY_WARNING,
                     message=manifest["clinical_plausibility"]["summary"],
                     band=DECISION_REASON_BAND_PRIMARY,
@@ -5826,7 +6246,7 @@ def _build_single_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
             reasons.extend(
                 _decision_reason(
                     code=item["code"],
-                    stage=EVALUATION_STAGE_CLINICAL_PLAUSIBILITY,
+                    pipeline_phase=PIPELINE_PHASE_CLINICAL_PLAUSIBILITY,
                     severity=item["severity"],
                     message=item["message"],
                     band=DECISION_REASON_BAND_SAME_STAGE,
@@ -5836,18 +6256,19 @@ def _build_single_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
             reasons.extend(
                 _decision_reason(
                     code=item["code"],
-                    stage=EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
+                    pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
                     severity=DECISION_SEVERITY_WARNING,
                     message=item["message"],
                     band=DECISION_REASON_BAND_SECONDARY_MODIFIER,
+                    proof_stage=str(item["proof_stage"]),
                 )
-                for item in sorted(boundary_reasons, key=lambda entry: entry["code"])
+                for item in ordered_boundary_reasons
             )
             return _build_decision(
                 final_disposition="released",
                 decision_class=DECISION_CLASS_VERIFIED_WITH_ADVISORY,
                 severity=DECISION_SEVERITY_WARNING,
-                evaluation_stage=EVALUATION_STAGE_CLINICAL_PLAUSIBILITY,
+                pipeline_phase=PIPELINE_PHASE_CLINICAL_PLAUSIBILITY,
                 reasons=reasons,
                 success_modifiers=success_modifiers,
                 decision_lineage=_build_single_series_decision_lineage(report),
@@ -5856,43 +6277,46 @@ def _build_single_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
             reasons = [
                 _decision_reason(
                     code="proof_metric_near_boundary",
-                    stage=EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
+                    pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
                     severity=DECISION_SEVERITY_WARNING,
                     message=(
                         "The deterministic proof passed, but at least one eligible proof metric "
                         "fell within the configured guard band of a failure threshold."
                     ),
                     band=DECISION_REASON_BAND_PRIMARY,
+                    proof_stage=primary_boundary_stage,
                 )
             ]
             reasons.extend(
                 _decision_reason(
                     code=item["code"],
-                    stage=EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
+                    pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
                     severity=DECISION_SEVERITY_WARNING,
                     message=item["message"],
                     band=DECISION_REASON_BAND_SAME_STAGE,
+                    proof_stage=str(item["proof_stage"]),
                 )
-                for item in sorted(boundary_reasons, key=lambda entry: entry["code"])
+                for item in ordered_boundary_reasons
             )
             return _build_decision(
                 final_disposition="released",
                 decision_class=DECISION_CLASS_VERIFIED_BOUNDARY_HUGGING,
                 severity=DECISION_SEVERITY_WARNING,
-                evaluation_stage=EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
+                pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
                 reasons=reasons,
                 success_modifiers=success_modifiers,
                 decision_lineage=_build_single_series_decision_lineage(report),
+                proof_stage=primary_boundary_stage,
             )
         return _build_decision(
             final_disposition="released",
             decision_class=DECISION_CLASS_VERIFIED_CLEAN,
             severity=DECISION_SEVERITY_INFO,
-            evaluation_stage=EVALUATION_STAGE_RELEASE_CONTROL,
+            pipeline_phase=PIPELINE_PHASE_RELEASE_CONTROL,
             reasons=[
                 _decision_reason(
                     code="final_release_authorized",
-                    stage=EVALUATION_STAGE_RELEASE_CONTROL,
+                    pipeline_phase=PIPELINE_PHASE_RELEASE_CONTROL,
                     severity=DECISION_SEVERITY_INFO,
                     message=(
                         "All structural, physical, clinical, and release-control checks passed "
@@ -5906,24 +6330,24 @@ def _build_single_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
         )
 
     if failure_reasons and failure_reasons[0]["category"] == STRUCTURAL_FAILURE_CATEGORY:
-        primary_stage = str(
+        primary_phase = str(
             failure_reasons[0].get("details", {}).get(
-                "stage",
-                EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+                "pipeline_phase",
+                PIPELINE_PHASE_STRUCTURAL_VALIDITY,
             )
         )
         return _build_decision(
             final_disposition="blocked",
             decision_class=DECISION_CLASS_BLOCKED_STRUCTURAL,
             severity=DECISION_SEVERITY_ERROR,
-            evaluation_stage=primary_stage,
+            pipeline_phase=primary_phase,
             reasons=[
                 _decision_reason(
                     code=str(item["code"]),
-                    stage=str(
+                    pipeline_phase=str(
                         item.get("details", {}).get(
-                            "stage",
-                            EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+                            "pipeline_phase",
+                            PIPELINE_PHASE_STRUCTURAL_VALIDITY,
                         )
                     ),
                     severity=DECISION_SEVERITY_ERROR,
@@ -5944,18 +6368,22 @@ def _build_single_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
         physical_reasons = [
             reason for reason in failure_reasons if reason["category"] == "proof_failure"
         ]
+        earliest_failing_proof_stage = str(
+            physical_reasons[0]["details"]["proof_stage"]
+        )
         return _build_decision(
             final_disposition="blocked",
             decision_class=DECISION_CLASS_BLOCKED_PHYSICAL,
             severity=DECISION_SEVERITY_CRITICAL,
-            evaluation_stage=EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
+            pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
             reasons=_decision_reasons_from_failure_reasons(
                 physical_reasons,
-                stage=EVALUATION_STAGE_PHYSICAL_CONSISTENCY,
+                pipeline_phase=PIPELINE_PHASE_PROOF_CORE,
                 severity=DECISION_SEVERITY_CRITICAL,
             ),
             success_modifiers=success_modifiers,
             decision_lineage=_build_single_series_decision_lineage(report),
+            proof_stage=earliest_failing_proof_stage,
         )
 
     if decision_summary["decision_class"] == DECISION_CLASS_TRIAGE_ONLY:
@@ -5965,7 +6393,7 @@ def _build_single_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
                 for reason in failure_reasons
                 if reason["category"] == "profile_policy_block"
             ],
-            stage=EVALUATION_STAGE_POLICY_EVALUATION,
+            pipeline_phase=PIPELINE_PHASE_POLICY_EVALUATION,
             severity=DECISION_SEVERITY_ERROR,
         )
     else:
@@ -5977,7 +6405,7 @@ def _build_single_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
         reasons = [
             _decision_reason(
                 code="policy_blocked_by_clinical_plausibility",
-                stage=EVALUATION_STAGE_POLICY_EVALUATION,
+                pipeline_phase=PIPELINE_PHASE_POLICY_EVALUATION,
                 severity=DECISION_SEVERITY_ERROR,
                 message=(
                     "Structure and proof passed, but a configured blocking clinical policy prevented final release."
@@ -5988,7 +6416,7 @@ def _build_single_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
         reasons.extend(
             _decision_reason(
                 code=str(item["code"]),
-                stage=EVALUATION_STAGE_CLINICAL_PLAUSIBILITY,
+                pipeline_phase=PIPELINE_PHASE_CLINICAL_PLAUSIBILITY,
                 severity=DECISION_SEVERITY_ERROR,
                 message=str(item["message"]),
                 band=DECISION_REASON_BAND_SECONDARY_MODIFIER,
@@ -5999,7 +6427,7 @@ def _build_single_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
         final_disposition="blocked",
         decision_class=DECISION_CLASS_BLOCKED_POLICY,
         severity=DECISION_SEVERITY_ERROR,
-        evaluation_stage=EVALUATION_STAGE_POLICY_EVALUATION,
+        pipeline_phase=PIPELINE_PHASE_POLICY_EVALUATION,
         reasons=reasons,
         success_modifiers=success_modifiers,
         decision_lineage=_build_single_series_decision_lineage(report),
@@ -6023,48 +6451,35 @@ def _aggregate_status(statuses: list[str]) -> str:
 
 
 def _build_multi_series_decision_lineage(report: Mapping[str, Any]) -> list[dict[str, str]]:
-    required_reports = [
-        item for item in report["series_reports"] if item["gating_status"] == "required"
-    ]
-    downstream_reports = [
-        item for item in report["series_reports"] if item["downstream_release_allowed"]
-    ]
-    lineage_reports = downstream_reports or required_reports
-    block_category = str(report["decision_summary"]["block_category"])
-    structural_outcome = "failed" if (
-        block_category in {"missing_required_series", "required_series_geometry_mismatch"}
-        or any(
-            item["decision"]["decision_class"] == DECISION_CLASS_BLOCKED_STRUCTURAL
-            for item in required_reports
-        )
-    ) else "passed"
-    physical_outcome = "failed" if (
-        block_category == "positive_lesion_corroboration_failed"
-        or any(
-            item["decision"]["decision_class"] == DECISION_CLASS_BLOCKED_PHYSICAL
-            for item in required_reports
-        )
-    ) else "passed"
-    policy_outcome = "blocked" if any(
-        item["decision"]["decision_class"] == DECISION_CLASS_BLOCKED_POLICY
-        for item in required_reports
-    ) else "passed"
-    clinical_outcome = _aggregate_status(
-        [item["verification_tiers"]["level_3"]["status"] for item in lineage_reports]
-    )
+    phases = report["verification_pipeline"]["phases"]
     return [
-        _decision_lineage_entry(EVALUATION_STAGE_INTAKE_VALIDATION, "passed"),
-        _decision_lineage_entry(EVALUATION_STAGE_STRUCTURAL_VALIDITY, structural_outcome),
-        _decision_lineage_entry(EVALUATION_STAGE_PHYSICAL_CONSISTENCY, physical_outcome),
-        _decision_lineage_entry(EVALUATION_STAGE_CLINICAL_PLAUSIBILITY, clinical_outcome),
-        _decision_lineage_entry(EVALUATION_STAGE_POLICY_EVALUATION, policy_outcome),
         _decision_lineage_entry(
-            EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
-            str(report["verification_tiers"]["merged_release"]["status"]),
+            PIPELINE_PHASE_INTAKE_VALIDATION,
+            str(phases[PIPELINE_PHASE_INTAKE_VALIDATION]["status"]),
         ),
         _decision_lineage_entry(
-            EVALUATION_STAGE_RELEASE_CONTROL,
-            "released" if report["release_eligible"] else "blocked",
+            PIPELINE_PHASE_STRUCTURAL_VALIDITY,
+            str(phases[PIPELINE_PHASE_STRUCTURAL_VALIDITY]["status"]),
+        ),
+        _decision_lineage_entry(
+            PIPELINE_PHASE_PROOF_CORE,
+            str(phases[PIPELINE_PHASE_PROOF_CORE]["status"]),
+        ),
+        _decision_lineage_entry(
+            PIPELINE_PHASE_CLINICAL_PLAUSIBILITY,
+            str(phases[PIPELINE_PHASE_CLINICAL_PLAUSIBILITY]["status"]),
+        ),
+        _decision_lineage_entry(
+            PIPELINE_PHASE_POLICY_EVALUATION,
+            str(phases[PIPELINE_PHASE_POLICY_EVALUATION]["status"]),
+        ),
+        _decision_lineage_entry(
+            PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
+            str(phases[PIPELINE_PHASE_MULTI_SERIES_AGGREGATION]["status"]),
+        ),
+        _decision_lineage_entry(
+            PIPELINE_PHASE_RELEASE_CONTROL,
+            str(phases[PIPELINE_PHASE_RELEASE_CONTROL]["status"]),
         ),
     ]
 
@@ -6106,7 +6521,7 @@ def _build_multi_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
             reasons = [
                 _decision_reason(
                     code="study_contains_non_blocking_advisory",
-                    stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                    pipeline_phase=PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
                     severity=DECISION_SEVERITY_WARNING,
                     message=(
                         "At least one downstream-released series carried non-blocking advisory or warning findings."
@@ -6117,7 +6532,7 @@ def _build_multi_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
             reasons.extend(
                 _decision_reason(
                     code=f"downstream_series_{series_id}_with_advisory",
-                    stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                    pipeline_phase=PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
                     severity=DECISION_SEVERITY_WARNING,
                     message=(
                         f"Downstream-released series {series_id!r} carries non-blocking advisory findings."
@@ -6129,7 +6544,7 @@ def _build_multi_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
             reasons.extend(
                 _decision_reason(
                     code=f"downstream_series_{series_id}_near_boundary",
-                    stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                    pipeline_phase=PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
                     severity=DECISION_SEVERITY_WARNING,
                     message=(
                         f"Downstream-released series {series_id!r} also passed with guard-band boundary proximity."
@@ -6142,7 +6557,7 @@ def _build_multi_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
                 final_disposition="released",
                 decision_class=DECISION_CLASS_VERIFIED_WITH_ADVISORY,
                 severity=DECISION_SEVERITY_WARNING,
-                evaluation_stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                pipeline_phase=PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
                 reasons=reasons,
                 success_modifiers=success_modifiers,
                 decision_lineage=_build_multi_series_decision_lineage(report),
@@ -6151,7 +6566,7 @@ def _build_multi_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
             reasons = [
                 _decision_reason(
                     code="study_contains_near_boundary_series",
-                    stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                    pipeline_phase=PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
                     severity=DECISION_SEVERITY_WARNING,
                     message=(
                         "At least one downstream-released series passed inside the configured proof guard band."
@@ -6162,7 +6577,7 @@ def _build_multi_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
             reasons.extend(
                 _decision_reason(
                     code=f"downstream_series_{series_id}_near_boundary",
-                    stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                    pipeline_phase=PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
                     severity=DECISION_SEVERITY_WARNING,
                     message=(
                         f"Downstream-released series {series_id!r} passed with guard-band boundary proximity."
@@ -6175,7 +6590,7 @@ def _build_multi_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
                 final_disposition="released",
                 decision_class=DECISION_CLASS_VERIFIED_BOUNDARY_HUGGING,
                 severity=DECISION_SEVERITY_WARNING,
-                evaluation_stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                pipeline_phase=PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
                 reasons=reasons,
                 success_modifiers=success_modifiers,
                 decision_lineage=_build_multi_series_decision_lineage(report),
@@ -6184,11 +6599,11 @@ def _build_multi_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
             final_disposition="released",
             decision_class=DECISION_CLASS_VERIFIED_CLEAN,
             severity=DECISION_SEVERITY_INFO,
-            evaluation_stage=EVALUATION_STAGE_RELEASE_CONTROL,
+            pipeline_phase=PIPELINE_PHASE_RELEASE_CONTROL,
             reasons=[
                 _decision_reason(
                     code="study_final_release_authorized",
-                    stage=EVALUATION_STAGE_RELEASE_CONTROL,
+                    pipeline_phase=PIPELINE_PHASE_RELEASE_CONTROL,
                     severity=DECISION_SEVERITY_INFO,
                     message=(
                         "Every release-gating series passed, study-level aggregation verified, and no downstream-released series carried advisory or guard-band boundary signals."
@@ -6243,7 +6658,7 @@ def _build_multi_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
     reasons = [
         _decision_reason(
             code=str(matching_reason["code"]),
-            stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+            pipeline_phase=PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
             severity=severity,
             message=str(matching_reason["message"]),
             band=DECISION_REASON_BAND_PRIMARY,
@@ -6258,7 +6673,7 @@ def _build_multi_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
         reasons.extend(
             _decision_reason(
                 code=f"required_series_{series_id}_{required_reports[series_id]['decision']['decision_class']}",
-                stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                pipeline_phase=PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
                 severity=severity,
                 message=(
                     f"Required series {series_id!r} carried child decision class "
@@ -6272,7 +6687,7 @@ def _build_multi_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
         reasons.extend(
             _decision_reason(
                 code=str(item["code"]),
-                stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+                pipeline_phase=PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
                 severity=severity,
                 message=str(item["message"]),
                 band=DECISION_REASON_BAND_SAME_STAGE,
@@ -6283,7 +6698,7 @@ def _build_multi_series_decision(report: Mapping[str, Any]) -> dict[str, Any]:
         final_disposition="blocked",
         decision_class=decision_class,
         severity=severity,
-        evaluation_stage=EVALUATION_STAGE_MULTI_SERIES_AGGREGATION,
+        pipeline_phase=PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
         reasons=reasons,
         success_modifiers=success_modifiers,
         decision_lineage=_build_multi_series_decision_lineage(report),
@@ -6298,7 +6713,7 @@ def _derive_verified_mask(
     return execution.verified_mask.astype(np.int64)
 
 
-def _build_mask_verification_manifest(
+def _build_segmentation_policy_proof_manifest(
     *,
     analysis: Mapping[str, Any],
     verified: bool,
@@ -6411,33 +6826,10 @@ def _build_claim_to_proof_contracts(
         imaginary_leakage_abs_error=descriptor.tolerance("imaginary_leakage_abs_error"),
         volume_absolute_error=descriptor.tolerance("volume_absolute_error"),
     )
-    verified_reconstruction_trace = build_verified_reconstruction_trace(
-        case_id=str(state["case_id"]),
-        profile_name=descriptor.profile_name,
-        profile_revision=descriptor.profile_revision,
-        profile_digest=descriptor.profile_digest(),
-        icsd_policy_id=descriptor.icsd_policy_id,
-        icsd_policy_version=descriptor.icsd_policy_version,
-        raw_kspace_hash=analysis["raw_hash"],
-        derived_reconstruction_hash=analysis["derived_reconstruction_hash"],
-        forward_projection_hash=analysis["forward_projection_hash"],
-        verified_mask_hash=analysis["verified_mask_hash"],
-        computed_tumor_volume_mm3=analysis["computed_tumor_volume_mm3"],
-        claim_envelope=ai_claim_envelope,
-        mask_derivation_policy=mask_derivation_policy,
-        tolerance_policy=verification_tolerance_policy,
-        max_measurement_abs_error=analysis["max_measurement_abs_error"],
-        relative_measurement_l2_error=analysis["relative_measurement_l2_error"],
-        max_imaginary_leakage=analysis["max_imaginary_leakage"],
-        max_ai_abs_error=analysis["max_ai_abs_error"],
-        relative_ai_l2_error=analysis["relative_ai_l2_error"],
-        mask_voxel_delta=analysis["mask_voxel_delta"],
-    )
     prior_verified_context = temporal_consistency["prior_verified_context"]
     return {
         "verification_profile_descriptor": verification_profile_descriptor,
         "ai_claim_envelope": ai_claim_envelope,
-        "verified_reconstruction_trace": verified_reconstruction_trace,
         "mask_derivation_policy": mask_derivation_policy,
         "verification_tolerance_policy": verification_tolerance_policy,
         "prior_verified_contexts": temporal_consistency["prior_verified_contexts"],
@@ -6446,6 +6838,97 @@ def _build_claim_to_proof_contracts(
         "temporal_trajectory_trace": temporal_consistency["trajectory_trace"],
         "longitudinal_registration_trace": temporal_consistency["registration_trace"],
         "temporal_consistency_trace": temporal_consistency["trace"],
+    }
+
+
+def _materialize_proof_core_contracts(
+    *,
+    state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    contracts: Mapping[str, Any],
+    descriptor: Any,
+) -> dict[str, Any]:
+    measurement_integrity_proof = build_measurement_integrity_proof(
+        case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        icsd_policy_id=descriptor.icsd_policy_id,
+        icsd_policy_version=descriptor.icsd_policy_version,
+        claim_envelope=contracts["ai_claim_envelope"],
+        tolerance_policy=contracts["verification_tolerance_policy"],
+        raw_kspace_hash=analysis["raw_hash"],
+        derived_reconstruction_hash=analysis["derived_reconstruction_hash"],
+        forward_projection_hash=analysis["forward_projection_hash"],
+        verified=manifest["measurement_integrity_proof"]["verified"],
+        metrics=manifest["measurement_integrity_proof"]["metrics"],
+    )
+    reconstruction_parity_proof = build_reconstruction_parity_proof(
+        case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        icsd_policy_id=descriptor.icsd_policy_id,
+        icsd_policy_version=descriptor.icsd_policy_version,
+        claim_envelope=contracts["ai_claim_envelope"],
+        tolerance_policy=contracts["verification_tolerance_policy"],
+        ai_reconstruction_hash=analysis["ai_reconstruction_hash"],
+        derived_reconstruction_hash=analysis["derived_reconstruction_hash"],
+        verified=manifest["reconstruction_parity_proof"]["verified"],
+        metrics=manifest["reconstruction_parity_proof"]["metrics"],
+    )
+    segmentation_policy_proof = build_segmentation_policy_proof(
+        case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        icsd_policy_id=descriptor.icsd_policy_id,
+        icsd_policy_version=descriptor.icsd_policy_version,
+        claim_envelope=contracts["ai_claim_envelope"],
+        mask_derivation_policy=contracts["mask_derivation_policy"],
+        ai_mask_hash=analysis["ai_mask_hash"],
+        verified_mask_hash=analysis["verified_mask_hash"],
+        verified=manifest["segmentation_policy_proof"]["verified"],
+        comparison=manifest["segmentation_policy_proof"]["comparison"],
+    )
+    volume_computation_proof = build_volume_computation_proof(
+        case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        icsd_policy_id=descriptor.icsd_policy_id,
+        icsd_policy_version=descriptor.icsd_policy_version,
+        claim_envelope=contracts["ai_claim_envelope"],
+        verified_mask_hash=analysis["verified_mask_hash"],
+        verified=manifest["volume_computation_proof"]["verified"],
+        claimed_tumor_volume_mm3=manifest["volume_computation_proof"]["claimed_mm3"],
+        computed_tumor_volume_mm3=manifest["volume_computation_proof"]["computed_mm3"],
+        verified_mask_voxel_count=manifest["volume_computation_proof"]["voxel_count"],
+        voxel_volume_mm3=manifest["volume_computation_proof"]["voxel_volume_mm3"],
+        tolerance_metric=manifest["volume_computation_proof"]["tolerance_metric"],
+    )
+    proof_core_evidence_trace = build_proof_core_evidence_trace(
+        case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        icsd_policy_id=descriptor.icsd_policy_id,
+        icsd_policy_version=descriptor.icsd_policy_version,
+        verification_profile_descriptor=contracts["verification_profile_descriptor"],
+        ai_claim_envelope=contracts["ai_claim_envelope"],
+        measurement_integrity_proof=measurement_integrity_proof,
+        reconstruction_parity_proof=reconstruction_parity_proof,
+        segmentation_policy_proof=segmentation_policy_proof,
+        volume_computation_proof=volume_computation_proof,
+    )
+    return {
+        **contracts,
+        "measurement_integrity_proof": measurement_integrity_proof,
+        "reconstruction_parity_proof": reconstruction_parity_proof,
+        "segmentation_policy_proof": segmentation_policy_proof,
+        "volume_computation_proof": volume_computation_proof,
+        "proof_core_evidence_trace": proof_core_evidence_trace,
     }
 
 
