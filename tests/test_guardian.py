@@ -2847,6 +2847,8 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertIn("Study Gate", html)
         self.assertIn("derived-auxiliary", html)
         self.assertIn("supporting", html)
+        self.assertIn("2x2x2 @ 0.8/0.8/2.5 mm", html)
+        self.assertNotIn("{&#x27;shape&#x27;:", html)
 
     def test_view_model_reports_clean_baseline_case(self) -> None:
         view_model = build_side_by_side_view_model(build_demo_case())

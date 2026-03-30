@@ -403,7 +403,7 @@ def _render_multi_series_report_html(
             f"<td>{'Yes' if item['downstream_release_allowed'] else 'No'}</td>"
             f"<td>{item['verified_mask_voxel_count']}</td>"
             f"<td>{item['computed_tumor_volume_mm3']} mm3</td>"
-            f"<td class='code'>{escape(str(item['grid_signature']))}</td>"
+            f"<td class='code grid-summary' title='{escape(_grid_signature_detail(item['grid_signature']))}'>{escape(_grid_signature_summary(item['grid_signature']))}</td>"
             f"<td>{escape(item['primary_reason_summary'])}</td>"
             "</tr>"
         )
@@ -564,6 +564,9 @@ def _render_multi_series_report_html(
       font-family: "Cascadia Code", "Consolas", monospace;
       font-size: 0.9rem;
       overflow-wrap: anywhere;
+    }}
+    .grid-summary {{
+      white-space: nowrap;
     }}
     .section-title {{
       margin: 0 0 12px;
@@ -2654,3 +2657,28 @@ def _display_probe_shape(shape: list[int]) -> str:
 
 def _display_voxel_count(value: int) -> str:
     return f"{int(value):,}"
+
+
+def _grid_signature_summary(grid_signature: dict[str, Any]) -> str:
+    shape = _display_probe_shape(list(grid_signature.get("shape", [])))
+    spacing = "/".join(
+        f"{float(value):g}" for value in grid_signature.get("canonical_voxel_spacing_mm", [])
+    )
+    if shape and spacing:
+        return f"{shape} @ {spacing} mm"
+    if shape:
+        return shape
+    if spacing:
+        return f"{spacing} mm"
+    return "Unavailable"
+
+
+def _grid_signature_detail(grid_signature: dict[str, Any]) -> str:
+    shape = list(grid_signature.get("shape", []))
+    spacing = list(grid_signature.get("canonical_voxel_spacing_mm", []))
+    signature = str(grid_signature.get("signature", "unknown"))
+    return (
+        f"shape={shape}; "
+        f"canonical_voxel_spacing_mm={spacing}; "
+        f"signature={signature}"
+    )
