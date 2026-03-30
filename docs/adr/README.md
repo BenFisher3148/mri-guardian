@@ -16,6 +16,7 @@ This directory records architecture decisions that materially affect invariants,
 - [`0010-canonical-ai-claim-provenance-split.md`](0010-canonical-ai-claim-provenance-split.md)
 - [`0011-longitudinal-temporal-consistency-v1.md`](0011-longitudinal-temporal-consistency-v1.md)
 - [`0012-longitudinal-multi-prior-registration-and-study-aggregation.md`](0012-longitudinal-multi-prior-registration-and-study-aggregation.md)
+- [`0013-formal-verification-threat-corpus-v1.md`](0013-formal-verification-threat-corpus-v1.md)
 
 ## ADR Rules
 

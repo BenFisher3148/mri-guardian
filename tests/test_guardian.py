@@ -3010,6 +3010,9 @@ class MriGuardianHarnessTests(unittest.TestCase):
             len({entry["corpus_id"] for entry in corpus["entries"]}),
             len(corpus["entries"]),
         )
+        self.assertFalse(
+            any(entry["corpus_status"] == "deferred" for entry in corpus["entries"])
+        )
 
         for entry in corpus["entries"]:
             with self.subTest(slug=entry["slug"]):
@@ -3047,6 +3050,13 @@ class MriGuardianHarnessTests(unittest.TestCase):
                         roles & {"gating", "evidentiary"},
                         msg=f"{entry['slug']} missing gating/evidentiary control",
                     )
+        self.assertEqual(entries["component_micro_island"]["corpus_status"], "profile_scoped")
+        self.assertEqual(
+            entries["slice_single_slice_island"]["corpus_status"], "profile_scoped"
+        )
+        for slug in entries:
+            if slug not in {"component_micro_island", "slice_single_slice_island"}:
+                self.assertEqual(entries[slug]["corpus_status"], "active")
 
     def test_verification_threat_corpus_compatibility_subset_preserves_current_slugs(
         self,
@@ -3230,6 +3240,11 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertIn("VFTC-001", clinical)
         self.assertIn("VFTC-012", corpus_doc)
         self.assertIn("verification_threat_corpus.json", corpus_doc)
+        self.assertIn("0013-formal-verification-threat-corpus-v1.md", corpus_doc)
+        self.assertIn(
+            "0013-formal-verification-threat-corpus-v1.md",
+            Path("docs/adr/README.md").read_text(encoding="utf-8"),
+        )
 
     def test_timing_overlay_snapshot_is_positive_and_profile_scoped(self) -> None:
         profile = build_guardian_performance_profile("brain_t2_baseline")

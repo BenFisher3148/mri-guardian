@@ -6,6 +6,8 @@ The corpus is a deterministic adversarial and failure-scenario registry. It is n
 
 Tests are treated as executable evidence of control behaviour, not illustrative examples.
 
+The architectural decision for this surface is recorded in [`adr/0013-formal-verification-threat-corpus-v1.md`](adr/0013-formal-verification-threat-corpus-v1.md).
+
 ## Model
 
 - Canonical builder: `build_verification_threat_corpus(...)`
@@ -40,6 +42,12 @@ Tests are treated as executable evidence of control behaviour, not illustrative 
 - `detective`
 - `gating`
 - `evidentiary`
+
+### Corpus status
+
+- `active`: executable baseline corpus entry
+- `profile_scoped`: executable entry tied to a specific profile family
+- `deferred`: reserved for future corpus growth, not used in V1
 
 ## Reconstruction Integrity
 
