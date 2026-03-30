@@ -172,7 +172,7 @@ in a qualifying no-gap run of consecutive slices, not by label rank.
 - [mri_guardian/integration.py](mri_guardian/integration.py) mocks the DICOM ingress and PACS egress contracts around the verification proxy.
 - [mri_guardian/mask_engine.py](mri_guardian/mask_engine.py) defines the fixed approved mask-algorithm catalogue, canonical parameter resolution, and deterministic dispatcher.
 - [mri_guardian/profiles.py](mri_guardian/profiles.py) defines the runtime profile registry, canonical descriptor hashing, and the mapping from runtime profiles to ICSD policy identities.
-- [mri_guardian/tamper.py](mri_guardian/tamper.py) builds deterministic fake-tumour, shifted-mask, and intensity-manipulation scenarios.
+- [mri_guardian/tamper.py](mri_guardian/tamper.py) builds the deterministic verification threat corpus and the curated tamper-mode compatibility subset.
 - [mri_guardian/timing.py](mri_guardian/timing.py) profiles benchmark ladders, worst-case bounds, and the streaming-validation strategy for the verification path.
 - [mri_guardian/transparency.py](mri_guardian/transparency.py) implements a file-backed append-only hash chain for ICSD transparency receipts.
 - [mri_guardian/demo.py](mri_guardian/demo.py) writes a deterministic demo evidence bundle and downstream workstation payload.
@@ -184,6 +184,7 @@ in a qualifying no-gap run of consecutive slices, not by label rank.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/SECURITY.md](docs/SECURITY.md)
 - [docs/CLINICAL_RISK_ASSURANCE_MAPPING.md](docs/CLINICAL_RISK_ASSURANCE_MAPPING.md)
+- [docs/VERIFICATION_THREAT_CORPUS.md](docs/VERIFICATION_THREAT_CORPUS.md)
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md)
 - [docs/INTEROPERABILITY.md](docs/INTEROPERABILITY.md)
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
@@ -247,6 +248,7 @@ Inspect the mocked integration artifacts:
 - `demo_artifacts/integration_narrative.json`
 - `demo_artifacts/pacs_submission.json`
 - `demo_artifacts/integration_trace.json`
+- `demo_artifacts/verification_threat_corpus.json`
 - `demo_artifacts/tamper_fake_tumour_pacs_block.json`
 - `demo_artifacts/tamper_shifted_mask_pacs_block.json`
 - `demo_artifacts/tamper_intensity_manipulation_pacs_block.json`

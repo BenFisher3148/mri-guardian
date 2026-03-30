@@ -69,7 +69,10 @@ from mri_guardian.profiles import (
     list_verification_profiles,
     verification_profile_descriptor_from_dict,
 )
-from mri_guardian.tamper import build_tamper_scenarios
+from mri_guardian.tamper import (
+    build_tamper_scenarios,
+    build_verification_threat_corpus,
+)
 from mri_guardian.timing import (
     build_guardian_performance_profile,
     build_timing_overlay_snapshot,
@@ -2969,6 +2972,264 @@ class MriGuardianHarnessTests(unittest.TestCase):
             single_slice_report["contracts"]["mask_derivation_policy"]["algorithm"],
             SLICE_CONSISTENCY_ALGORITHM,
         )
+
+    def test_verification_threat_corpus_lists_required_entries_with_valid_metadata(
+        self,
+    ) -> None:
+        corpus = build_verification_threat_corpus()
+        entries = {entry["slug"]: entry for entry in corpus["entries"]}
+
+        self.assertEqual(corpus["interface_type"], "VerificationThreatCorpus")
+        self.assertEqual(corpus["revision"], "v1")
+        self.assertIn("qualitative", corpus["hazard_severity_note"])
+        self.assertIn("Normative invariants", corpus["expectation_model"]["normative"])
+        self.assertIn(
+            "Observational expectations",
+            corpus["expectation_model"]["observational"],
+        )
+        self.assertEqual(
+            set(entries),
+            {
+                "fake_tumour",
+                "shifted_mask",
+                "intensity_manipulation",
+                "subtle_distributed_perturbation",
+                "structured_ringing_artefact",
+                "slice_local_anomaly_injection",
+                "mask_erosion",
+                "mask_dilation",
+                "volume_rounding_attack",
+                "mixed_frequency_perturbation",
+                "stale_mask_replay",
+                "cross_series_misregistration",
+                "component_micro_island",
+                "slice_single_slice_island",
+            },
+        )
+        self.assertEqual(
+            len({entry["corpus_id"] for entry in corpus["entries"]}),
+            len(corpus["entries"]),
+        )
+
+        for entry in corpus["entries"]:
+            with self.subTest(slug=entry["slug"]):
+                self.assertTrue(entry["corpus_id"].startswith("VFTC-"))
+                self.assertIn(
+                    entry["scenario_surface"],
+                    {
+                        "single_series_reconstruction",
+                        "single_series_mask",
+                        "single_series_quantification",
+                        "multi_series_corroboration",
+                        "state_reuse",
+                        "profile_scoped_mask_policy",
+                    },
+                )
+                self.assertIn(
+                    entry["corpus_status"],
+                    {"active", "profile_scoped", "deferred"},
+                )
+                self.assertIn(
+                    entry["hazard_severity"],
+                    {"minor", "moderate", "major", "critical"},
+                )
+                contract = entry["determinism_contract"]
+                self.assertIn("builder_id", contract)
+                self.assertIn("fixed_inputs", contract)
+                self.assertIn("seed_strategy", contract)
+                roles = {item["control_role"] for item in entry["mitigation_mapping"]}
+                if entry["corpus_status"] == "active":
+                    self.assertTrue(
+                        roles & {"detective", "preventative"},
+                        msg=f"{entry['slug']} missing detective/preventative control",
+                    )
+                    self.assertTrue(
+                        roles & {"gating", "evidentiary"},
+                        msg=f"{entry['slug']} missing gating/evidentiary control",
+                    )
+
+    def test_verification_threat_corpus_compatibility_subset_preserves_current_slugs(
+        self,
+    ) -> None:
+        self.assertEqual(
+            tuple(item["slug"] for item in build_tamper_scenarios()),
+            ("fake_tumour", "shifted_mask", "intensity_manipulation"),
+        )
+        self.assertEqual(
+            tuple(
+                item["slug"]
+                for item in build_tamper_scenarios(
+                    profile_name="brain_t1_component_review"
+                )
+            ),
+            (
+                "fake_tumour",
+                "shifted_mask",
+                "intensity_manipulation",
+                "component_micro_island",
+            ),
+        )
+        self.assertEqual(
+            tuple(
+                item["slug"]
+                for item in build_tamper_scenarios(profile_name="brain_t1_slice_review")
+            ),
+            (
+                "fake_tumour",
+                "shifted_mask",
+                "intensity_manipulation",
+                "slice_single_slice_island",
+            ),
+        )
+
+    def test_verification_threat_corpus_entries_follow_expected_fail_closed_routes(
+        self,
+    ) -> None:
+        route_by_decision_class = {
+            "blocked_structural": "structural",
+            "blocked_physical": "physical",
+            "blocked_policy": "policy",
+        }
+        for entry in build_verification_threat_corpus()["entries"]:
+            with self.subTest(slug=entry["slug"]):
+                if entry["state"].get("case_kind") == MULTI_SERIES_CASE_KIND:
+                    report = build_multi_series_case_verification_report(entry["state"])
+                else:
+                    report = build_case_verification_report(
+                        entry["state"],
+                        profile_name=entry["profile_name"],
+                    )
+                self.assertEqual(
+                    report["decision"]["decision_class"],
+                    entry["normative_invariants"]["expected_decision_class"],
+                )
+                self.assertEqual(
+                    route_by_decision_class[report["decision"]["decision_class"]],
+                    entry["normative_invariants"]["expected_failure_route"],
+                )
+                expected_block_category = entry["observational_expectations"].get(
+                    "expected_block_category"
+                )
+                if expected_block_category is not None:
+                    self.assertEqual(
+                        report["decision_summary"]["block_category"],
+                        expected_block_category,
+                    )
+                expected_reason_family = entry["observational_expectations"].get(
+                    "expected_primary_reason_family"
+                )
+                if expected_reason_family is not None:
+                    self.assertEqual(
+                        report["failure_reasons"][0]["code"],
+                        expected_reason_family,
+                    )
+
+    def test_verification_threat_corpus_reason_family_is_only_used_for_durable_subset(
+        self,
+    ) -> None:
+        entries = build_verification_threat_corpus()["entries"]
+        actual = {
+            entry["slug"]
+            for entry in entries
+            if "expected_primary_reason_family"
+            in entry["observational_expectations"]
+        }
+        self.assertEqual(
+            actual,
+            {
+                "fake_tumour",
+                "shifted_mask",
+                "intensity_manipulation",
+                "subtle_distributed_perturbation",
+                "mask_erosion",
+                "mask_dilation",
+                "volume_rounding_attack",
+                "stale_mask_replay",
+                "cross_series_misregistration",
+                "component_micro_island",
+                "slice_single_slice_island",
+            },
+        )
+
+    def test_verification_threat_corpus_stale_mask_replay_stays_in_semantic_verification(
+        self,
+    ) -> None:
+        entry = next(
+            item
+            for item in build_verification_threat_corpus()["entries"]
+            if item["slug"] == "stale_mask_replay"
+        )
+        report = build_case_verification_report(
+            entry["state"],
+            profile_name=entry["profile_name"],
+        )
+
+        self.assertEqual(report["decision"]["decision_class"], "blocked_physical")
+        self.assertEqual(report["decision"]["evaluation_stage"], "physical_consistency")
+        self.assertIn(
+            {"stage": "structural_validity", "outcome": "passed"},
+            report["decision"]["decision_lineage"],
+        )
+        self.assertEqual(report["failure_reasons"][0]["code"], "mask_voxel_mismatch")
+        self.assertIn("Not manifest tampering", entry["provenance_scope"])
+
+    def test_verification_threat_corpus_cross_series_misregistration_preserves_geometry(
+        self,
+    ) -> None:
+        entry = next(
+            item
+            for item in build_verification_threat_corpus()["entries"]
+            if item["slug"] == "cross_series_misregistration"
+        )
+        report = build_multi_series_case_verification_report(entry["state"])
+
+        self.assertTrue(report["analysis"]["geometry_verification"]["verified"])
+        self.assertFalse(report["analysis"]["lesion_corroboration"]["verified"])
+        self.assertEqual(
+            report["decision_summary"]["block_category"],
+            "positive_lesion_corroboration_failed",
+        )
+        self.assertEqual(report["decision"]["decision_class"], "blocked_physical")
+
+    def test_run_demo_tamper_mode_emits_verification_threat_corpus_manifest(self) -> None:
+        demo_root = self.runtime_root / "threat_corpus_demo"
+
+        run_demo(
+            output_dir=demo_root,
+            profile_name="brain_t1_baseline",
+            tamper_mode=True,
+        )
+
+        corpus_manifest = json.loads(
+            (demo_root / "verification_threat_corpus.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        entries = {item["slug"]: item for item in corpus_manifest["entries"]}
+
+        self.assertIn("structured_ringing_artefact", entries)
+        self.assertTrue(entries["fake_tumour"]["legacy_curated_subset"])
+        self.assertFalse(entries["structured_ringing_artefact"]["legacy_curated_subset"])
+        self.assertTrue(
+            (demo_root / entries["structured_ringing_artefact"]["artifact_paths"]["html"]).exists()
+        )
+        self.assertTrue((demo_root / "tamper_cross_series_misregistration.html").exists())
+
+    def test_docs_reference_threat_corpus_and_canonical_ids(self) -> None:
+        readme = Path("README.md").read_text(encoding="utf-8")
+        security = Path("docs/SECURITY.md").read_text(encoding="utf-8")
+        clinical = Path("docs/CLINICAL_RISK_ASSURANCE_MAPPING.md").read_text(
+            encoding="utf-8"
+        )
+        corpus_doc = Path("docs/VERIFICATION_THREAT_CORPUS.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("VERIFICATION_THREAT_CORPUS.md", readme)
+        self.assertIn("VERIFICATION_THREAT_CORPUS.md", security)
+        self.assertIn("VFTC-001", clinical)
+        self.assertIn("VFTC-012", corpus_doc)
+        self.assertIn("verification_threat_corpus.json", corpus_doc)
 
     def test_timing_overlay_snapshot_is_positive_and_profile_scoped(self) -> None:
         profile = build_guardian_performance_profile("brain_t2_baseline")

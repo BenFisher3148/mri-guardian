@@ -78,7 +78,11 @@ from .profiles import (
     list_verification_profiles,
     verification_profile_descriptor_from_dict,
 )
-from .tamper import build_tamper_mode_base_case, build_tamper_scenarios
+from .tamper import (
+    build_tamper_mode_base_case,
+    build_tamper_scenarios,
+    build_verification_threat_corpus,
+)
 from .timing import build_guardian_performance_profile, build_timing_overlay_snapshot
 from .viewer import build_side_by_side_view_model, render_side_by_side_report_html
 
@@ -151,6 +155,7 @@ __all__ = [
     "list_approved_mask_algorithms",
     "build_tamper_mode_base_case",
     "build_tamper_scenarios",
+    "build_verification_threat_corpus",
     "build_guardian_performance_profile",
     "build_timing_overlay_snapshot",
     "build_side_by_side_view_model",

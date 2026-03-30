@@ -84,5 +84,6 @@ The demo uses pseudonymised study identifiers and does not model a full hospital
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md)
 - [`CLINICAL_RISK_ASSURANCE_MAPPING.md`](CLINICAL_RISK_ASSURANCE_MAPPING.md)
+- [`VERIFICATION_THREAT_CORPUS.md`](VERIFICATION_THREAT_CORPUS.md)
 - [`INTEROPERABILITY.md`](INTEROPERABILITY.md)
 - [`adr/0002-fail-closed-guardian-handoff.md`](adr/0002-fail-closed-guardian-handoff.md)

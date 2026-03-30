@@ -31,7 +31,11 @@ from .integration import (
     build_mock_pacs_submission,
 )
 from .profiles import DEFAULT_PROFILE_NAME, get_verification_profile
-from .tamper import build_tamper_mode_base_case, build_tamper_scenarios
+from .tamper import (
+    build_tamper_mode_base_case,
+    build_tamper_scenarios,
+    build_verification_threat_corpus,
+)
 from .timing import build_guardian_performance_profile
 from .viewer import render_side_by_side_report_html
 
@@ -59,6 +63,7 @@ def run_demo(
     (output_path / "longitudinal_registration_trace.json").unlink(missing_ok=True)
     (output_path / "temporal_consistency_trace.json").unlink(missing_ok=True)
     (output_path / "study_temporal_aggregation_trace.json").unlink(missing_ok=True)
+    (output_path / "verification_threat_corpus.json").unlink(missing_ok=True)
     descriptor = get_verification_profile(profile_name)
     if case_kind == MULTI_SERIES_CASE_KIND:
         case_state = build_multi_series_demo_case()
@@ -237,7 +242,12 @@ def _write_tamper_mode_reports(output_path: Path, *, profile_name: str) -> None:
         ),
         encoding="utf-8",
     )
-    for scenario in build_tamper_scenarios(profile_name=profile_name):
+    corpus = build_verification_threat_corpus(profile_name=profile_name)
+    corpus_entries: list[dict[str, Any]] = []
+    compatibility_slugs = {
+        item["slug"] for item in build_tamper_scenarios(profile_name=profile_name)
+    }
+    for scenario in corpus["entries"]:
         report_path = output_path / f"tamper_{scenario['slug']}.html"
         dicom_input = build_mock_dicom_input(scenario["state"])
         pacs_block = build_mock_pacs_block_notice(scenario["state"])
@@ -245,26 +255,47 @@ def _write_tamper_mode_reports(output_path: Path, *, profile_name: str) -> None:
             dicom_input=dicom_input,
             pacs_output=pacs_block,
         )
+        render_profile_name = scenario.get("profile_name") or profile_name
         report_path.write_text(
             render_side_by_side_report_html(
                 scenario["state"],
                 report_title=scenario["title"],
-                profile_name=profile_name,
+                profile_name=render_profile_name,
             ),
             encoding="utf-8",
         )
-        (output_path / f"tamper_{scenario['slug']}_dicom_input.json").write_text(
+        dicom_path = output_path / f"tamper_{scenario['slug']}_dicom_input.json"
+        block_path = output_path / f"tamper_{scenario['slug']}_pacs_block.json"
+        trace_path = output_path / f"tamper_{scenario['slug']}_integration_trace.json"
+        dicom_path.write_text(
             f"{canonical_json_dumps(dicom_input)}\n",
             encoding="utf-8",
         )
-        (output_path / f"tamper_{scenario['slug']}_pacs_block.json").write_text(
+        block_path.write_text(
             f"{canonical_json_dumps(pacs_block)}\n",
             encoding="utf-8",
         )
-        (output_path / f"tamper_{scenario['slug']}_integration_trace.json").write_text(
+        trace_path.write_text(
             f"{canonical_json_dumps(integration_trace)}\n",
             encoding="utf-8",
         )
+        corpus_entry = {key: value for key, value in scenario.items() if key != "state"}
+        corpus_entry["legacy_curated_subset"] = scenario["slug"] in compatibility_slugs
+        corpus_entry["artifact_paths"] = {
+            "html": report_path.name,
+            "dicom_input": dicom_path.name,
+            "pacs_block": block_path.name,
+            "integration_trace": trace_path.name,
+        }
+        corpus_entries.append(corpus_entry)
+    corpus_payload = {
+        key: value for key, value in corpus.items() if key != "entries"
+    }
+    corpus_payload["entries"] = corpus_entries
+    (output_path / "verification_threat_corpus.json").write_text(
+        f"{canonical_json_dumps(corpus_payload)}\n",
+        encoding="utf-8",
+    )
 
 
 def _write_profile_artifacts(output_path: Path, payload: dict[str, object]) -> None:
