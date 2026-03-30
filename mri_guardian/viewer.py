@@ -395,11 +395,15 @@ def _render_multi_series_report_html(
         (
             "<tr>"
             f"<td>{escape(item['series_id'])}</td>"
+            f"<td class='code'>{escape(item['series_uid'])}</td>"
             f"<td>{escape(item['resolved_role'])}</td>"
             f"<td>{escape(item['gating_status'])}</td>"
             f"<td>{escape(item['profile_name'])}</td>"
             f"<td>{escape(item['series_proof_status'])}</td>"
             f"<td>{'Yes' if item['downstream_release_allowed'] else 'No'}</td>"
+            f"<td>{item['verified_mask_voxel_count']}</td>"
+            f"<td>{item['computed_tumor_volume_mm3']} mm3</td>"
+            f"<td class='code'>{escape(str(item['grid_signature']))}</td>"
             f"<td>{escape(item['primary_reason_summary'])}</td>"
             "</tr>"
         )
@@ -422,6 +426,19 @@ def _render_multi_series_report_html(
         reason_markup = "<li>all_blocking_checks_passed</li>"
     released_series = ", ".join(view_model["study"]["released_series_ids"]) or "none"
     withheld_series = ", ".join(view_model["study"]["withheld_series_ids"]) or "none"
+    timing_rows = "\n".join(
+        (
+            "<tr>"
+            f"<td>{escape(item['series_id'])}</td>"
+            f"<td>{escape(item['profile_name'])}</td>"
+            f"<td>{_display_ms(item['timing']['reconstruction_ms'])}</td>"
+            f"<td>{_display_ms(item['timing']['verification_ms'])}</td>"
+            f"<td>{_display_percent(item['timing']['overhead_percent'])}</td>"
+            f"<td>{_display_ms(item['timing']['total_pipeline_ms'])}</td>"
+            "</tr>"
+        )
+        for item in view_model["timing_profiles"]
+    )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -429,52 +446,215 @@ def _render_multi_series_report_html(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escape(title)}</title>
   <style>
+    :root {{
+      --paper: #edf2f5;
+      --surface: #ffffff;
+      --surface-alt: #f6f9fb;
+      --line: #cfd9e2;
+      --ink: #15212b;
+      --muted: #556472;
+      --accent: #1f5f8b;
+      --accent-soft: #e7f0f7;
+      --safe: #1f6b48;
+      --safe-soft: #e8f4ed;
+      --danger: #932c2c;
+      --danger-soft: #f8ecec;
+      --warning: #876400;
+      --warning-soft: #fff4db;
+    }}
+    * {{
+      box-sizing: border-box;
+    }}
     body {{
       margin: 0;
-      font-family: "Aptos", "Segoe UI Variable", "Trebuchet MS", sans-serif;
-      background: linear-gradient(135deg, #f8f1e6 0%, #ebe1d2 100%);
-      color: #101820;
+      font-family: "Aptos", "Segoe UI", "Trebuchet MS", sans-serif;
+      background: linear-gradient(180deg, #edf2f5 0%, #e7edf1 100%);
+      color: var(--ink);
     }}
     main {{
-      width: min(1120px, calc(100vw - 32px));
-      margin: 24px auto;
+      width: min(1180px, calc(100vw - 32px));
+      margin: 20px auto 34px;
       display: grid;
-      gap: 18px;
+      gap: 14px;
     }}
     section {{
-      background: rgba(255, 248, 239, 0.94);
-      border-radius: 20px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 12px;
       padding: 20px;
-      box-shadow: 0 18px 40px rgba(16, 24, 32, 0.12);
+      box-shadow: 0 8px 24px rgba(17, 32, 44, 0.06);
+    }}
+    .header {{
+      border-top: 5px solid var(--accent);
+      padding-top: 18px;
+    }}
+    .eyebrow {{
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: 0.78rem;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-weight: 700;
+    }}
+    h1 {{
+      margin: 0;
+      font-size: clamp(1.7rem, 3vw, 2.5rem);
+      line-height: 1.1;
+      font-weight: 700;
+    }}
+    .subtitle {{
+      margin: 10px 0 0;
+      color: var(--muted);
+      max-width: 76ch;
+      line-height: 1.5;
+    }}
+    .status-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 16px 0;
+    }}
+    .pill {{
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--surface-alt);
+      font-weight: 700;
+      font-size: 0.92rem;
+    }}
+    .pill-pass {{
+      color: var(--safe);
+      background: var(--safe-soft);
+      border-color: rgba(31, 107, 72, 0.18);
+    }}
+    .pill-fail {{
+      color: var(--danger);
+      background: var(--danger-soft);
+      border-color: rgba(147, 44, 44, 0.18);
+    }}
+    .summary-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }}
+    .summary-card {{
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface-alt);
+    }}
+    .summary-label {{
+      display: block;
+      margin-bottom: 8px;
+      font-size: 0.76rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+    }}
+    .summary-value {{
+      font-size: 1.02rem;
+      font-weight: 700;
+      line-height: 1.25;
+    }}
+    .code {{
+      font-family: "Cascadia Code", "Consolas", monospace;
+      font-size: 0.9rem;
+      overflow-wrap: anywhere;
+    }}
+    .section-title {{
+      margin: 0 0 12px;
+      font-size: 1.16rem;
+    }}
+    .clinical-list {{
+      margin: 0;
+      padding-left: 18px;
+      line-height: 1.5;
+      color: var(--ink);
+    }}
+    .clinical-list li + li {{
+      margin-top: 8px;
+    }}
+    .note {{
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.5;
     }}
     table {{
       width: 100%;
       border-collapse: collapse;
+      font-size: 0.92rem;
     }}
     th, td {{
       padding: 10px 8px;
-      border-bottom: 1px solid rgba(16, 24, 32, 0.12);
+      border-bottom: 1px solid var(--line);
       text-align: left;
       vertical-align: top;
     }}
+    th {{
+      font-size: 0.78rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: var(--surface-alt);
+    }}
     .status {{
       font-weight: 700;
+      margin: 0 0 6px;
+    }}
+    @media (max-width: 800px) {{
+      main {{
+        width: min(100vw - 16px, 1180px);
+      }}
     }}
   </style>
 </head>
 <body>
   <main>
-    <section>
-      <p class="status">{escape(view_model['verification']['headline'])}</p>
+    <section class="header">
+      <p class="eyebrow">Clinical Study Verification Record</p>
       <h1>{escape(title)}</h1>
-      <p>{escape(view_model['subtitle'])}</p>
-      <p>Primary reason: {escape(view_model['verification']['primary_reason_summary'])}</p>
-      <p>Released series: {escape(released_series)}</p>
-      <p>Withheld series: {escape(withheld_series)}</p>
+      <p class="subtitle">{escape(view_model['subtitle'])}</p>
+      <div class="status-row">
+        <span class="pill {'pill-pass' if view_model['release_eligible'] else 'pill-fail'}">{escape(view_model['verification']['headline'])}</span>
+        <span class="pill">Primary profile {escape(view_model['primary_profile_name'])}</span>
+        <span class="pill">Study gate {escape(view_model['decision_summary']['block_category'])}</span>
+      </div>
+      <p class="status">Primary reason: {escape(view_model['verification']['primary_reason_summary'])}</p>
+      <div class="summary-grid">
+        <article class="summary-card">
+          <span class="summary-label">Study UID</span>
+          <div class="summary-value code">{escape(str(state.get("study_uid", "unknown")))}</div>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Patient pseudonym</span>
+          <div class="summary-value code">{escape(str(state.get("patient_pseudonym", "unknown")))}</div>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Released series</span>
+          <div class="summary-value">{escape(released_series)}</div>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Withheld series</span>
+          <div class="summary-value">{escape(withheld_series)}</div>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Temporal disposition</span>
+          <div class="summary-value">{escape(view_model['study']['study_temporal_aggregation']['final_temporal_disposition'])}</div>
+        </article>
+        <article class="summary-card">
+          <span class="summary-label">Profile descriptor hash</span>
+          <div class="summary-value code">{escape(view_model['study']['profile_descriptor_hash'])}</div>
+        </article>
+      </div>
     </section>
     <section>
-      <h2>Study Gate</h2>
-      <ul>
+      <h2 class="section-title">Study Gate</h2>
+      <ul class="clinical-list">
         <li>Required series: {escape(", ".join(view_model['study']['required_series_ids']))}</li>
         <li>Supporting series: {escape(", ".join(view_model['study']['supporting_series_ids']))}</li>
         <li>Auxiliary series: {escape(", ".join(view_model['study']['auxiliary_series_ids']))}</li>
@@ -482,22 +662,29 @@ def _render_multi_series_report_html(
         <li>Corroboration rule: {escape(view_model['study']['lesion_corroboration']['rule'])}</li>
         <li>Study temporal disposition: {escape(view_model['study']['study_temporal_aggregation']['final_temporal_disposition'])}</li>
       </ul>
+      <p class="note">
+        Geometry verification remains a structural admissibility check. Positive-lesion corroboration is the downstream physical confidence gate when required-series geometry already passes.
+      </p>
     </section>
     <section>
-      <h2>Verification Tiers</h2>
-      <ul>{tier_markup}</ul>
+      <h2 class="section-title">Verification Tiers</h2>
+      <ul class="clinical-list">{tier_markup}</ul>
     </section>
     <section>
-      <h2>Series Register</h2>
+      <h2 class="section-title">Series Register</h2>
       <table>
         <thead>
           <tr>
             <th>Series</th>
+            <th>Series UID</th>
             <th>Role</th>
             <th>Gate</th>
             <th>Profile</th>
             <th>Proof</th>
             <th>Released</th>
+            <th>Verified voxels</th>
+            <th>Volume</th>
+            <th>Grid</th>
             <th>Reason</th>
           </tr>
         </thead>
@@ -507,8 +694,26 @@ def _render_multi_series_report_html(
       </table>
     </section>
     <section>
-      <h2>Failure Reasons</h2>
-      <ul>{reason_markup}</ul>
+      <h2 class="section-title">Timing Register</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Series</th>
+            <th>Profile</th>
+            <th>Reconstruction</th>
+            <th>Verification</th>
+            <th>Overhead</th>
+            <th>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {timing_rows}
+        </tbody>
+      </table>
+    </section>
+    <section>
+      <h2 class="section-title">Failure Reasons</h2>
+      <ul class="clinical-list">{reason_markup}</ul>
     </section>
   </main>
 </body>
@@ -526,6 +731,10 @@ def render_side_by_side_report_html(
         return _render_multi_series_report_html(state, report_title=report_title)
     view_model = build_side_by_side_view_model(state, profile_name=profile_name)
     title = report_title if report_title is not None else view_model["title"]
+    patient_pseudonym = str(state.get("patient_pseudonym", "unknown"))
+    case_id = str(state.get("case_id", "unknown"))
+    study_uid = str(state.get("study_uid", "unknown"))
+    series_uid = str(state.get("series_uid", "unknown"))
     summary = view_model["summary"]
     verification = view_model["verification"]
     timing = view_model["timing"]
@@ -553,6 +762,9 @@ def render_side_by_side_report_html(
         )
         for reason in verification["reasons"]
     )
+    failure_banner_class = (
+        "failure-banner-pass" if view_model["release_eligible"] else "failure-banner-fail"
+    )
     data_json = json.dumps(view_model, separators=(",", ":"))
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -562,15 +774,21 @@ def render_side_by_side_report_html(
   <title>{escape(title)}</title>
   <style>
     :root {{
-      --paper: #f6f0e7;
-      --ink: #101820;
-      --signal-cool: #00d6ff;
-      --signal-warm: #ffc24b;
-      --signal-safe: #36e28f;
-      --signal-danger: #ff5a5f;
-      --panel-dark: #0f1721;
-      --panel-mid: #162332;
-      --card: rgba(255, 248, 239, 0.92);
+      --paper: #edf2f5;
+      --ink: #15212b;
+      --signal-cool: #2f7fb8;
+      --signal-warm: #9a6c00;
+      --signal-safe: #1f6b48;
+      --signal-danger: #932c2c;
+      --card: #ffffff;
+      --surface-alt: #f6f9fb;
+      --line: #cfd9e2;
+      --muted: #556472;
+      --accent: #1f5f8b;
+      --accent-soft: #e7f0f7;
+      --safe-soft: #e8f4ed;
+      --danger-soft: #f8ecec;
+      --warning-soft: #fff4db;
     }}
 
     * {{
@@ -580,12 +798,9 @@ def render_side_by_side_report_html(
     body {{
       margin: 0;
       min-height: 100vh;
-      font-family: "Aptos", "Segoe UI Variable", "Trebuchet MS", sans-serif;
+      font-family: "Aptos", "Segoe UI", "Trebuchet MS", sans-serif;
       color: var(--ink);
-      background:
-        radial-gradient(circle at top left, rgba(0, 214, 255, 0.16), transparent 35%),
-        radial-gradient(circle at top right, rgba(255, 194, 75, 0.24), transparent 30%),
-        linear-gradient(135deg, #f8f1e6 0%, #ebe1d2 100%);
+      background: linear-gradient(180deg, #edf2f5 0%, #e7edf1 100%);
     }}
 
     .shell {{
@@ -596,46 +811,41 @@ def render_side_by_side_report_html(
     .hero {{
       position: relative;
       overflow: hidden;
-      border-radius: 28px;
-      padding: 28px;
-      color: #f5f7fb;
-      background:
-        linear-gradient(115deg, rgba(9, 22, 35, 0.98), rgba(22, 35, 50, 0.94)),
-        linear-gradient(90deg, rgba(0, 214, 255, 0.12), rgba(255, 194, 75, 0.12));
-      box-shadow: 0 24px 60px rgba(10, 15, 22, 0.24);
+      border-radius: 14px;
+      padding: 24px;
+      color: var(--ink);
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-top: 5px solid var(--accent);
+      box-shadow: 0 8px 24px rgba(17, 32, 44, 0.06);
     }}
 
     .hero::after {{
-      content: "";
-      position: absolute;
-      inset: auto -40px -60px auto;
-      width: 220px;
-      height: 220px;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(255, 194, 75, 0.32), transparent 70%);
-      filter: blur(10px);
+      display: none;
     }}
 
     .eyebrow {{
       margin: 0 0 10px;
-      letter-spacing: 0.18em;
+      letter-spacing: 0.16em;
       text-transform: uppercase;
       font-size: 0.78rem;
-      color: rgba(255, 255, 255, 0.72);
+      font-weight: 700;
+      color: var(--accent);
     }}
 
     h1 {{
       margin: 0;
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2rem, 5vw, 3.4rem);
-      line-height: 0.98;
-      max-width: 12ch;
+      font-family: "Aptos", "Segoe UI", "Trebuchet MS", sans-serif;
+      font-size: clamp(1.8rem, 3.2vw, 2.7rem);
+      line-height: 1.08;
+      max-width: none;
+      font-weight: 700;
     }}
 
     .subtitle {{
-      max-width: 56ch;
-      margin: 14px 0 22px;
-      color: rgba(245, 247, 251, 0.86);
+      max-width: 72ch;
+      margin: 12px 0 18px;
+      color: var(--muted);
       font-size: 1rem;
       line-height: 1.5;
     }}
@@ -657,18 +867,19 @@ def render_side_by_side_report_html(
 
     .clinical-card {{
       padding: 16px 18px;
-      border-radius: 20px;
-      background: rgba(255, 255, 255, 0.1);
-      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      background: var(--surface-alt);
+      border: 1px solid var(--line);
     }}
 
     .clinical-label {{
       display: block;
-      color: rgba(245, 247, 251, 0.68);
+      color: var(--muted);
       font-size: 0.76rem;
       text-transform: uppercase;
       letter-spacing: 0.14em;
       margin-bottom: 10px;
+      font-weight: 700;
     }}
 
     .clinical-value {{
@@ -678,16 +889,16 @@ def render_side_by_side_report_html(
     }}
 
     .clinical-value-pass {{
-      color: #ddffec;
+      color: var(--signal-safe);
     }}
 
     .clinical-value-fail {{
-      color: #ffe5e6;
+      color: var(--signal-danger);
     }}
 
     .clinical-note {{
       margin: 8px 0 0;
-      color: rgba(245, 247, 251, 0.78);
+      color: var(--muted);
       font-size: 0.86rem;
       line-height: 1.45;
     }}
@@ -700,26 +911,73 @@ def render_side_by_side_report_html(
       border-radius: 999px;
       font-weight: 700;
       letter-spacing: 0.02em;
-      background: rgba(255, 255, 255, 0.1);
-      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: var(--surface-alt);
+      border: 1px solid var(--line);
     }}
 
     .status-pass {{
-      color: #ddffec;
-      background: rgba(54, 226, 143, 0.18);
+      color: var(--signal-safe);
+      background: var(--safe-soft);
+      border-color: rgba(31, 107, 72, 0.18);
     }}
 
     .status-fail {{
-      color: #ffe5e6;
-      background: rgba(255, 90, 95, 0.18);
+      color: var(--signal-danger);
+      background: var(--danger-soft);
+      border-color: rgba(147, 44, 44, 0.18);
+    }}
+
+    .record-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin: 0 0 16px;
+    }}
+
+    .record-card {{
+      padding: 14px 16px;
+      border-radius: 10px;
+      background: var(--surface-alt);
+      border: 1px solid var(--line);
+    }}
+
+    .record-label {{
+      display: block;
+      margin-bottom: 8px;
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-weight: 700;
+      color: var(--muted);
+    }}
+
+    .record-value {{
+      font-size: 0.98rem;
+      font-weight: 700;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }}
+
+    .record-code {{
+      font-family: "Cascadia Code", "Consolas", monospace;
+      font-size: 0.88rem;
     }}
 
     .failure-banner {{
       margin: 12px 0 20px;
       padding: 18px 20px;
-      border-radius: 20px;
-      background: rgba(255, 255, 255, 0.08);
-      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      border: 1px solid var(--line);
+    }}
+
+    .failure-banner-pass {{
+      background: var(--safe-soft);
+      border-color: rgba(31, 107, 72, 0.18);
+    }}
+
+    .failure-banner-fail {{
+      background: var(--danger-soft);
+      border-color: rgba(147, 44, 44, 0.18);
     }}
 
     .failure-banner h2 {{
@@ -733,13 +991,13 @@ def render_side_by_side_report_html(
     .failure-reason {{
       margin: 10px 0 0;
       font-size: 1rem;
-      color: rgba(245, 247, 251, 0.92);
+      color: var(--ink);
     }}
 
     .failure-list {{
       margin: 12px 0 0;
       padding-left: 18px;
-      color: rgba(245, 247, 251, 0.86);
+      color: var(--ink);
       line-height: 1.45;
     }}
 
@@ -753,10 +1011,10 @@ def render_side_by_side_report_html(
 
     .integration-node {{
       padding: 18px;
-      border-radius: 22px;
-      background: rgba(255, 248, 239, 0.94);
-      border: 1px solid rgba(16, 24, 32, 0.08);
-      box-shadow: 0 14px 30px rgba(15, 23, 33, 0.1);
+      border-radius: 10px;
+      background: var(--surface-alt);
+      border: 1px solid var(--line);
+      box-shadow: none;
     }}
 
     .integration-kicker {{
@@ -764,7 +1022,7 @@ def render_side_by_side_report_html(
       font-size: 0.74rem;
       letter-spacing: 0.18em;
       text-transform: uppercase;
-      color: #556573;
+      color: var(--muted);
       margin-bottom: 10px;
     }}
 
@@ -776,7 +1034,7 @@ def render_side_by_side_report_html(
 
     .integration-node p {{
       margin: 0;
-      color: #334150;
+      color: var(--muted);
       line-height: 1.55;
     }}
 
@@ -786,7 +1044,7 @@ def render_side_by_side_report_html(
       justify-content: center;
       min-width: 42px;
       font-size: 1.3rem;
-      color: #526170;
+      color: var(--muted);
     }}
 
     .integration-story-grid {{
@@ -798,10 +1056,10 @@ def render_side_by_side_report_html(
 
     .integration-story-card {{
       padding: 16px 18px;
-      border-radius: 20px;
-      background: rgba(255, 248, 239, 0.94);
-      border: 1px solid rgba(16, 24, 32, 0.08);
-      box-shadow: 0 14px 30px rgba(15, 23, 33, 0.08);
+      border-radius: 10px;
+      background: var(--surface-alt);
+      border: 1px solid var(--line);
+      box-shadow: none;
     }}
 
     .integration-story-card h2 {{
@@ -812,7 +1070,7 @@ def render_side_by_side_report_html(
 
     .integration-story-card p {{
       margin: 0;
-      color: #334150;
+      color: var(--muted);
       line-height: 1.5;
       font-size: 0.92rem;
     }}
@@ -832,18 +1090,19 @@ def render_side_by_side_report_html(
 
     .timing-card {{
       padding: 14px 16px;
-      border-radius: 18px;
-      background: rgba(7, 15, 24, 0.34);
-      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      background: var(--surface-alt);
+      border: 1px solid var(--line);
     }}
 
     .timing-label {{
       display: block;
-      color: rgba(255, 255, 255, 0.7);
+      color: var(--muted);
       font-size: 0.78rem;
       text-transform: uppercase;
       letter-spacing: 0.12em;
       margin-bottom: 8px;
+      font-weight: 700;
     }}
 
     .timing-value {{
@@ -854,7 +1113,7 @@ def render_side_by_side_report_html(
 
     .timing-meta {{
       margin: 10px 0 0;
-      color: rgba(245, 247, 251, 0.72);
+      color: var(--muted);
       font-size: 0.84rem;
       line-height: 1.45;
     }}
@@ -868,21 +1127,21 @@ def render_side_by_side_report_html(
 
     .performance-card {{
       padding: 16px;
-      border-radius: 20px;
-      background: rgba(7, 15, 24, 0.34);
-      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      background: var(--surface-alt);
+      border: 1px solid var(--line);
     }}
 
     .performance-card h2 {{
       margin: 0 0 10px;
       font-size: 1rem;
-      color: #f5f7fb;
+      color: var(--ink);
     }}
 
     .performance-copy,
     .performance-note {{
       margin: 0 0 10px;
-      color: rgba(245, 247, 251, 0.8);
+      color: var(--muted);
       font-size: 0.9rem;
       line-height: 1.45;
     }}
@@ -890,7 +1149,7 @@ def render_side_by_side_report_html(
     .performance-list {{
       margin: 0;
       padding-left: 18px;
-      color: rgba(245, 247, 251, 0.84);
+      color: var(--ink);
       font-size: 0.88rem;
       line-height: 1.45;
     }}
@@ -908,9 +1167,9 @@ def render_side_by_side_report_html(
 
     .tier-card {{
       padding: 16px;
-      border-radius: 20px;
-      background: rgba(7, 15, 24, 0.34);
-      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      background: var(--surface-alt);
+      border: 1px solid var(--line);
     }}
 
     .tier-header {{
@@ -929,7 +1188,7 @@ def render_side_by_side_report_html(
 
     .tier-subtitle {{
       margin: 6px 0 0;
-      color: rgba(245, 247, 251, 0.68);
+      color: var(--muted);
       font-size: 0.82rem;
       letter-spacing: 0.08em;
       text-transform: uppercase;
@@ -948,29 +1207,29 @@ def render_side_by_side_report_html(
     }}
 
     .tier-status-pass {{
-      color: #ddffec;
-      background: rgba(54, 226, 143, 0.18);
+      color: var(--signal-safe);
+      background: var(--safe-soft);
     }}
 
     .tier-status-fail {{
-      color: #ffe5e6;
-      background: rgba(255, 90, 95, 0.18);
+      color: var(--signal-danger);
+      background: var(--danger-soft);
     }}
 
     .tier-status-warn {{
-      color: #fff0d1;
-      background: rgba(255, 194, 75, 0.2);
+      color: var(--signal-warm);
+      background: var(--warning-soft);
     }}
 
     .tier-scope {{
       margin: 0 0 10px;
-      color: rgba(245, 247, 251, 0.78);
+      color: var(--muted);
       font-size: 0.86rem;
     }}
 
     .tier-summary {{
       margin: 0 0 12px;
-      color: rgba(245, 247, 251, 0.9);
+      color: var(--ink);
       font-size: 0.92rem;
       line-height: 1.45;
     }}
@@ -978,7 +1237,7 @@ def render_side_by_side_report_html(
     .tier-checks {{
       margin: 0;
       padding-left: 18px;
-      color: rgba(245, 247, 251, 0.82);
+      color: var(--ink);
       font-size: 0.88rem;
       line-height: 1.4;
     }}
@@ -989,19 +1248,19 @@ def render_side_by_side_report_html(
 
     .metric-card {{
       padding: 16px 18px;
-      border-radius: 18px;
-      background: rgba(255, 248, 239, 0.08);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      backdrop-filter: blur(10px);
+      border-radius: 10px;
+      background: var(--surface-alt);
+      border: 1px solid var(--line);
     }}
 
     .metric-label {{
       display: block;
       margin-bottom: 8px;
-      color: rgba(255, 255, 255, 0.68);
+      color: var(--muted);
       font-size: 0.82rem;
       text-transform: uppercase;
       letter-spacing: 0.09em;
+      font-weight: 700;
     }}
 
     .metric-value {{
@@ -1012,7 +1271,7 @@ def render_side_by_side_report_html(
 
     .metric-note {{
       margin-top: 8px;
-      color: rgba(255, 255, 255, 0.72);
+      color: var(--muted);
       font-size: 0.88rem;
       line-height: 1.35;
     }}
@@ -1020,7 +1279,7 @@ def render_side_by_side_report_html(
     .findings {{
       margin: 18px 0 0;
       padding-left: 18px;
-      color: rgba(245, 247, 251, 0.9);
+      color: var(--ink);
       line-height: 1.45;
     }}
 
@@ -1030,24 +1289,26 @@ def render_side_by_side_report_html(
 
     .legend,
     .differences,
-    .slice-grid {{
+    .slice-register {{
       margin-top: 24px;
     }}
 
     .legend,
-    .differences {{
+    .differences,
+    .slice-register {{
       background: var(--card);
-      border: 1px solid rgba(16, 24, 32, 0.08);
-      border-radius: 22px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
       padding: 20px 22px;
-      box-shadow: 0 14px 30px rgba(44, 36, 29, 0.08);
+      box-shadow: 0 8px 24px rgba(17, 32, 44, 0.06);
     }}
 
     h2 {{
       margin: 0 0 14px;
-      font-size: 1.05rem;
-      letter-spacing: 0.03em;
-      text-transform: uppercase;
+      font-size: 1.08rem;
+      line-height: 1.25;
+      letter-spacing: 0.01em;
+      text-transform: none;
     }}
 
     .legend-items {{
@@ -1062,54 +1323,57 @@ def render_side_by_side_report_html(
       gap: 10px;
       padding: 10px 12px;
       border-radius: 999px;
-      background: rgba(16, 24, 32, 0.04);
+      background: var(--surface-alt);
+      border: 1px solid var(--line);
+      color: var(--ink);
     }}
 
     .swatch {{
       width: 18px;
       height: 18px;
       border-radius: 4px;
-      border: 2px solid rgba(16, 24, 32, 0.16);
+      border: 2px solid rgba(21, 33, 43, 0.16);
     }}
 
     .swatch-ai {{
-      background: rgba(0, 214, 255, 0.45);
+      background: rgba(47, 127, 184, 0.34);
     }}
 
     .swatch-verified {{
-      background: rgba(54, 226, 143, 0.45);
+      background: rgba(31, 107, 72, 0.34);
     }}
 
     .swatch-mismatch {{
-      background: rgba(255, 194, 75, 0.45);
+      background: rgba(154, 108, 0, 0.3);
     }}
 
     .swatch-prior {{
-      background: rgba(255, 194, 75, 0.2);
+      background: rgba(111, 125, 143, 0.24);
     }}
 
     .swatch-rejected {{
       background:
         repeating-linear-gradient(
           135deg,
-          rgba(255, 90, 95, 0.82),
-          rgba(255, 90, 95, 0.82) 4px,
-          rgba(255, 90, 95, 0.14) 4px,
-          rgba(255, 90, 95, 0.14) 8px
+          rgba(147, 44, 44, 0.82),
+          rgba(147, 44, 44, 0.82) 4px,
+          rgba(147, 44, 44, 0.14) 4px,
+          rgba(147, 44, 44, 0.14) 8px
         );
     }}
 
     .slice-grid {{
       display: grid;
       gap: 18px;
+      margin-top: 16px;
     }}
 
     .slice-card {{
       overflow: hidden;
-      border-radius: 24px;
-      background: rgba(255, 250, 245, 0.96);
-      border: 1px solid rgba(16, 24, 32, 0.08);
-      box-shadow: 0 18px 36px rgba(33, 29, 24, 0.08);
+      border-radius: 12px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      box-shadow: 0 8px 24px rgba(17, 32, 44, 0.06);
     }}
 
     .slice-header {{
@@ -1118,7 +1382,8 @@ def render_side_by_side_report_html(
       justify-content: space-between;
       gap: 10px;
       padding: 18px 20px 12px;
-      background: linear-gradient(180deg, rgba(16, 24, 32, 0.04), rgba(16, 24, 32, 0));
+      background: var(--surface-alt);
+      border-bottom: 1px solid var(--line);
     }}
 
     .slice-title {{
@@ -1137,7 +1402,9 @@ def render_side_by_side_report_html(
     .slice-stat {{
       padding: 8px 10px;
       border-radius: 999px;
-      background: rgba(16, 24, 32, 0.06);
+      background: #e9eef2;
+      border: 1px solid var(--line);
+      color: var(--ink);
     }}
 
     .panel-grid {{
@@ -1149,9 +1416,10 @@ def render_side_by_side_report_html(
 
     .panel {{
       padding: 14px;
-      border-radius: 18px;
-      background: linear-gradient(180deg, rgba(15, 23, 33, 0.98), rgba(24, 36, 48, 0.98));
-      color: #f4f6f8;
+      border-radius: 10px;
+      background: var(--surface-alt);
+      color: var(--ink);
+      border: 1px solid var(--line);
     }}
 
     .panel h3 {{
@@ -1159,20 +1427,22 @@ def render_side_by_side_report_html(
       font-size: 0.95rem;
       letter-spacing: 0.05em;
       text-transform: uppercase;
+      color: var(--ink);
     }}
 
     .panel p {{
       margin: 0 0 12px;
-      color: rgba(244, 246, 248, 0.76);
+      color: var(--muted);
       font-size: 0.88rem;
+      line-height: 1.45;
     }}
 
     .panel canvas {{
       width: 100%;
-      border-radius: 14px;
-      background: #0b1017;
+      border-radius: 10px;
+      background: #f3f6f8;
       image-rendering: pixelated;
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+      box-shadow: inset 0 0 0 1px rgba(21, 33, 43, 0.08);
     }}
 
     table {{
@@ -1185,7 +1455,7 @@ def render_side_by_side_report_html(
     td {{
       padding: 10px 12px;
       text-align: left;
-      border-top: 1px solid rgba(16, 24, 32, 0.08);
+      border-top: 1px solid var(--line);
     }}
 
     th {{
@@ -1193,7 +1463,8 @@ def render_side_by_side_report_html(
       font-size: 0.8rem;
       text-transform: uppercase;
       letter-spacing: 0.08em;
-      color: rgba(16, 24, 32, 0.62);
+      color: var(--muted);
+      background: var(--surface-alt);
     }}
 
     .chip {{
@@ -1207,23 +1478,23 @@ def render_side_by_side_report_html(
     }}
 
     .chip-rejected {{
-      color: #7a1113;
-      background: rgba(255, 90, 95, 0.16);
+      color: var(--signal-danger);
+      background: var(--danger-soft);
     }}
 
     .chip-missing {{
-      color: #145f37;
-      background: rgba(54, 226, 143, 0.18);
+      color: var(--signal-safe);
+      background: var(--safe-soft);
     }}
 
     .chip-mismatch {{
-      color: #7b4f00;
-      background: rgba(255, 194, 75, 0.22);
+      color: var(--signal-warm);
+      background: var(--warning-soft);
     }}
 
     .footnote {{
       margin-top: 12px;
-      color: rgba(16, 24, 32, 0.65);
+      color: var(--muted);
       font-size: 0.86rem;
       line-height: 1.45;
     }}
@@ -1254,7 +1525,7 @@ def render_side_by_side_report_html(
 <body>
   <main class="shell">
     <section class="hero">
-      <p class="eyebrow">ICSD Verification Layer</p>
+      <p class="eyebrow">Clinical Verification Record</p>
       <h1>{escape(title)}</h1>
       <p class="subtitle">{escape(view_model["subtitle"])}</p>
       <div class="status-row">
@@ -1262,6 +1533,32 @@ def render_side_by_side_report_html(
           {escape(verification["headline"])}
         </span>
         <span class="status-pill">Profile {escape(view_model["profile_name"])} r{escape(view_model["profile_revision"])}</span>
+      </div>
+      <div class="record-grid">
+        <article class="record-card">
+          <span class="record-label">Patient pseudonym</span>
+          <div class="record-value record-code">{escape(patient_pseudonym)}</div>
+        </article>
+        <article class="record-card">
+          <span class="record-label">Case ID</span>
+          <div class="record-value record-code">{escape(case_id)}</div>
+        </article>
+        <article class="record-card">
+          <span class="record-label">Study UID</span>
+          <div class="record-value record-code">{escape(study_uid)}</div>
+        </article>
+        <article class="record-card">
+          <span class="record-label">Series UID</span>
+          <div class="record-value record-code">{escape(series_uid)}</div>
+        </article>
+        <article class="record-card">
+          <span class="record-label">ICSD policy</span>
+          <div class="record-value">{escape(view_model["icsd_policy_id"])} v{escape(view_model["icsd_policy_version"])}</div>
+        </article>
+        <article class="record-card">
+          <span class="record-label">Profile digest</span>
+          <div class="record-value record-code">{escape(view_model["profile_digest"])}</div>
+        </article>
       </div>
       <div class="clinical-grid">
         <article class="clinical-card">
@@ -1339,7 +1636,7 @@ def render_side_by_side_report_html(
       <div class="tier-grid">
         {tier_cards_markup}
       </div>
-      <div class="failure-banner">
+      <div class="failure-banner {failure_banner_class}">
         <h2>{escape(verification["headline"])}</h2>
         <p class="failure-reason">Reason: {escape(verification["primary_reason_summary"])}</p>
         <ul class="failure-list">
@@ -1442,13 +1739,19 @@ def render_side_by_side_report_html(
           Skipped metric reasons: {escape(longitudinal_skips)}.
         </p>
       </div>
-      <ul class="findings">
-        {findings_markup}
-      </ul>
+      <div class="performance-card">
+        <h2>Operational Findings</h2>
+        <p class="performance-copy">
+          Consolidated findings from the deterministic verification path, including blocking proof failures, advisory signals, and quantitative disagreement summaries.
+        </p>
+        <ul class="findings">
+          {findings_markup}
+        </ul>
+      </div>
     </section>
 
     <section class="legend">
-      <h2>Legend</h2>
+      <h2>Overlay Legend</h2>
       <div class="legend-items">
         <span class="legend-item"><span class="swatch swatch-ai"></span> AI tumour overlay</span>
         <span class="legend-item"><span class="swatch swatch-verified"></span> Verified tumour overlay</span>
@@ -1457,15 +1760,23 @@ def render_side_by_side_report_html(
         <span class="legend-item"><span class="swatch swatch-rejected"></span> Rejected AI region</span>
       </div>
       <p class="footnote">
-        Left panels show exactly what the AI attempted to hand downstream. Right panels show what the Guardian Layer can pass through to PACS/workstation:
-        reconstruction recomputed from raw k-space and a tumour mask derived by deterministic policy from measured reality.
+        Left panels show the AI-derived reconstruction and lesion proposal presented to the verification boundary. Right panels show the Guardian-derived reconstruction and deterministic verified mask that are eligible for downstream release, with prior verified overlay context when temporal review is admissible.
       </p>
     </section>
 
-    <section class="slice-grid" id="slice-grid"></section>
+    <section class="slice-register">
+      <h2>Slice Review Register</h2>
+      <p class="footnote">
+        Per-slice comparison of AI-derived inputs against the Guardian-derived reconstruction and deterministic verified lesion mask used for downstream release decisions.
+      </p>
+      <div class="slice-grid" id="slice-grid"></div>
+    </section>
 
     <section class="differences">
       <h2>Difference Register</h2>
+      <p class="footnote">
+        Register of voxel-level disagreements between the AI proposal and the Guardian-derived verification path, including mask disagreement, missing verified regions, and intensity deviations outside the configured tolerance policy.
+      </p>
       {differences_markup}
     </section>
   </main>
@@ -1489,14 +1800,14 @@ def render_side_by_side_report_html(
         <div class="panel-grid">
           <section class="panel">
             <h3>${{comparisonData.ai_label}}</h3>
-            <p>AI-proposed image and mask, shown before the verification layer accepts or rejects the handoff.</p>
+            <p>AI-derived reconstruction and proposed lesion mask before Guardian verification determines downstream admissibility.</p>
             <canvas data-side="ai"></canvas>
           </section>
           <section class="panel">
             <h3>${{comparisonData.verified_label}}</h3>
             <p>${{comparisonData.longitudinal.overlay_enabled
-              ? "Guardian-layer reconstruction from raw k-space with the profile-verified tumour mask and a faded prior verified overlay."
-              : "Guardian-layer reconstruction from raw k-space with the profile-verified tumour mask."}}</p>
+              ? "Guardian-derived reconstruction from raw k-space with the deterministic verified lesion mask and a faded prior verified overlay for temporal context."
+              : "Guardian-derived reconstruction from raw k-space with the deterministic verified lesion mask."}}</p>
             <canvas data-side="verified"></canvas>
           </section>
         </div>
@@ -1553,19 +1864,19 @@ def render_side_by_side_report_html(
             && priorMask
             && priorMask[row][col]
           ) {{
-            ctx.fillStyle = "rgba(255, 194, 75, 0.18)";
+            ctx.fillStyle = "rgba(111, 125, 143, 0.22)";
             ctx.fillRect(x, y, cell, cell);
           }}
 
           if (mask[row][col]) {{
-            ctx.fillStyle = side === "ai" ? "rgba(0, 214, 255, 0.30)" : "rgba(54, 226, 143, 0.32)";
+            ctx.fillStyle = side === "ai" ? "rgba(47, 127, 184, 0.28)" : "rgba(31, 107, 72, 0.28)";
             ctx.fillRect(x, y, cell, cell);
           }}
 
           if (side === "ai" && rejected[row][col]) {{
-            ctx.fillStyle = "rgba(255, 90, 95, 0.18)";
+            ctx.fillStyle = "rgba(147, 44, 44, 0.18)";
             ctx.fillRect(x, y, cell, cell);
-            ctx.strokeStyle = "rgba(255, 90, 95, 0.92)";
+            ctx.strokeStyle = "rgba(147, 44, 44, 0.92)";
             ctx.lineWidth = Math.max(2, Math.floor(cell * 0.12));
             ctx.beginPath();
             ctx.moveTo(x + 2, y + 2);
@@ -1576,7 +1887,7 @@ def render_side_by_side_report_html(
           }}
 
           if (intensityMismatch[row][col]) {{
-            ctx.strokeStyle = "rgba(255, 194, 75, 0.98)";
+            ctx.strokeStyle = "rgba(154, 108, 0, 0.98)";
             ctx.lineWidth = Math.max(2, Math.floor(cell * 0.1));
             ctx.strokeRect(x + 1, y + 1, cell - 2, cell - 2);
           }}
