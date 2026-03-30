@@ -183,6 +183,7 @@ in a qualifying no-gap run of consecutive slices, not by label rank.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/SECURITY.md](docs/SECURITY.md)
+- [docs/CLINICAL_RISK_ASSURANCE_MAPPING.md](docs/CLINICAL_RISK_ASSURANCE_MAPPING.md)
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md)
 - [docs/INTEROPERABILITY.md](docs/INTEROPERABILITY.md)
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
