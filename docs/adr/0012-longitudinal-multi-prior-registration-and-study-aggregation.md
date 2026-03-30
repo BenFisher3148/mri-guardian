@@ -1,8 +1,7 @@
-# ADR 0012: Longitudinal Multi-Prior Selection, Registration, and Study Aggregation
+# ADR-0012: Longitudinal Multi-Prior Selection, Registration, and Study Aggregation
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-03-30
 
 ## Context
 
