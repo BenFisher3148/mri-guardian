@@ -40,6 +40,7 @@ from mri_guardian.harness import (
     build_multi_series_case_verification_report,
     build_multi_series_demo_authority_sources,
     build_multi_series_demo_case,
+    _validate_operational_subphases,
     _temporal_pair_provenance,
 )
 from mri_guardian.integration import (
@@ -1855,6 +1856,117 @@ class MriGuardianHarnessTests(unittest.TestCase):
             "tumor_volume_absolute_error_near_boundary",
             report["decision"]["reason_codes"],
         )
+
+    def test_single_series_operational_subphases_materialize_frozen_precheck_and_fullproof(self) -> None:
+        report = build_case_verification_report(build_demo_case())
+
+        operational_subphases = report["verification_pipeline"]["operational_subphases"]
+        _validate_operational_subphases(operational_subphases)
+
+        self.assertEqual(
+            operational_subphases["subphase_order"],
+            ["pre_check", "full_proof"],
+        )
+        pre_check = operational_subphases["subphases"]["pre_check"]
+        full_proof = operational_subphases["subphases"]["full_proof"]
+        self.assertEqual(
+            [item["code"] for item in pre_check["checks"]],
+            [
+                "structure_validation",
+                "hash_checks",
+                "shape_consistency",
+                "quick_anomaly_detection",
+            ],
+        )
+        self.assertEqual(pre_check["status"], "passed")
+        self.assertEqual(pre_check["checks"][1]["status"], "passed")
+        self.assertEqual(pre_check["checks"][-1]["status"], "not_evaluated")
+        self.assertEqual(full_proof["status"], "passed")
+        self.assertEqual(
+            [item["proof_stage"] for item in full_proof["proof_stages"]],
+            [
+                "MeasurementIntegrityProof",
+                "ReconstructionParityProof",
+                "SegmentationPolicyProof",
+                "VolumeComputationProof",
+            ],
+        )
+        self.assertTrue(all(item["status"] == "passed" for item in full_proof["proof_stages"]))
+
+    def test_structural_single_series_operational_subphases_keep_not_evaluated_full_proof(self) -> None:
+        state = build_demo_case()
+        state["case_id"] = ""
+
+        report = build_case_verification_report(state)
+
+        operational_subphases = report["verification_pipeline"]["operational_subphases"]
+        _validate_operational_subphases(operational_subphases)
+
+        pre_check = operational_subphases["subphases"]["pre_check"]
+        full_proof = operational_subphases["subphases"]["full_proof"]
+        self.assertEqual(pre_check["status"], "failed")
+        self.assertEqual(full_proof["status"], "not_evaluated")
+        self.assertEqual(
+            [item["status"] for item in full_proof["proof_stages"]],
+            ["not_evaluated", "not_evaluated", "not_evaluated", "not_evaluated"],
+        )
+        self.assertEqual(report["decision"]["pipeline_phase"], "structural_validity")
+
+    def test_operational_subphases_allow_advisory_precheck_without_changing_decision_ownership(self) -> None:
+        state = self._attach_ai_stack_identity(
+            build_demo_case(),
+            compatibility_type="sequence_family",
+        )
+
+        report = build_case_verification_report(state)
+
+        operational_subphases = report["verification_pipeline"]["operational_subphases"]
+        _validate_operational_subphases(operational_subphases)
+
+        pre_check = operational_subphases["subphases"]["pre_check"]
+        self.assertEqual(pre_check["status"], "advisory")
+        self.assertEqual(pre_check["checks"][-1]["status"], "advisory")
+        self.assertTrue(report["release_eligible"])
+        self.assertEqual(report["decision"]["decision_class"], "verified_clean")
+        self.assertEqual(report["decision"]["pipeline_phase"], "release_control")
+
+    def test_multi_series_parent_omits_operational_subphases_while_child_reports_keep_them(self) -> None:
+        report = build_multi_series_case_verification_report(build_multi_series_demo_case())
+
+        self.assertNotIn("operational_subphases", report["verification_pipeline"])
+        self.assertIn(
+            "operational_subphases",
+            report["series_reports"][0]["verification_pipeline"],
+        )
+
+    def test_operational_subphases_validation_rejects_non_conforming_generated_output(self) -> None:
+        operational_subphases = deepcopy(
+            build_case_verification_report(build_demo_case())["verification_pipeline"][
+                "operational_subphases"
+            ]
+        )
+
+        invalid_subphase_name = deepcopy(operational_subphases)
+        invalid_subphase_name["subphase_order"][0] = "unexpected_subphase"
+        with self.assertRaises(ValueError):
+            _validate_operational_subphases(invalid_subphase_name)
+
+        invalid_check_name = deepcopy(operational_subphases)
+        invalid_check_name["subphases"]["pre_check"]["checks"][1]["code"] = "unexpected_check"
+        with self.assertRaises(ValueError):
+            _validate_operational_subphases(invalid_check_name)
+
+        invalid_check_status = deepcopy(operational_subphases)
+        invalid_check_status["subphases"]["pre_check"]["checks"][-1]["status"] = "failed"
+        with self.assertRaises(ValueError):
+            _validate_operational_subphases(invalid_check_status)
+
+        invalid_operational_label = deepcopy(operational_subphases)
+        invalid_operational_label["subphases"]["full_proof"]["proof_stages"][0][
+            "proof_stage"
+        ] = "FFT / reprojection"
+        with self.assertRaises(ValueError):
+            _validate_operational_subphases(invalid_operational_label)
 
     def test_decision_journal_clean_release_uses_canonical_order_and_scoped_evidence(self) -> None:
         state = build_demo_case()

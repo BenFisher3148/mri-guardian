@@ -93,6 +93,47 @@ _PROOF_STAGE_ORDER = (
     PROOF_STAGE_SEGMENTATION_POLICY,
     PROOF_STAGE_VOLUME_COMPUTATION,
 )
+_PROOF_STAGE_TITLES = {
+    PROOF_STAGE_MEASUREMENT_INTEGRITY: "Measurement Integrity",
+    PROOF_STAGE_RECONSTRUCTION_PARITY: "Reconstruction Parity",
+    PROOF_STAGE_SEGMENTATION_POLICY: "Segmentation Policy",
+    PROOF_STAGE_VOLUME_COMPUTATION: "Volume Computation",
+}
+
+OPERATIONAL_SUBPHASE_PRE_CHECK = "pre_check"
+OPERATIONAL_SUBPHASE_FULL_PROOF = "full_proof"
+_OPERATIONAL_SUBPHASE_SCHEMA = "derived_operational_subphases_v1"
+_OPERATIONAL_SUBPHASE_ORDER = (
+    OPERATIONAL_SUBPHASE_PRE_CHECK,
+    OPERATIONAL_SUBPHASE_FULL_PROOF,
+)
+
+OPERATIONAL_CHECK_STRUCTURE_VALIDATION = "structure_validation"
+OPERATIONAL_CHECK_HASH_CHECKS = "hash_checks"
+OPERATIONAL_CHECK_SHAPE_CONSISTENCY = "shape_consistency"
+OPERATIONAL_CHECK_QUICK_ANOMALY_DETECTION = "quick_anomaly_detection"
+_PRE_CHECK_CHECK_ORDER = (
+    OPERATIONAL_CHECK_STRUCTURE_VALIDATION,
+    OPERATIONAL_CHECK_HASH_CHECKS,
+    OPERATIONAL_CHECK_SHAPE_CONSISTENCY,
+    OPERATIONAL_CHECK_QUICK_ANOMALY_DETECTION,
+)
+_PRE_CHECK_BLOCKING_CHECKS = (
+    OPERATIONAL_CHECK_STRUCTURE_VALIDATION,
+    OPERATIONAL_CHECK_HASH_CHECKS,
+    OPERATIONAL_CHECK_SHAPE_CONSISTENCY,
+)
+_PRE_CHECK_ALLOWED_STATUSES = frozenset({"passed", "failed", "advisory"})
+_FULL_PROOF_ALLOWED_STATUSES = frozenset({"passed", "failed", "not_evaluated"})
+_PRE_CHECK_CHECK_ALLOWED_STATUSES = {
+    OPERATIONAL_CHECK_STRUCTURE_VALIDATION: frozenset({"passed", "failed"}),
+    OPERATIONAL_CHECK_HASH_CHECKS: frozenset({"passed", "failed", "not_evaluated"}),
+    OPERATIONAL_CHECK_SHAPE_CONSISTENCY: frozenset({"passed", "failed", "not_evaluated"}),
+    OPERATIONAL_CHECK_QUICK_ANOMALY_DETECTION: frozenset(
+        {"passed", "advisory", "not_evaluated"}
+    ),
+}
+_FULL_PROOF_STAGE_ALLOWED_STATUSES = frozenset({"passed", "failed", "not_evaluated"})
 
 EVALUATION_STAGE_INTAKE_VALIDATION = PIPELINE_PHASE_INTAKE_VALIDATION
 EVALUATION_STAGE_STRUCTURAL_VALIDITY = PIPELINE_PHASE_STRUCTURAL_VALIDITY
@@ -730,8 +771,11 @@ def _structural_profile_contract(descriptor: Any) -> dict[str, Any]:
 
 
 def _build_structural_verification_pipeline(
+    state: Mapping[str, Any],
     structural_checks: list[dict[str, Any]],
     *,
+    analysis: Mapping[str, Any],
+    manifest: Mapping[str, Any],
     intake_blocked: bool,
 ) -> dict[str, Any]:
     structural_status = _tier_status_from_checks(structural_checks)
@@ -740,7 +784,16 @@ def _build_structural_verification_pipeline(
         if intake_blocked
         else "Structural validity failed before proof-core stages could be evaluated."
     )
-    return {
+    proof_stages = [
+        _proof_stage_result(
+            proof_stage=proof_stage,
+            title=_proof_stage_title(proof_stage),
+            verified=None,
+            summary=proof_core_summary,
+        )
+        for proof_stage in _PROOF_STAGE_ORDER
+    ]
+    payload = {
         "schema": "canonical_assurance_flow",
         "ordering_semantics": (
             "Canonical assurance-flow schema and evidence-ordering model. "
@@ -783,20 +836,7 @@ def _build_structural_verification_pipeline(
                 status="not_evaluated",
                 summary=proof_core_summary,
                 blocking=True,
-                proof_stages=[
-                    _proof_stage_result(
-                        proof_stage=proof_stage,
-                        title=title,
-                        verified=None,
-                        summary=proof_core_summary,
-                    )
-                    for proof_stage, title in (
-                        (PROOF_STAGE_MEASUREMENT_INTEGRITY, "Measurement Integrity"),
-                        (PROOF_STAGE_RECONSTRUCTION_PARITY, "Reconstruction Parity"),
-                        (PROOF_STAGE_SEGMENTATION_POLICY, "Segmentation Policy"),
-                        (PROOF_STAGE_VOLUME_COMPUTATION, "Volume Computation"),
-                    )
-                ],
+                proof_stages=proof_stages,
             ),
             PIPELINE_PHASE_CLINICAL_PLAUSIBILITY: _phase_entry(
                 title="Clinical Plausibility",
@@ -825,6 +865,15 @@ def _build_structural_verification_pipeline(
             ),
         },
     }
+    payload["operational_subphases"] = _build_operational_subphases(
+        state=state,
+        analysis=analysis,
+        manifest=manifest,
+        structural_checks=structural_checks,
+        intake_blocked=intake_blocked,
+        proof_stages=proof_stages,
+    )
+    return payload
 
 
 def _build_minimal_structural_analysis(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -918,8 +967,24 @@ def _build_structural_block_report(
         "final_release_allowed": False,
         "operator_review_required": False,
     }
+    analysis = _build_minimal_structural_analysis(state)
+    profile_contract = _structural_profile_contract(descriptor)
+    manifest = {
+        "profile_name": profile_contract["profile_name"],
+        "profile_revision": profile_contract["profile_revision"],
+        "profile_digest": profile_contract["profile_digest"],
+        "icsd_policy_id": profile_contract["icsd_policy_id"],
+        "icsd_policy_version": profile_contract["icsd_policy_version"],
+        "verification_profile_descriptor": profile_contract,
+        "performance_expectations": profile_contract["performance_expectations"],
+        "input_state_hash": analysis["input_state_hash"],
+        "decision_summary": deepcopy(decision_summary),
+    }
     verification_pipeline = _build_structural_verification_pipeline(
+        state,
         structural_checks,
+        analysis=analysis,
+        manifest=manifest,
         intake_blocked=pipeline_phase == EVALUATION_STAGE_INTAKE_VALIDATION,
     )
     decision = _build_decision(
@@ -934,21 +999,8 @@ def _build_structural_block_report(
             pipeline_phase=pipeline_phase,
         ),
     )
-    profile_contract = _structural_profile_contract(descriptor)
-    analysis = _build_minimal_structural_analysis(state)
-    manifest = {
-        "profile_name": profile_contract["profile_name"],
-        "profile_revision": profile_contract["profile_revision"],
-        "profile_digest": profile_contract["profile_digest"],
-        "icsd_policy_id": profile_contract["icsd_policy_id"],
-        "icsd_policy_version": profile_contract["icsd_policy_version"],
-        "verification_profile_descriptor": profile_contract,
-        "performance_expectations": profile_contract["performance_expectations"],
-        "input_state_hash": analysis["input_state_hash"],
-        "decision_summary": deepcopy(decision_summary),
-        "decision": deepcopy(decision),
-        "verification_pipeline": deepcopy(verification_pipeline),
-    }
+    manifest["decision"] = deepcopy(decision)
+    manifest["verification_pipeline"] = deepcopy(verification_pipeline)
     failure_reasons = _build_structural_failure_reasons(decision)
     return {
         "profile": profile_contract,
@@ -5126,8 +5178,8 @@ def _build_verified_manifest(
     }
     manifest["verification_pipeline"] = _build_verification_pipeline(
         state,
+        analysis,
         manifest,
-        descriptor,
     )
     return manifest
 
@@ -5299,6 +5351,62 @@ def _phase_entry(
     return payload
 
 
+def _operational_check_entry(
+    *,
+    code: str,
+    label: str,
+    status: str,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "code": code,
+        "label": label,
+        "status": status,
+        "message": message,
+    }
+
+
+def _proof_stage_title(proof_stage: str) -> str:
+    return _PROOF_STAGE_TITLES[proof_stage]
+
+
+def _proof_stage_summary(
+    *,
+    proof_stage: str,
+    status: str,
+) -> str:
+    if status == "not_evaluated":
+        return (
+            f"{_proof_stage_title(proof_stage)} was not evaluated because canonical proof-core "
+            "was not entered."
+        )
+    if proof_stage == PROOF_STAGE_MEASUREMENT_INTEGRITY:
+        return (
+            "The derived reconstruction remained anchored to the supplied raw measurements "
+            "within policy."
+            if status == "passed"
+            else "The derived reconstruction could not be justified against the supplied raw "
+            "measurements within policy."
+        )
+    if proof_stage == PROOF_STAGE_RECONSTRUCTION_PARITY:
+        return (
+            "The AI reconstruction matched the derived reconstruction within policy."
+            if status == "passed"
+            else "The AI reconstruction diverged from the derived reconstruction beyond policy."
+        )
+    if proof_stage == PROOF_STAGE_SEGMENTATION_POLICY:
+        return (
+            "The AI mask matched the policy-derived verified mask."
+            if status == "passed"
+            else "The AI mask diverged from the policy-derived verified mask."
+        )
+    return (
+        "The claimed scalar volume matched the verified mask geometry within policy."
+        if status == "passed"
+        else "The claimed scalar volume did not match the verified mask geometry within policy."
+    )
+
+
 def _proof_stage_result(
     *,
     proof_stage: str,
@@ -5335,51 +5443,500 @@ def _build_proof_core_stage_results(
     return [
         _proof_stage_result(
             proof_stage=PROOF_STAGE_MEASUREMENT_INTEGRITY,
-            title="Measurement Integrity",
+            title=_proof_stage_title(PROOF_STAGE_MEASUREMENT_INTEGRITY),
             verified=bool(measurement["verified"]),
-            summary=(
-                "The derived reconstruction remained anchored to the supplied raw measurements within policy."
-                if measurement["verified"]
-                else "The derived reconstruction could not be justified against the supplied raw measurements within policy."
+            summary=_proof_stage_summary(
+                proof_stage=PROOF_STAGE_MEASUREMENT_INTEGRITY,
+                status="passed" if measurement["verified"] else "failed",
             ),
         ),
         _proof_stage_result(
             proof_stage=PROOF_STAGE_RECONSTRUCTION_PARITY,
-            title="Reconstruction Parity",
+            title=_proof_stage_title(PROOF_STAGE_RECONSTRUCTION_PARITY),
             verified=bool(reconstruction["verified"]),
-            summary=(
-                "The AI reconstruction matched the derived reconstruction within policy."
-                if reconstruction["verified"]
-                else "The AI reconstruction diverged from the derived reconstruction beyond policy."
+            summary=_proof_stage_summary(
+                proof_stage=PROOF_STAGE_RECONSTRUCTION_PARITY,
+                status="passed" if reconstruction["verified"] else "failed",
             ),
         ),
         _proof_stage_result(
             proof_stage=PROOF_STAGE_SEGMENTATION_POLICY,
-            title="Segmentation Policy",
+            title=_proof_stage_title(PROOF_STAGE_SEGMENTATION_POLICY),
             verified=bool(segmentation["verified"]),
-            summary=(
-                "The AI mask matched the policy-derived verified mask."
-                if segmentation["verified"]
-                else "The AI mask diverged from the policy-derived verified mask."
+            summary=_proof_stage_summary(
+                proof_stage=PROOF_STAGE_SEGMENTATION_POLICY,
+                status="passed" if segmentation["verified"] else "failed",
             ),
         ),
         _proof_stage_result(
             proof_stage=PROOF_STAGE_VOLUME_COMPUTATION,
-            title="Volume Computation",
+            title=_proof_stage_title(PROOF_STAGE_VOLUME_COMPUTATION),
             verified=bool(volume["verified"]),
-            summary=(
-                "The claimed scalar volume matched the verified mask geometry within policy."
-                if volume["verified"]
-                else "The claimed scalar volume did not match the verified mask geometry within policy."
+            summary=_proof_stage_summary(
+                proof_stage=PROOF_STAGE_VOLUME_COMPUTATION,
+                status="passed" if volume["verified"] else "failed",
             ),
         ),
     ]
 
 
+def _build_operational_subphases(
+    *,
+    state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    structural_checks: list[dict[str, Any]],
+    intake_blocked: bool,
+    proof_stages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    pre_check_checks = _build_pre_check_checks(
+        state=state,
+        analysis=analysis,
+        manifest=manifest,
+        structural_checks=structural_checks,
+        intake_blocked=intake_blocked,
+    )
+    pre_check_status = _derive_pre_check_status(pre_check_checks)
+    full_proof_stages = _build_full_proof_operational_stage_results(proof_stages)
+    full_proof_status = _derive_full_proof_status(full_proof_stages)
+    payload = {
+        "schema": _OPERATIONAL_SUBPHASE_SCHEMA,
+        "ordering_semantics": (
+            "Derived operational subphase view over the canonical assurance flow. "
+            "A non-passing subphase is release-preventing within operational flow, "
+            "but canonical decision ownership remains with decision.pipeline_phase "
+            "and optional decision.proof_stage."
+        ),
+        "subphase_order": list(_OPERATIONAL_SUBPHASE_ORDER),
+        "subphases": {
+            OPERATIONAL_SUBPHASE_PRE_CHECK: _phase_entry(
+                title="Pre-Check",
+                status=pre_check_status,
+                summary=_pre_check_summary(pre_check_checks, pre_check_status),
+                blocking=True,
+                checks=pre_check_checks,
+            ),
+            OPERATIONAL_SUBPHASE_FULL_PROOF: _phase_entry(
+                title="Full Proof",
+                status=full_proof_status,
+                summary=_full_proof_summary(full_proof_status),
+                blocking=True,
+                proof_stages=full_proof_stages,
+            ),
+        },
+    }
+    _validate_operational_subphases(payload)
+    return payload
+
+
+def _build_pre_check_checks(
+    *,
+    state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    structural_checks: list[dict[str, Any]],
+    intake_blocked: bool,
+) -> list[dict[str, Any]]:
+    return [
+        _build_structure_validation_check(
+            structural_checks=structural_checks,
+            intake_blocked=intake_blocked,
+        ),
+        _build_hash_surface_consistency_check(
+            analysis=analysis,
+            manifest=manifest,
+        ),
+        _build_shape_consistency_check(structural_checks),
+        _build_quick_anomaly_detection_check(
+            state=state,
+            structural_checks=structural_checks,
+        ),
+    ]
+
+
+def _build_structure_validation_check(
+    *,
+    structural_checks: list[dict[str, Any]],
+    intake_blocked: bool,
+) -> dict[str, Any]:
+    structural_status = _tier_status_from_checks(structural_checks)
+    if intake_blocked:
+        status = "failed"
+    else:
+        status = "passed" if structural_status == "passed" else "failed"
+    message = {
+        "passed": "Input intake and basic structural admissibility passed during pre-check.",
+        "failed": (
+            "Input intake or basic structural admissibility blocked operational pre-check."
+            if intake_blocked
+            else "Basic structural admissibility failed during operational pre-check."
+        ),
+    }[status]
+    return _operational_check_entry(
+        code=OPERATIONAL_CHECK_STRUCTURE_VALIDATION,
+        label="Structure validation",
+        status=status,
+        message=message,
+    )
+
+
+def _build_hash_surface_consistency_check(
+    *,
+    analysis: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    comparable_groups = 0
+    mismatch_detected = False
+    for hash_values in _hash_surface_consistency_groups(analysis=analysis, manifest=manifest):
+        present_values = [value for value in hash_values if isinstance(value, str) and value]
+        if len(present_values) < 2:
+            continue
+        comparable_groups += 1
+        if len(set(present_values)) != 1:
+            mismatch_detected = True
+            break
+    if mismatch_detected:
+        status = "failed"
+    elif comparable_groups:
+        status = "passed"
+    else:
+        status = "not_evaluated"
+    return _operational_check_entry(
+        code=OPERATIONAL_CHECK_HASH_CHECKS,
+        label="Hash-surface consistency",
+        status=status,
+        message={
+            "passed": (
+                "Already-materialized deterministic hash surfaces were consistent across "
+                "reusable report contracts."
+            ),
+            "failed": (
+                "Already-materialized deterministic hash surfaces disagreed across reusable "
+                "report contracts."
+            ),
+            "not_evaluated": (
+                "No reusable deterministic hash-surface comparison set was available during "
+                "pre-check."
+            ),
+        }[status],
+    )
+
+
+def _hash_surface_consistency_groups(
+    *,
+    analysis: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> tuple[tuple[str | None, ...], ...]:
+    ai_claim = manifest.get("ai_claim_envelope", {})
+    measurement = manifest.get("measurement_integrity_proof", {})
+    reconstruction = manifest.get("reconstruction_parity_proof", {})
+    segmentation = manifest.get("segmentation_policy_proof", {})
+    volume = manifest.get("volume_computation_proof", {})
+    return (
+        (
+            _string_or_none(analysis.get("input_state_hash")),
+            _string_or_none(manifest.get("input_state_hash")),
+        ),
+        (
+            _string_or_none(analysis.get("raw_hash")),
+            _string_or_none(manifest.get("raw_hash")),
+            _string_or_none(_mapping_get(ai_claim, "raw_kspace_hash")),
+            _string_or_none(_mapping_get(measurement, "raw_kspace_hash")),
+        ),
+        (
+            _string_or_none(analysis.get("ai_reconstruction_hash")),
+            _string_or_none(_mapping_get(ai_claim, "ai_reconstruction_hash")),
+            _string_or_none(_mapping_get(reconstruction, "ai_reconstruction_hash")),
+        ),
+        (
+            _string_or_none(analysis.get("derived_reconstruction_hash")),
+            _string_or_none(manifest.get("derived_reconstruction_hash")),
+            _string_or_none(_mapping_get(measurement, "derived_reconstruction_hash")),
+            _string_or_none(_mapping_get(reconstruction, "derived_reconstruction_hash")),
+        ),
+        (
+            _string_or_none(analysis.get("ai_mask_hash")),
+            _string_or_none(manifest.get("ai_mask_hash")),
+            _string_or_none(_mapping_get(ai_claim, "ai_mask_hash")),
+            _string_or_none(_mapping_get(segmentation, "ai_mask_hash")),
+        ),
+        (
+            _string_or_none(analysis.get("verified_mask_hash")),
+            _string_or_none(manifest.get("verified_mask_hash")),
+            _string_or_none(_mapping_get(segmentation, "verified_mask_hash")),
+            _string_or_none(_mapping_get(volume, "verified_mask_hash")),
+        ),
+    )
+
+
+def _build_shape_consistency_check(
+    structural_checks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    shape_check_codes = (
+        "raw_real",
+        "raw_imag",
+        "ai_reconstruction",
+        "tumor_mask",
+        "geometry_consistent",
+        "voxel_spacing_positive",
+        "release_payloads_guarded",
+    )
+    structural_index = {
+        str(item["code"]): str(item["status"])
+        for item in structural_checks
+        if isinstance(item, Mapping)
+    }
+    selected_statuses = [structural_index.get(code) for code in shape_check_codes]
+    if any(status is None for status in selected_statuses):
+        status = "not_evaluated"
+    elif any(status == "failed" for status in selected_statuses):
+        status = "failed"
+    else:
+        status = "passed"
+    return _operational_check_entry(
+        code=OPERATIONAL_CHECK_SHAPE_CONSISTENCY,
+        label="Shape consistency",
+        status=status,
+        message={
+            "passed": (
+                "Numeric tensors, shared-grid geometry, voxel spacing, and release-shape "
+                "constraints remained consistent during pre-check."
+            ),
+            "failed": (
+                "Numeric tensor, shared-grid geometry, voxel spacing, or release-shape "
+                "consistency failed during pre-check."
+            ),
+            "not_evaluated": "Shape-consistency screening was not fully materialized during pre-check.",
+        }[status],
+    )
+
+
+def _build_quick_anomaly_detection_check(
+    *,
+    state: Mapping[str, Any],
+    structural_checks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    structural_index = {
+        str(item["code"]): str(item["status"])
+        for item in structural_checks
+        if isinstance(item, Mapping)
+    }
+    if structural_index.get("invalid_ai_stack_identity") != "passed":
+        status = "not_evaluated"
+    else:
+        ai_stack_identity = state.get("ai_stack_identity")
+        compatibility = (
+            ai_stack_identity.get("sequence_model_compatibility")
+            if isinstance(ai_stack_identity, Mapping)
+            else None
+        )
+        compatibility_type = (
+            compatibility.get("compatibility_type")
+            if isinstance(compatibility, Mapping)
+            else None
+        )
+        if compatibility_type == "sequence_family":
+            status = "advisory"
+        elif compatibility_type == "exact_sequence_id":
+            status = "passed"
+        else:
+            status = "not_evaluated"
+    return _operational_check_entry(
+        code=OPERATIONAL_CHECK_QUICK_ANOMALY_DETECTION,
+        label="Quick anomaly detection",
+        status=status,
+        message={
+            "passed": "Low-cost pre-check screening found no approved intake-adjacent anomaly signal.",
+            "advisory": (
+                "Low-cost pre-check screening recorded a sequence-family AI stack compatibility "
+                "declaration for operator awareness."
+            ),
+            "not_evaluated": (
+                "No approved low-cost intake-adjacent anomaly screening rule was applicable "
+                "before full proof."
+            ),
+        }[status],
+    )
+
+
+def _derive_pre_check_status(checks: list[dict[str, Any]]) -> str:
+    statuses = {str(item["code"]): str(item["status"]) for item in checks}
+    if any(statuses.get(code) == "failed" for code in _PRE_CHECK_BLOCKING_CHECKS):
+        return "failed"
+    if statuses.get(OPERATIONAL_CHECK_QUICK_ANOMALY_DETECTION) == "advisory" and all(
+        statuses.get(code) == "passed" for code in _PRE_CHECK_BLOCKING_CHECKS
+    ):
+        return "advisory"
+    return "passed"
+
+
+def _pre_check_summary(
+    checks: list[dict[str, Any]],
+    status: str,
+) -> str:
+    statuses = {str(item["code"]): str(item["status"]) for item in checks}
+    if status == "failed":
+        if statuses[OPERATIONAL_CHECK_STRUCTURE_VALIDATION] == "failed":
+            return "Pre-check failed because intake or structural admissibility did not pass."
+        if statuses[OPERATIONAL_CHECK_HASH_CHECKS] == "failed":
+            return "Pre-check failed because reusable hash-surface consistency did not pass."
+        return "Pre-check failed because shape consistency did not pass."
+    if status == "advisory":
+        return (
+            "Pre-check passed its blocking checks and recorded a non-blocking "
+            "intake-adjacent anomaly signal."
+        )
+    if statuses[OPERATIONAL_CHECK_QUICK_ANOMALY_DETECTION] == "passed":
+        return "Pre-check passed its blocking checks and approved low-cost anomaly screening."
+    return "Pre-check passed its blocking checks without an applicable anomaly-screening rule."
+
+
+def _build_full_proof_operational_stage_results(
+    proof_stages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    stage_index = {
+        str(item["proof_stage"]): str(item["status"])
+        for item in proof_stages
+        if isinstance(item, Mapping)
+    }
+    return [
+        {
+            "proof_stage": proof_stage,
+            "title": _proof_stage_title(proof_stage),
+            "status": stage_index.get(proof_stage, "not_evaluated"),
+            "summary": _proof_stage_summary(
+                proof_stage=proof_stage,
+                status=stage_index.get(proof_stage, "not_evaluated"),
+            ),
+        }
+        for proof_stage in _PROOF_STAGE_ORDER
+    ]
+
+
+def _derive_full_proof_status(proof_stages: list[dict[str, Any]]) -> str:
+    statuses = [str(item["status"]) for item in proof_stages]
+    if any(status == "failed" for status in statuses):
+        return "failed"
+    if all(status == "passed" for status in statuses):
+        return "passed"
+    if all(status == "not_evaluated" for status in statuses):
+        return "not_evaluated"
+    raise ValueError(
+        "full_proof.proof_stages must be all passed, contain a failed stage, or be all not_evaluated."
+    )
+
+
+def _full_proof_summary(status: str) -> str:
+    return {
+        "passed": "Full proof passed because every canonical proof-core stage passed.",
+        "failed": "Full proof failed because at least one canonical proof-core stage did not pass.",
+        "not_evaluated": (
+            "Full proof was not evaluated because canonical proof-core was not entered."
+        ),
+    }[status]
+
+
+def _validate_operational_subphases(payload: Mapping[str, Any]) -> None:
+    if str(payload.get("schema")) != _OPERATIONAL_SUBPHASE_SCHEMA:
+        raise ValueError("operational_subphases.schema must be the frozen derived schema identifier.")
+    if list(payload.get("subphase_order", [])) != list(_OPERATIONAL_SUBPHASE_ORDER):
+        raise ValueError("operational_subphases.subphase_order must match the frozen order.")
+    subphases = payload.get("subphases")
+    if not isinstance(subphases, Mapping):
+        raise ValueError("operational_subphases.subphases must be a mapping.")
+    if sorted(subphases.keys()) != sorted(_OPERATIONAL_SUBPHASE_ORDER):
+        raise ValueError("operational_subphases must emit only the frozen subphase vocabulary.")
+
+    pre_check = subphases[OPERATIONAL_SUBPHASE_PRE_CHECK]
+    if not isinstance(pre_check, Mapping):
+        raise ValueError("operational_subphases.pre_check must be a mapping.")
+    if pre_check.get("blocking") is not True:
+        raise ValueError("operational_subphases.pre_check.blocking must be true.")
+    pre_check_status = str(pre_check.get("status"))
+    if pre_check_status not in _PRE_CHECK_ALLOWED_STATUSES:
+        raise ValueError("operational_subphases.pre_check.status is invalid.")
+    pre_check_checks = pre_check.get("checks")
+    if not isinstance(pre_check_checks, list):
+        raise ValueError("operational_subphases.pre_check.checks must be a list.")
+    check_codes = [str(item.get("code")) for item in pre_check_checks if isinstance(item, Mapping)]
+    if check_codes != list(_PRE_CHECK_CHECK_ORDER):
+        raise ValueError(
+            "operational_subphases.pre_check.checks must follow the frozen check vocabulary and order."
+        )
+    for item in pre_check_checks:
+        if not isinstance(item, Mapping):
+            raise ValueError("operational_subphases.pre_check.checks entries must be mappings.")
+        code = str(item["code"])
+        status = str(item.get("status"))
+        if status not in _PRE_CHECK_CHECK_ALLOWED_STATUSES[code]:
+            raise ValueError(f"operational_subphases.pre_check.{code} has an invalid status.")
+        if type(item.get("label")) is not str or not str(item["label"]).strip():
+            raise ValueError("operational_subphases.pre_check labels must be non-empty strings.")
+        if type(item.get("message")) is not str or not str(item["message"]).strip():
+            raise ValueError("operational_subphases.pre_check messages must be non-empty strings.")
+    derived_pre_check_status = _derive_pre_check_status(list(pre_check_checks))
+    if pre_check_status != derived_pre_check_status:
+        raise ValueError("operational_subphases.pre_check.status must match its frozen derivation.")
+    blocking_statuses = {
+        str(item["code"]): str(item["status"])
+        for item in pre_check_checks
+        if str(item["code"]) in _PRE_CHECK_BLOCKING_CHECKS
+    }
+    if pre_check_status == "advisory" and any(
+        blocking_statuses.get(code) != "passed" for code in _PRE_CHECK_BLOCKING_CHECKS
+    ):
+        raise ValueError(
+            "operational_subphases.pre_check cannot be advisory unless every blocking check passed."
+        )
+
+    full_proof = subphases[OPERATIONAL_SUBPHASE_FULL_PROOF]
+    if not isinstance(full_proof, Mapping):
+        raise ValueError("operational_subphases.full_proof must be a mapping.")
+    if full_proof.get("blocking") is not True:
+        raise ValueError("operational_subphases.full_proof.blocking must be true.")
+    full_proof_status = str(full_proof.get("status"))
+    if full_proof_status not in _FULL_PROOF_ALLOWED_STATUSES:
+        raise ValueError("operational_subphases.full_proof.status is invalid.")
+    if list(full_proof.get("proof_stage_order", [])) != list(_PROOF_STAGE_ORDER):
+        raise ValueError("operational_subphases.full_proof.proof_stage_order must be canonical.")
+    full_proof_stages = full_proof.get("proof_stages")
+    if not isinstance(full_proof_stages, list) or len(full_proof_stages) != len(_PROOF_STAGE_ORDER):
+        raise ValueError(
+            "operational_subphases.full_proof.proof_stages must materialize every canonical proof stage."
+        )
+    stage_names = [str(item.get("proof_stage")) for item in full_proof_stages if isinstance(item, Mapping)]
+    if stage_names != list(_PROOF_STAGE_ORDER):
+        raise ValueError(
+            "operational_subphases.full_proof.proof_stages must use canonical proof-stage identifiers."
+        )
+    for item in full_proof_stages:
+        if not isinstance(item, Mapping):
+            raise ValueError("operational_subphases.full_proof.proof_stages entries must be mappings.")
+        status = str(item.get("status"))
+        if status not in _FULL_PROOF_STAGE_ALLOWED_STATUSES:
+            raise ValueError("operational_subphases.full_proof proof-stage status is invalid.")
+        if type(item.get("title")) is not str or not str(item["title"]).strip():
+            raise ValueError("operational_subphases.full_proof proof-stage titles must be non-empty.")
+        if type(item.get("summary")) is not str or not str(item["summary"]).strip():
+            raise ValueError("operational_subphases.full_proof proof-stage summaries must be non-empty.")
+    if full_proof_status != _derive_full_proof_status(list(full_proof_stages)):
+        raise ValueError("operational_subphases.full_proof.status must match its frozen derivation.")
+
+
+def _string_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _mapping_get(mapping: Any, key: str) -> Any:
+    if isinstance(mapping, Mapping):
+        return mapping.get(key)
+    return None
+
+
 def _build_verification_pipeline(
     state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
     manifest: Mapping[str, Any],
-    descriptor: Any,
 ) -> dict[str, Any]:
     structural_checks = _build_structural_validity_checks(state)
     structural_status = _tier_status_from_checks(structural_checks)
@@ -5396,7 +5953,7 @@ def _build_verification_pipeline(
     proof_stages = _build_proof_core_stage_results(manifest)
     proof_core_status = _tier_status_from_checks(proof_stages)
     profile_policy_status = manifest["decision_summary"]["profile_policy_status"]
-    return {
+    payload = {
         "schema": "canonical_assurance_flow",
         "ordering_semantics": (
             "Canonical assurance-flow schema and evidence-ordering model. "
@@ -5476,6 +6033,15 @@ def _build_verification_pipeline(
             ),
         },
     }
+    payload["operational_subphases"] = _build_operational_subphases(
+        state=state,
+        analysis=analysis,
+        manifest=manifest,
+        structural_checks=structural_checks,
+        intake_blocked=False,
+        proof_stages=proof_stages,
+    )
+    return payload
 
 
 def _build_structural_validity_checks(

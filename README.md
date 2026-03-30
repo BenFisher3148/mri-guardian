@@ -367,6 +367,24 @@ Its fixed pipeline phases are:
 - `multi_series_aggregation`
 - `release_control`
 
+Single-series reports now also carry an additive derived `verification_pipeline.operational_subphases` block. It is an operational flow view rather than a new canonical phase model, so it never changes `decision.pipeline_phase` or optional `decision.proof_stage`.
+
+Its fixed subphase order is:
+
+- `pre_check`
+- `full_proof`
+
+`pre_check` is a bounded early-screening layer with four frozen machine-readable checks:
+
+- `structure_validation`
+- `hash_checks` as consistency checks over already-materialized deterministic hash surfaces
+- `shape_consistency`
+- `quick_anomaly_detection`
+
+`quick_anomaly_detection` is intentionally narrow. It may use only already-available low-cost intake-adjacent or structural surfaces, it must not trigger heavy recomputation, it must not consume proof-core or clinical-plausibility outputs, and it must not create a new blocking path.
+
+`full_proof` is a derived view over the canonical `proof_core` stage record. Its failure is release-preventing within operational flow, but ownership still belongs to canonical `proof_core` and the canonical decision object. Parent `multi_series_v2` reports never emit `operational_subphases`; they aggregate child canonical outcomes and study-level assurance rather than inventing a synthetic study-level pre-check/full-proof narrative.
+
 Inside `proof_core`, the ordered non-skippable proof stages are:
 
 - `MeasurementIntegrityProof`

@@ -251,6 +251,112 @@ Minimal structural block reports guarantee at least:
 
 They do not guarantee full proof-core artifacts such as stage contracts or verified-mask hashes.
 
+## Operational Subphases
+
+Single-series `verification_report.json` outputs include an additive derived
+`verification_pipeline.operational_subphases` block.
+
+- It is forbidden on parent `multi_series_v2` reports.
+- It is an operational audit/performance view only.
+- It must never alter primary decision ownership, which remains
+  `decision.pipeline_phase` plus optional `decision.proof_stage`.
+- `blocking = true` on both subphases means a non-passing subphase is
+  release-preventing within operational flow. It does not replace canonical
+  ownership.
+
+Top-level fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `schema` | `str` | Fixed derived schema identifier for operational subphases. |
+| `ordering_semantics` | `str` | Explains that the block is derived and does not replace canonical decision ownership. |
+| `subphase_order` | `list[str]` | Fixed to `["pre_check", "full_proof"]`. |
+| `subphases` | `dict` | Frozen subphase mapping. |
+
+`pre_check` fields:
+
+- `title`
+- `status`
+- `summary`
+- `blocking`
+- `checks`
+
+Frozen `pre_check.status` vocabulary:
+
+- `passed`
+- `failed`
+- `advisory`
+
+Frozen `pre_check.checks` order:
+
+- `structure_validation`
+- `hash_checks`
+- `shape_consistency`
+- `quick_anomaly_detection`
+
+`hash_checks` means consistency checks over already-materialized deterministic
+hash surfaces. It is not a free-form integrity-verification hook.
+
+Frozen per-check statuses:
+
+- `structure_validation`: `passed | failed`
+- `hash_checks`: `passed | failed | not_evaluated`
+- `shape_consistency`: `passed | failed | not_evaluated`
+- `quick_anomaly_detection`: `passed | advisory | not_evaluated`
+
+`quick_anomaly_detection` boundaries:
+
+- It may consume only already-available low-cost intake-adjacent or structural
+  report facts.
+- It must not trigger heavy computation or recompute proof artifacts.
+- It must not consume proof-core outputs, clinical-plausibility outputs, or
+  downstream phase outputs.
+- It must not introduce semantic comparison against AI-derived content.
+- It must not introduce thresholds that duplicate or approximate downstream
+  proof decisions.
+- It must not create a new blocking path.
+
+`full_proof` fields:
+
+- `title`
+- `status`
+- `summary`
+- `blocking`
+- `proof_stage_order`
+- `proof_stages`
+
+Frozen `full_proof.status` vocabulary:
+
+- `passed`
+- `failed`
+- `not_evaluated`
+
+`full_proof.proof_stages` always materializes in canonical proof-stage order:
+
+- `MeasurementIntegrityProof`
+- `ReconstructionParityProof`
+- `SegmentationPolicyProof`
+- `VolumeComputationProof`
+
+Frozen `full_proof.proof_stages[].status` vocabulary:
+
+- `passed`
+- `failed`
+- `not_evaluated`
+
+`not_evaluated` on `full_proof` means canonical `proof_core` was not entered or
+not reached. It does not imply silent success or irrelevance.
+
+The viewer-facing operational labels:
+
+- `MeasurementIntegrityProof -> FFT / reprojection`
+- `ReconstructionParityProof -> parity validation`
+- `SegmentationPolicyProof -> segmentation proof`
+- `VolumeComputationProof -> volume computation`
+
+are presentation labels only. They must never replace canonical proof-stage
+identifiers in reports, decisions, journals, or ADR terminology.
+
 ## Decision Journal
 
 `decision_journal.json` is an additive operational audit artifact derived only from `verification_report.json` plus optional transparency receipt context.
