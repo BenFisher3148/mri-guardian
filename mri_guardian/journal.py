@@ -34,6 +34,14 @@ _CANONICAL_EVENT_ORDER = (
     EVENT_ID_TRANSPARENCY_ANCHOR,
 )
 _ALLOWED_EVENT_IDS = frozenset(_CANONICAL_EVENT_ORDER)
+_MANDATORY_EVENT_IDS = frozenset(
+    {
+        EVENT_ID_INPUT_RECEIVED,
+        EVENT_ID_STRUCTURAL_VALIDATION,
+        EVENT_ID_FINAL_DECISION,
+        EVENT_ID_TRANSPARENCY_ANCHOR,
+    }
+)
 
 STATUS_NOT_EVALUATED = "not_evaluated"
 STATUS_PASSED = "passed"
@@ -77,6 +85,10 @@ PROOF_STAGE_MEASUREMENT_INTEGRITY = "MeasurementIntegrityProof"
 PROOF_STAGE_RECONSTRUCTION_PARITY = "ReconstructionParityProof"
 PROOF_STAGE_SEGMENTATION_POLICY = "SegmentationPolicyProof"
 PROOF_STAGE_VOLUME_COMPUTATION = "VolumeComputationProof"
+_EVENT_PROOF_STAGE_REQUIREMENTS = {
+    EVENT_ID_SEGMENTATION_VERIFICATION: PROOF_STAGE_SEGMENTATION_POLICY,
+    EVENT_ID_VOLUME_PROOF: PROOF_STAGE_VOLUME_COMPUTATION,
+}
 
 _CHILD_OUTCOME_FIELDS = (
     "series_id",
@@ -164,10 +176,32 @@ def validate_decision_journal(
     expected_reason_codes: list[str] | None = None,
 ) -> None:
     """Validate a derived decision-journal payload."""
+    if journal.get("schema_version") != DECISION_JOURNAL_SCHEMA_VERSION:
+        raise ValueError(
+            "decision_journal.schema_version must match the current decision-journal schema."
+        )
     if journal.get("journal_type") != DECISION_JOURNAL_TYPE:
         raise ValueError(
             f"decision_journal.journal_type must be {DECISION_JOURNAL_TYPE!r}."
         )
+    case_id = journal.get("case_id")
+    if type(case_id) is not str or not case_id.strip():
+        raise ValueError("decision_journal.case_id must be a non-empty string.")
+    case_kind = journal.get("case_kind")
+    if type(case_kind) is not str or not case_kind.strip():
+        raise ValueError("decision_journal.case_kind must be a non-empty string.")
+    profile_identity = journal.get("profile_identity")
+    if not isinstance(profile_identity, Mapping) or not profile_identity:
+        raise ValueError("decision_journal.profile_identity must be a non-empty mapping.")
+    verification_report_hash = journal.get("verification_report_hash")
+    if type(verification_report_hash) is not str or not verification_report_hash.strip():
+        raise ValueError("decision_journal.verification_report_hash must be a non-empty string.")
+    if journal.get("final_disposition") not in {"released", "blocked"}:
+        raise ValueError("decision_journal.final_disposition must be 'released' or 'blocked'.")
+    for field_name in ("decision_class", "severity"):
+        field_value = journal.get(field_name)
+        if type(field_value) is not str or not field_value.strip():
+            raise ValueError(f"decision_journal.{field_name} must be a non-empty string.")
     if not isinstance(journal.get("entries"), list) or not journal["entries"]:
         raise ValueError("decision_journal.entries must be a non-empty list.")
     reason_codes = journal.get("reason_codes")
@@ -183,18 +217,34 @@ def validate_decision_journal(
     _validate_transparency_status(str(summary.get("transparency_status")))
     _validate_residual_risk(summary.get("residual_risk"), path="journal_summary.residual_risk")
     previous_event_index = -1
+    seen_event_ids: set[str] = set()
+    final_decision_entry: Mapping[str, Any] | None = None
+    transparency_entry: Mapping[str, Any] | None = None
     for index, entry in enumerate(journal["entries"]):
         if not isinstance(entry, Mapping):
             raise ValueError(f"decision_journal.entries[{index}] must be a mapping.")
         event_id = str(entry.get("event_id"))
         if event_id not in _ALLOWED_EVENT_IDS:
             raise ValueError(f"Unsupported decision-journal event_id: {event_id!r}.")
+        seen_event_ids.add(event_id)
         event_index = _CANONICAL_EVENT_ORDER.index(event_id)
         if event_index <= previous_event_index:
             raise ValueError("decision_journal entry order must follow the canonical event vocabulary.")
         previous_event_index = event_index
         if entry.get("sequence") != index:
             raise ValueError("decision_journal entry sequence values must be contiguous and canonical.")
+        expected_proof_stage = _EVENT_PROOF_STAGE_REQUIREMENTS.get(event_id)
+        proof_stage = entry.get("proof_stage")
+        if expected_proof_stage is None:
+            if proof_stage is not None:
+                raise ValueError(
+                    f"decision_journal entry {event_id!r} must not carry proof_stage."
+                )
+        elif proof_stage != expected_proof_stage:
+            raise ValueError(
+                f"decision_journal entry {event_id!r} must carry proof_stage "
+                f"{expected_proof_stage!r}."
+            )
         status = str(entry.get("status"))
         if status not in _ALLOWED_ENTRY_STATUSES:
             raise ValueError(f"Unsupported decision-journal status: {status!r}.")
@@ -236,6 +286,10 @@ def validate_decision_journal(
         )
         child_outcomes = entry.get("child_outcomes")
         if child_outcomes is None:
+            if event_id == EVENT_ID_FINAL_DECISION:
+                final_decision_entry = entry
+            if event_id == EVENT_ID_TRANSPARENCY_ANCHOR:
+                transparency_entry = entry
             continue
         if event_id != EVENT_ID_MULTI_SERIES_AGGREGATION:
             raise ValueError("decision_journal child_outcomes are only allowed on multi_series_aggregation.")
@@ -258,6 +312,33 @@ def validate_decision_journal(
                     raise ValueError(
                         f"decision_journal child_outcomes[{child_index}].{field_name} must be a non-empty string."
                     )
+        if event_id == EVENT_ID_FINAL_DECISION:
+            final_decision_entry = entry
+        if event_id == EVENT_ID_TRANSPARENCY_ANCHOR:
+            transparency_entry = entry
+    missing_required = sorted(_MANDATORY_EVENT_IDS - seen_event_ids)
+    if missing_required:
+        raise ValueError(
+            "decision_journal must include the mandatory event set: "
+            f"{', '.join(missing_required)}"
+        )
+    if final_decision_entry is None:
+        raise ValueError("decision_journal is missing the final_decision entry.")
+    if list(final_decision_entry.get("reason_codes", [])) != list(reason_codes):
+        raise ValueError(
+            "decision_journal final_decision.reason_codes must match the top-level reason_codes."
+        )
+    final_residual_risk = summary.get("residual_risk")
+    if final_decision_entry.get("residual_risk") != final_residual_risk:
+        raise ValueError(
+            "decision_journal journal_summary.residual_risk must match final_decision.residual_risk."
+        )
+    if transparency_entry is None:
+        raise ValueError("decision_journal is missing the transparency_anchor entry.")
+    if transparency_entry.get("status") != summary.get("transparency_status"):
+        raise ValueError(
+            "decision_journal journal_summary.transparency_status must match transparency_anchor.status."
+        )
 
 
 def _build_decision_journal_from_projection(
@@ -698,24 +779,29 @@ def _advisory_heuristics_entry(projection: _JournalProjection) -> dict[str, Any]
 
 
 def _multi_series_aggregation_entry(projection: _JournalProjection) -> dict[str, Any]:
-    status = (
-        STATUS_PASSED
-        if projection["decision"]["final_disposition"] == "released"
-        else STATUS_FAILED
+    reason_codes = _event_reason_codes(
+        projection,
+        pipeline_phases=(PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,),
     )
+    if projection["decision"]["final_disposition"] != "released":
+        status = STATUS_FAILED
+    elif reason_codes:
+        status = STATUS_ADVISORY
+    else:
+        status = STATUS_PASSED
     event = _entry(
         event_id=EVENT_ID_MULTI_SERIES_AGGREGATION,
         pipeline_phase=PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,
         status=status,
-        summary=(
-            "Study aggregation accepted the required series set for downstream release."
-            if status == STATUS_PASSED
-            else "Study aggregation blocked downstream release for the required series set."
-        ),
-        reason_codes=_event_reason_codes(
-            projection,
-            pipeline_phases=(PIPELINE_PHASE_MULTI_SERIES_AGGREGATION,),
-        ),
+        summary={
+            STATUS_PASSED: "Study aggregation accepted the required series set for downstream release.",
+            STATUS_ADVISORY: (
+                "Study aggregation accepted the required series set with review-relevant advisory "
+                "or near-boundary findings."
+            ),
+            STATUS_FAILED: "Study aggregation blocked downstream release for the required series set.",
+        }[status],
+        reason_codes=reason_codes,
         evidence_paths=_existing_evidence_paths(
             projection,
             (
@@ -732,19 +818,37 @@ def _multi_series_aggregation_entry(projection: _JournalProjection) -> dict[str,
 
 
 def _final_decision_entry(projection: _JournalProjection) -> dict[str, Any]:
+    decision_class = str(projection["decision"]["decision_class"])
     released = projection["decision"]["final_disposition"] == "released"
+    if not released:
+        status = STATUS_FAILED
+    elif decision_class == "verified_clean":
+        status = STATUS_PASSED
+    else:
+        status = STATUS_ADVISORY
+    subject = "study" if projection["is_multi_series"] else "case"
     return _entry(
         event_id=EVENT_ID_FINAL_DECISION,
         pipeline_phase=PIPELINE_PHASE_RELEASE_CONTROL,
-        status=STATUS_PASSED if released else STATUS_FAILED,
-        summary=(
-            "The canonical case decision released the Guardian output."
-            if not projection["is_multi_series"] and released
-            else "The canonical case decision blocked the Guardian output."
-            if not projection["is_multi_series"]
-            else "The canonical study decision released the Guardian output."
-            if released
-            else "The canonical study decision blocked the Guardian output."
+        status=status,
+        summary={
+            "verified_clean": f"The canonical {subject} decision released the Guardian output.",
+            "verified_boundary_hugging": (
+                f"The canonical {subject} decision released the Guardian output with a near-boundary review signal."
+            ),
+            "verified_with_advisory": (
+                f"The canonical {subject} decision released the Guardian output with non-blocking advisory findings."
+            ),
+            "blocked_structural": f"The canonical {subject} decision blocked the Guardian output.",
+            "blocked_physical": f"The canonical {subject} decision blocked the Guardian output.",
+            "blocked_policy": f"The canonical {subject} decision blocked the Guardian output.",
+        }.get(
+            decision_class,
+            (
+                f"The canonical {subject} decision released the Guardian output."
+                if released
+                else f"The canonical {subject} decision blocked the Guardian output."
+            ),
         ),
         reason_codes=list(projection["decision_reason_codes"]),
         evidence_paths=["verification_report.json#/decision"],
@@ -1120,6 +1224,14 @@ def _multi_series_residual_risk(
         return _residual_risk(
             classification=RESIDUAL_RISK_BOUNDED,
             summary="Study aggregation accepted the required series set; remaining risk is bounded by review of the released study.",
+        )
+    if status == STATUS_ADVISORY:
+        return _residual_risk(
+            classification=RESIDUAL_RISK_OPERATOR_RELEVANT,
+            summary=(
+                "Study aggregation accepted the required series set, but downstream-released "
+                "series still carry review-relevant advisory or near-boundary findings."
+            ),
         )
     block_category = str(projection["decision_summary"].get("block_category", ""))
     if block_category in {"missing_required_series", "required_series_geometry_mismatch"}:

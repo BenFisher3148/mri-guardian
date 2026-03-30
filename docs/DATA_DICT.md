@@ -315,6 +315,11 @@ Frozen `status` vocabulary:
 - `absent`
 - `not_applicable`
 
+Status mapping notes:
+
+- `final_decision` uses `advisory` for released `verified_boundary_hugging` and `verified_with_advisory` outcomes, `passed` for `verified_clean`, and `failed` for blocked outcomes.
+- `multi_series_aggregation` uses `advisory` when the study is released but the aggregated required-series path still surfaces review-relevant advisory or near-boundary signals.
+
 Residual-risk classifications:
 
 - `bounded`

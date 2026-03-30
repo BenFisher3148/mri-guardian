@@ -1910,16 +1910,24 @@ class MriGuardianHarnessTests(unittest.TestCase):
             for entry in advisory_journal["entries"]
             if entry["event_id"] == "advisory_heuristics"
         )
+        boundary_final_decision = next(
+            entry for entry in boundary_journal["entries"] if entry["event_id"] == "final_decision"
+        )
+        advisory_final_decision = next(
+            entry for entry in advisory_journal["entries"] if entry["event_id"] == "final_decision"
+        )
         self.assertEqual(boundary_volume["status"], "advisory")
         self.assertIn(
             "tumor_volume_absolute_error_near_boundary",
             boundary_volume["reason_codes"],
         )
+        self.assertEqual(boundary_final_decision["status"], "advisory")
         self.assertEqual(
             advisory_journal["journal_summary"]["residual_risk"]["classification"],
             "operator_relevant",
         )
         self.assertEqual(advisory_heuristics["status"], "advisory")
+        self.assertEqual(advisory_final_decision["status"], "advisory")
 
     def test_decision_journal_handles_structural_physical_and_non_final_policy_outcomes(self) -> None:
         structural_state = build_demo_case()
@@ -1970,6 +1978,11 @@ class MriGuardianHarnessTests(unittest.TestCase):
             if entry["event_id"] == "multi_series_aggregation"
         )
         self.assertTrue(aggregation_event["child_outcomes"])
+        self.assertEqual(aggregation_event["status"], "advisory")
+        self.assertEqual(
+            aggregation_event["residual_risk"]["classification"],
+            "operator_relevant",
+        )
         self.assertEqual(
             sorted(aggregation_event["child_outcomes"][0].keys()),
             sorted(
@@ -1985,6 +1998,27 @@ class MriGuardianHarnessTests(unittest.TestCase):
     def test_decision_journal_validation_rejects_unknown_event_ids(self) -> None:
         journal = build_decision_journal(build_case_verification_report(build_demo_case()))
         journal["entries"][0]["event_id"] = "unexpected_event"
+
+        with self.assertRaises(ValueError):
+            validate_decision_journal(journal)
+
+    def test_decision_journal_validation_rejects_missing_required_events_and_invalid_alignment(self) -> None:
+        journal = build_decision_journal(build_case_verification_report(build_demo_case()))
+        journal["entries"] = [
+            entry for entry in journal["entries"] if entry["event_id"] != "final_decision"
+        ]
+
+        with self.assertRaises(ValueError):
+            validate_decision_journal(journal)
+
+        journal = build_decision_journal(build_case_verification_report(build_demo_case()))
+        journal["entries"][-1]["status"] = "recorded"
+
+        with self.assertRaises(ValueError):
+            validate_decision_journal(journal)
+
+        journal = build_decision_journal(build_case_verification_report(build_demo_case()))
+        journal["entries"][-2]["proof_stage"] = "SegmentationPolicyProof"
 
         with self.assertRaises(ValueError):
             validate_decision_journal(journal)
