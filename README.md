@@ -256,6 +256,7 @@ Inspect the mocked integration artifacts:
 Inspect the explicit claim-to-proof interfaces:
 
 - `demo_artifacts/ai_claim_envelope.json`
+- `demo_artifacts/decision_journal.json`
 - `demo_artifacts/verification_profile.json`
 - `demo_artifacts/verification_profile_descriptor.json`
 - `demo_artifacts/measurement_integrity_proof.json`
@@ -283,7 +284,7 @@ For a non-final triage run:
 mri-guardian demo --output-dir demo_artifacts --profile fast_triage_mode
 ```
 
-That path emits the report, profile descriptor, performance profile, and HTML view only. It does not emit a released state, evidence payload, transparency log, or portable bundle.
+That path emits the report, decision journal, profile descriptor, performance profile, and HTML view only. It does not emit a released state, evidence payload, transparency log, or portable bundle.
 
 Verify the archive or an extracted `bundle.json` replay package in Python:
 
@@ -327,6 +328,7 @@ That interface is now explicit rather than implied. The harness emits:
 - `MaskDerivationPolicy`: the approved deterministic algorithm identity and canonical resolved parameters that turn a raw-derived reconstruction into the admissible mask
 - `VerificationTolerancePolicy`: the attack-aware tolerance contract that states which metrics are per-voxel, global-norm, and frequency-domain
 - `VerificationProfileDescriptor`: the canonical runtime profile contract with `profile_name`, `profile_revision`, `profile_digest`, release semantics, authority requirements, heuristics, and performance expectations
+- `DecisionJournal`: a strictly derived operational audit artifact built only from the canonical verification report plus optional transparency receipt context
 - `MeasurementIntegrityProof`: the proof that the raw-derived reconstruction remains anchored to the measurement domain within policy
 - `ReconstructionParityProof`: the proof that the AI reconstruction matches the raw-derived reconstruction within policy
 - `SegmentationPolicyProof`: the proof that the AI mask matches the policy-derived verified mask
@@ -398,6 +400,7 @@ The portable bundle pushes that one step further. Each accepted case now emits a
 
 - the ICSD evidence envelope
 - the released state and workstation payload
+- the deterministic decision journal
 - a deterministic verification transcript
 - the original input state plus replay context
 - the transparency-log snapshot that anchored the release
@@ -409,6 +412,8 @@ That means a reviewer can carry the artifact elsewhere, verify it offline, and s
 The replay layer makes the bundle regulator-friendly: `verify_bundle(...)` does not just check static integrity. It replays the release from the bundled `input_state.json`, `replay.json`, and transparency-log prefix, then confirms that the regenerated released state, evidence payload, and bundle members are identical.
 
 Replay identity now includes the embedded runtime profile descriptor. A verifier can therefore prove not just "the profile name was `brain_t1_baseline`" but "the exact canonical descriptor body used at runtime had this digest."
+
+The decision journal is additive rather than canonical proof truth. It emits a fixed event vocabulary, a fixed status enum, bounded hazard/mitigation mappings, and structured residual-risk fields. Replay verifies it as a pure derivation from `verification_report.json` plus optional transparency receipt context.
 
 The same distinction applies to declared AI stack provenance: if `ai_stack_identity` is present, replay can prove that the released artifacts were bound to that exact declaration. It does not elevate that declaration into an independently proven model-validity statement.
 

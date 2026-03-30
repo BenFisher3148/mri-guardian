@@ -50,6 +50,7 @@ from mri_guardian.integration import (
     build_mock_pacs_submission,
     restore_case_state_from_dicom_input,
 )
+from mri_guardian.journal import build_decision_journal, validate_decision_journal
 from mri_guardian.mask_engine import (
     CONNECTED_COMPONENT_ALGORITHM,
     MORPHOLOGY_ALGORITHM,
@@ -1855,6 +1856,139 @@ class MriGuardianHarnessTests(unittest.TestCase):
             report["decision"]["reason_codes"],
         )
 
+    def test_decision_journal_clean_release_uses_canonical_order_and_scoped_evidence(self) -> None:
+        state = build_demo_case()
+
+        report = build_case_verification_report(state)
+        journal = build_decision_journal(report)
+
+        validate_decision_journal(journal, expected_reason_codes=report["decision"]["reason_codes"])
+        self.assertEqual(journal["case_id"], state["case_id"])
+        self.assertEqual(journal["case_kind"], "single_series_v1")
+        self.assertEqual(journal["decision_class"], "verified_clean")
+        self.assertEqual(
+            [entry["event_id"] for entry in journal["entries"]],
+            [
+                "input_received",
+                "structural_validation",
+                "reconstruction",
+                "parity_checks",
+                "segmentation_verification",
+                "volume_proof",
+                "advisory_heuristics",
+                "final_decision",
+                "transparency_anchor",
+            ],
+        )
+        self.assertEqual(journal["entries"][-1]["status"], "absent")
+        self.assertEqual(journal["entries"][-1]["evidence_paths"], [])
+        self.assertEqual(
+            journal["entries"][-2]["reason_codes"],
+            report["decision"]["reason_codes"],
+        )
+
+    def test_decision_journal_boundary_and_advisory_cases_use_frozen_statuses(self) -> None:
+        boundary_state = build_demo_case()
+        boundary_state["tumor_volume_mm3"] = round(
+            float(boundary_state["tumor_volume_mm3"]) + 8.5e-10,
+            9,
+        )
+        advisory_state = self._build_warning_stack_case()
+        advisory_state["tumor_volume_mm3"] = round(
+            float(advisory_state["tumor_volume_mm3"]) + 8.5e-10,
+            9,
+        )
+
+        boundary_journal = build_decision_journal(build_case_verification_report(boundary_state))
+        advisory_journal = build_decision_journal(build_case_verification_report(advisory_state))
+
+        boundary_volume = next(
+            entry for entry in boundary_journal["entries"] if entry["event_id"] == "volume_proof"
+        )
+        advisory_heuristics = next(
+            entry
+            for entry in advisory_journal["entries"]
+            if entry["event_id"] == "advisory_heuristics"
+        )
+        self.assertEqual(boundary_volume["status"], "advisory")
+        self.assertIn(
+            "tumor_volume_absolute_error_near_boundary",
+            boundary_volume["reason_codes"],
+        )
+        self.assertEqual(
+            advisory_journal["journal_summary"]["residual_risk"]["classification"],
+            "operator_relevant",
+        )
+        self.assertEqual(advisory_heuristics["status"], "advisory")
+
+    def test_decision_journal_handles_structural_physical_and_non_final_policy_outcomes(self) -> None:
+        structural_state = build_demo_case()
+        structural_state["case_id"] = ""
+        physical_state = build_demo_case()
+        physical_reconstruction = np.asarray(physical_state["ai_reconstruction"], dtype=np.float64)
+        physical_reconstruction += 9e-10
+        physical_state["ai_reconstruction"] = physical_reconstruction.tolist()
+        triage_state = build_demo_case(profile_name="fast_triage_mode")
+
+        structural_journal = build_decision_journal(build_case_verification_report(structural_state))
+        physical_journal = build_decision_journal(build_case_verification_report(physical_state))
+        triage_journal = build_decision_journal(build_case_verification_report(triage_state))
+
+        self.assertEqual(
+            [entry["event_id"] for entry in structural_journal["entries"]],
+            [
+                "input_received",
+                "structural_validation",
+                "final_decision",
+                "transparency_anchor",
+            ],
+        )
+        parity_event = next(
+            entry for entry in physical_journal["entries"] if entry["event_id"] == "parity_checks"
+        )
+        self.assertEqual(parity_event["status"], "failed")
+        self.assertEqual(
+            parity_event["hazards_triggered"][0]["code"],
+            "image_integrity_distortion",
+        )
+        self.assertEqual(
+            triage_journal["journal_summary"]["residual_risk"]["classification"],
+            "workflow_external",
+        )
+        self.assertEqual(triage_journal["entries"][-1]["status"], "not_applicable")
+
+    def test_decision_journal_multi_series_keeps_compact_child_outcomes_only(self) -> None:
+        report = build_multi_series_case_verification_report(build_multi_series_demo_case())
+
+        journal = build_decision_journal(report)
+        validate_decision_journal(journal, expected_reason_codes=report["decision"]["reason_codes"])
+
+        self.assertNotIn("reconstruction", [entry["event_id"] for entry in journal["entries"]])
+        aggregation_event = next(
+            entry
+            for entry in journal["entries"]
+            if entry["event_id"] == "multi_series_aggregation"
+        )
+        self.assertTrue(aggregation_event["child_outcomes"])
+        self.assertEqual(
+            sorted(aggregation_event["child_outcomes"][0].keys()),
+            sorted(
+                [
+                    "series_id",
+                    "decision_class",
+                    "final_disposition",
+                    "gating_status",
+                ]
+            ),
+        )
+
+    def test_decision_journal_validation_rejects_unknown_event_ids(self) -> None:
+        journal = build_decision_journal(build_case_verification_report(build_demo_case()))
+        journal["entries"][0]["event_id"] = "unexpected_event"
+
+        with self.assertRaises(ValueError):
+            validate_decision_journal(journal)
+
     def test_invalid_embedded_profile_descriptor_returns_structural_block_report(self) -> None:
         state = build_demo_case()
         state["verification_profile_descriptor"]["profile_digest"] = "bad-digest"
@@ -3354,6 +3488,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertTrue(verification["details"]["replay_verified"])
         with ZipFile(bundle_path, mode="r") as archive:
             manifest = self._read_bundle_json(archive, "bundle.json")
+            decision_journal = self._read_bundle_json(archive, "decision_journal.json")
             transcript = self._read_bundle_json(archive, "transcript.json")
             signatures = self._read_bundle_json(archive, "signatures.json")
             replay = self._read_bundle_json(archive, "replay.json")
@@ -3372,11 +3507,20 @@ class MriGuardianHarnessTests(unittest.TestCase):
             manifest["hashes"]["ai_claim_envelope_hash"],
             hash_canonical_json(result.after_state["verified_manifest"]["ai_claim_envelope"]),
         )
+        self.assertEqual(
+            manifest["hashes"]["decision_journal_hash"],
+            hash_canonical_json(decision_journal),
+        )
         self.assertEqual(transcript["events"][0]["stage"], "profile")
+        self.assertEqual(decision_journal["entries"][-1]["status"], "recorded")
         self.assertEqual(replay["profile_name"], DEFAULT_PROFILE_NAME)
         self.assertEqual(
             replay["expected_hashes"]["verification_profile_descriptor_hash"],
             hash_canonical_json(profile_descriptor),
+        )
+        self.assertEqual(
+            replay["expected_hashes"]["decision_journal_hash"],
+            hash_canonical_json(decision_journal),
         )
         self.assertEqual(signatures["members"][0]["algorithm"], "sha256")
 
@@ -3636,6 +3780,36 @@ class MriGuardianHarnessTests(unittest.TestCase):
             )
         )
 
+    def test_portable_bundle_detects_decision_journal_tampering(self) -> None:
+        _, result = self._release_demo_case()
+        bundle_path = self.runtime_root / f"clean-journal{MRI_GUARD_BUNDLE_EXTENSION}"
+        tampered_path = self.runtime_root / f"tampered-journal{MRI_GUARD_BUNDLE_EXTENSION}"
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        with ZipFile(bundle_path, mode="r") as archive:
+            journal = self._read_bundle_json(archive, "decision_journal.json")
+        journal["entries"][0]["summary"] = "Free-form tampered summary."
+        self._rewrite_bundle_member(
+            source=bundle_path,
+            destination=tampered_path,
+            member_name="decision_journal.json",
+            payload=self._json_bytes(journal),
+        )
+
+        verification = verify_bundle(tampered_path)
+
+        self.assertFalse(verification["verified"])
+        self.assertTrue(
+            any(
+                "decision_journal.json" in failure or "signatures.json" in failure
+                for failure in verification["failures"]
+            )
+        )
+
     def test_multi_series_mock_dicom_pacs_and_bundle_replay_identically(self) -> None:
         state, result = self._release_multi_series_demo_case()
         bundle_path = self.runtime_root / f"{state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
@@ -3677,6 +3851,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(report["case_kind"], MULTI_SERIES_CASE_KIND)
         self.assertEqual(pacs_submission["verification_summary"]["case_kind"], MULTI_SERIES_CASE_KIND)
         self.assertTrue((demo_root / "comparison.html").exists())
+        self.assertTrue((demo_root / "decision_journal.json").exists())
         self.assertTrue((demo_root / "bundle_verification.json").exists())
 
     def test_cli_verify_command_reports_directory_success(self) -> None:
@@ -3843,6 +4018,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
             present,
             {
                 "comparison.html",
+                "decision_journal.json",
                 "performance_profile.json",
                 "verification_profile.json",
                 "verification_profile_descriptor.json",

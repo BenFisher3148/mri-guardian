@@ -66,6 +66,11 @@ from .integration import (
     build_mock_pacs_submission,
     restore_case_state_from_dicom_input,
 )
+from .journal import (
+    build_decision_journal,
+    build_transparency_receipt_context,
+    validate_decision_journal,
+)
 from .mask_engine import (
     CONNECTED_COMPONENT_ALGORITHM,
     MORPHOLOGY_ALGORITHM,
@@ -162,6 +167,9 @@ __all__ = [
     "build_mock_pacs_block_notice",
     "build_mock_pacs_submission",
     "restore_case_state_from_dicom_input",
+    "build_decision_journal",
+    "build_transparency_receipt_context",
+    "validate_decision_journal",
     "THRESHOLD_ALGORITHM",
     "MORPHOLOGY_ALGORITHM",
     "CONNECTED_COMPONENT_ALGORITHM",

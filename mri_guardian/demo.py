@@ -30,6 +30,7 @@ from .integration import (
     build_mock_pacs_block_notice,
     build_mock_pacs_submission,
 )
+from .journal import build_decision_journal
 from .profiles import DEFAULT_PROFILE_NAME, get_verification_profile
 from .tamper import (
     build_tamper_mode_base_case,
@@ -77,6 +78,7 @@ def run_demo(
         f"{canonical_json_dumps(pending_report)}\n",
         encoding="utf-8",
     )
+    _write_decision_journal(output_path, pending_report)
     _write_single_series_temporal_artifacts(output_path, pending_report)
     (output_path / "performance_profile.json").write_text(
         f"{canonical_json_dumps(_build_demo_performance_profile(case_state, pending_report, descriptor.profile_name))}\n",
@@ -182,10 +184,14 @@ def run_demo(
             encoding="utf-8",
         )
     bundle_path = output_path / f"{case_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
-    write_portable_evidence_bundle(
+    bundle_metadata = write_portable_evidence_bundle(
         result=result,
         transparency_log_path=output_path / "transparency-log.jsonl",
         output_path=bundle_path,
+    )
+    (output_path / "decision_journal.json").write_text(
+        f"{canonical_json_dumps(bundle_metadata['decision_journal'])}\n",
+        encoding="utf-8",
     )
     bundle_verification = verify_bundle(bundle_path)
     if not bundle_verification["verified"]:
@@ -310,6 +316,14 @@ def _write_tamper_mode_reports(output_path: Path, *, profile_name: str) -> None:
     corpus_payload["entries"] = corpus_entries
     (output_path / "verification_threat_corpus.json").write_text(
         f"{canonical_json_dumps(corpus_payload)}\n",
+        encoding="utf-8",
+    )
+
+
+def _write_decision_journal(output_path: Path, report: dict[str, Any]) -> None:
+    journal = build_decision_journal(report)
+    (output_path / "decision_journal.json").write_text(
+        f"{canonical_json_dumps(journal)}\n",
         encoding="utf-8",
     )
 

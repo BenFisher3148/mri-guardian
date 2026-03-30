@@ -251,6 +251,85 @@ Minimal structural block reports guarantee at least:
 
 They do not guarantee full proof-core artifacts such as stage contracts or verified-mask hashes.
 
+## Decision Journal
+
+`decision_journal.json` is an additive operational audit artifact derived only from `verification_report.json` plus optional transparency receipt context.
+
+- It is emitted wherever `verification_report.json` is emitted.
+- It is bundled only when the case shape already produces a portable bundle.
+
+Top-level fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `schema_version` | `str` | Decision-journal schema version. |
+| `journal_type` | `str` | Fixed to `DecisionJournal`. |
+| `case_id` | `str` | Stable case or study identifier when available; falls back to `unknown-case` on minimal structural rejects with no usable identifier. |
+| `case_kind` | `str` | `single_series_v1` or `multi_series_v2`. |
+| `profile_identity` | `dict` | Single-profile identity or compact multi-series descriptor-set identity. |
+| `verification_report_hash` | `str` | Canonical hash of the source `verification_report.json`. |
+| `final_disposition` | `str` | `released` or `blocked`. Mirrors the canonical decision. |
+| `decision_class` | `str` | Canonical case-level decision class copied from `decision.decision_class`. |
+| `severity` | `str` | Canonical case-level severity copied from `decision.severity`. |
+| `reason_codes` | `list[str]` | Canonical case-level reason summary copied from `decision.reason_codes`. |
+| `journal_summary.transparency_status` | `str` | `recorded`, `absent`, or `not_applicable`. |
+| `journal_summary.residual_risk` | `dict` | Structured case-level residual risk with fixed `classification` and bounded `summary`. |
+| `entries` | `list[dict]` | Canonically ordered event summaries. |
+
+Journal entry fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `event_id` | `str` | Frozen event identifier. |
+| `sequence` | `int` | Canonical event order. It is not a timestamp or discovery order. |
+| `pipeline_phase` | `str` | Canonical assurance-flow phase reference for the journaled outcome. |
+| `proof_stage` | `str` | Optional proof-stage identifier for proof-core outcome summaries only. |
+| `status` | `str` | Frozen journal status enum. |
+| `summary` | `str` | Canonical bounded event summary text. |
+| `reason_codes` | `list[str]` | Entry-scoped subset of the case-level `reason_codes`. |
+| `evidence_paths` | `list[str]` | Canonical references to already-emitted artifacts or `verification_report.json#/...` surfaces. Emit `[]` when no direct evidence surface exists. |
+| `hazards_triggered` | `list[dict]` | Stable mapped hazards only. Emit `[]` when no stable mapping exists. |
+| `mitigations_applied` | `list[dict]` | Stable mapped controls relevant to the surfaced path only. |
+| `residual_risk` | `dict` | Structured event-level residual risk with fixed `classification` and bounded `summary`. |
+
+Frozen `event_id` vocabulary:
+
+- `input_received`
+- `structural_validation`
+- `reconstruction`
+- `parity_checks`
+- `segmentation_verification`
+- `volume_proof`
+- `advisory_heuristics`
+- `multi_series_aggregation`
+- `final_decision`
+- `transparency_anchor`
+
+Frozen `status` vocabulary:
+
+- `not_evaluated`
+- `passed`
+- `failed`
+- `advisory`
+- `recorded`
+- `absent`
+- `not_applicable`
+
+Residual-risk classifications:
+
+- `bounded`
+- `workflow_external`
+- `operator_relevant`
+
+`transparency_anchor` is always present as a journaled anchoring outcome. Its status records whether anchoring was present, absent from the current artifact surface, or not applicable to the current non-final path. It does not imply that anchoring positively occurred when the status is not `recorded`.
+
+For `multi_series_v2`, only the `multi_series_aggregation` entry may include `child_outcomes`, and each child outcome is restricted to:
+
+- `series_id`
+- `decision_class`
+- `final_disposition`
+- `gating_status`
+
 ## Integration Artifacts
 
 | Artifact | Purpose |
@@ -293,6 +372,7 @@ The portable bundle written by [`../mri_guardian/bundle.py`](../mri_guardian/bun
 - `released_state.json`
 - `workstation_payload.json`
 - `verification_report.json`
+- `decision_journal.json`
 - `verification_profile_descriptor.json`
 - `transcript.json`
 - `replay.json`

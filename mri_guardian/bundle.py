@@ -24,6 +24,7 @@ from .harness import (
     _check_released_state_matches_trace,
     build_case_verification_report,
 )
+from .journal import build_decision_journal, build_transparency_receipt_context
 from .profiles import (
     get_verification_profile,
     verification_profile_descriptor_from_dict,
@@ -40,6 +41,7 @@ _INPUT_STATE_NAME = "input_state.json"
 _RELEASED_STATE_NAME = "released_state.json"
 _WORKSTATION_PAYLOAD_NAME = "workstation_payload.json"
 _VERIFICATION_REPORT_NAME = "verification_report.json"
+_DECISION_JOURNAL_NAME = "decision_journal.json"
 _PROFILE_DESCRIPTOR_NAME = "verification_profile_descriptor.json"
 _TRANSCRIPT_NAME = "transcript.json"
 _REPLAY_DESCRIPTOR_NAME = "replay.json"
@@ -59,6 +61,7 @@ _REQUIRED_BUNDLE_MEMBERS = (
     _RELEASED_STATE_NAME,
     _WORKSTATION_PAYLOAD_NAME,
     _VERIFICATION_REPORT_NAME,
+    _DECISION_JOURNAL_NAME,
     _PROFILE_DESCRIPTOR_NAME,
     _TRANSCRIPT_NAME,
     _REPLAY_DESCRIPTOR_NAME,
@@ -123,6 +126,18 @@ def write_portable_evidence_bundle(
         anchored_evidence_payload=anchored_evidence_payload,
         log_entries=log_snapshot["entries"],
     )
+    receipt_context = build_transparency_receipt_context(
+        reference=_transparency_receipt(evidence_payload)["reference"],
+        entry_hash=str(receipt_entry["entry_hash"]),
+        previous_entry_hash=receipt_entry.get("previous_entry_hash"),
+        checkpoint=log_snapshot["checkpoint"],
+        entry_index=int(receipt_entry["index"]),
+        log_length=len(log_snapshot["entries"]),
+    )
+    decision_journal = build_decision_journal(
+        report,
+        transparency_receipt_context=receipt_context,
+    )
     transcript = _build_bundle_transcript(
         state=state,
         report=report,
@@ -134,6 +149,7 @@ def write_portable_evidence_bundle(
         before_state=before_state,
         state=state,
         report=report,
+        decision_journal=decision_journal,
         evidence_payload=evidence_payload,
         anchored_evidence_payload=anchored_evidence_payload,
         log_snapshot=log_snapshot,
@@ -144,6 +160,7 @@ def write_portable_evidence_bundle(
         report=report,
         evidence_payload=evidence_payload,
         anchored_evidence_payload=anchored_evidence_payload,
+        decision_journal=decision_journal,
         transcript=transcript,
         replay_descriptor=replay_descriptor,
         log_snapshot=log_snapshot,
@@ -156,6 +173,7 @@ def write_portable_evidence_bundle(
         _RELEASED_STATE_NAME: _json_bytes(state),
         _WORKSTATION_PAYLOAD_NAME: _json_bytes(state["workstation_payload"]),
         _VERIFICATION_REPORT_NAME: _json_bytes(report),
+        _DECISION_JOURNAL_NAME: _json_bytes(decision_journal),
         _PROFILE_DESCRIPTOR_NAME: _json_bytes(report["contracts"]["verification_profile_descriptor"]),
         _TRANSCRIPT_NAME: _json_bytes(transcript),
         _REPLAY_DESCRIPTOR_NAME: _json_bytes(replay_descriptor),
@@ -176,6 +194,7 @@ def write_portable_evidence_bundle(
         "bundle": bundle_payload,
         "replay": replay_descriptor,
         "signatures": signatures,
+        "decision_journal": decision_journal,
     }
 
 
@@ -206,6 +225,7 @@ def verify_portable_evidence_bundle(bundle_path: Path | str) -> dict[str, Any]:
         input_state = payloads[_INPUT_STATE_NAME]
         state = payloads[_RELEASED_STATE_NAME]
         report = payloads[_VERIFICATION_REPORT_NAME]
+        decision_journal = payloads[_DECISION_JOURNAL_NAME]
         profile_descriptor = payloads[_PROFILE_DESCRIPTOR_NAME]
         transcript = payloads[_TRANSCRIPT_NAME]
         replay_descriptor = payloads[_REPLAY_DESCRIPTOR_NAME]
@@ -273,6 +293,22 @@ def verify_portable_evidence_bundle(bundle_path: Path | str) -> dict[str, Any]:
             failures.append(str(exc))
 
         if receipt_entry is not None:
+            receipt_context = build_transparency_receipt_context(
+                reference=_transparency_receipt(evidence_payload)["reference"],
+                entry_hash=str(receipt_entry["entry_hash"]),
+                previous_entry_hash=receipt_entry.get("previous_entry_hash"),
+                checkpoint=log_snapshot["checkpoint"],
+                entry_index=int(receipt_entry["index"]),
+                log_length=len(log_snapshot["entries"]),
+            )
+            expected_decision_journal = build_decision_journal(
+                expected_report,
+                transparency_receipt_context=receipt_context,
+            )
+            if decision_journal != expected_decision_journal:
+                failures.append(
+                    "decision_journal.json does not match the deterministic decision journal."
+                )
             expected_transcript = _build_bundle_transcript(
                 state=state,
                 report=expected_report,
@@ -289,6 +325,7 @@ def verify_portable_evidence_bundle(bundle_path: Path | str) -> dict[str, Any]:
                 report=expected_report,
                 evidence_payload=evidence_payload,
                 anchored_evidence_payload=anchored_evidence_payload,
+                decision_journal=expected_decision_journal,
                 transcript=expected_transcript,
                 replay_descriptor=replay_descriptor,
                 log_snapshot=log_snapshot,
@@ -301,6 +338,7 @@ def verify_portable_evidence_bundle(bundle_path: Path | str) -> dict[str, Any]:
                 input_state=input_state,
                 expected_state=state,
                 expected_report=expected_report,
+                expected_decision_journal=expected_decision_journal,
                 expected_evidence_payload=evidence_payload,
                 expected_profile_descriptor=profile_descriptor,
                 expected_member_bytes=member_bytes,
@@ -358,6 +396,7 @@ def _build_bundle_manifest(
     report: Mapping[str, Any],
     evidence_payload: Mapping[str, Any],
     anchored_evidence_payload: Mapping[str, Any],
+    decision_journal: Mapping[str, Any],
     transcript: Mapping[str, Any],
     replay_descriptor: Mapping[str, Any],
     log_snapshot: Mapping[str, Any],
@@ -369,6 +408,7 @@ def _build_bundle_manifest(
             report=report,
             evidence_payload=evidence_payload,
             anchored_evidence_payload=anchored_evidence_payload,
+            decision_journal=decision_journal,
             transcript=transcript,
             replay_descriptor=replay_descriptor,
             log_snapshot=log_snapshot,
@@ -411,6 +451,7 @@ def _build_bundle_manifest(
         "evidence_hash": hash_canonical_json(evidence_payload),
         "anchored_evidence_hash": hash_canonical_json(anchored_evidence_payload),
         "verification_report_hash": hash_canonical_json(report),
+        "decision_journal_hash": hash_canonical_json(decision_journal),
         "transcript_hash": hash_canonical_json(transcript),
         "transparency_log_hash": _sha256_hex(log_snapshot["bytes"]),
         "transparency_prefix_hash": replay_descriptor["expected_hashes"][
@@ -631,6 +672,7 @@ def _build_replay_descriptor(
     before_state: Mapping[str, Any],
     state: Mapping[str, Any],
     report: Mapping[str, Any],
+    decision_journal: Mapping[str, Any],
     evidence_payload: Mapping[str, Any],
     anchored_evidence_payload: Mapping[str, Any],
     log_snapshot: Mapping[str, Any],
@@ -641,6 +683,7 @@ def _build_replay_descriptor(
             before_state=before_state,
             state=state,
             report=report,
+            decision_journal=decision_journal,
             evidence_payload=evidence_payload,
             anchored_evidence_payload=anchored_evidence_payload,
             log_snapshot=log_snapshot,
@@ -674,10 +717,11 @@ def _build_replay_descriptor(
             "verification_profile_descriptor_hash": hash_canonical_json(report["profile"]),
             "evidence_hash": hash_canonical_json(evidence_payload),
             "anchored_evidence_hash": hash_canonical_json(anchored_evidence_payload),
-            "verification_report_hash": hash_canonical_json(report),
-            "transparency_prefix_hash": _sha256_hex(prefix_bytes),
-        },
-    }
+        "verification_report_hash": hash_canonical_json(report),
+        "decision_journal_hash": hash_canonical_json(decision_journal),
+        "transparency_prefix_hash": _sha256_hex(prefix_bytes),
+    },
+}
 
 
 def _build_signature_catalog(member_bytes: dict[str, bytes]) -> dict[str, Any]:
@@ -819,6 +863,7 @@ def _verify_deterministic_replay(
     input_state: Mapping[str, Any],
     expected_state: Mapping[str, Any],
     expected_report: Mapping[str, Any],
+    expected_decision_journal: Mapping[str, Any],
     expected_evidence_payload: Mapping[str, Any],
     expected_profile_descriptor: Mapping[str, Any],
     expected_member_bytes: Mapping[str, bytes],
@@ -833,6 +878,7 @@ def _verify_deterministic_replay(
             input_state=input_state,
             expected_state=expected_state,
             expected_report=expected_report,
+            expected_decision_journal=expected_decision_journal,
             expected_evidence_payload=expected_evidence_payload,
             expected_profile_descriptor=expected_profile_descriptor,
             expected_member_bytes=expected_member_bytes,
@@ -855,6 +901,7 @@ def _verify_deterministic_replay(
             _transparency_log_payload_from_mapping(expected_evidence_payload)
         ),
         "verification_report_hash": hash_canonical_json(expected_report),
+        "decision_journal_hash": hash_canonical_json(expected_decision_journal),
         "transparency_prefix_hash": _sha256_hex(
             _serialise_transparency_entries(log_snapshot["entries"][: receipt_entry["index"]])
         ),
@@ -942,6 +989,22 @@ def _verify_deterministic_replay(
             failures.append(
                 "Deterministic replay did not reproduce the verification_report.json payload."
             )
+        replay_receipt_context = build_transparency_receipt_context(
+            reference=_transparency_receipt(replay_evidence_payload)["reference"],
+            entry_hash=str(log_snapshot["entries"][receipt_entry["index"]]["entry_hash"]),
+            previous_entry_hash=log_snapshot["entries"][receipt_entry["index"]].get("previous_entry_hash"),
+            checkpoint=log_snapshot["entries"][-1]["entry_hash"] if log_snapshot["entries"] else None,
+            entry_index=int(receipt_entry["index"]),
+            log_length=len(log_snapshot["entries"]),
+        )
+        replay_decision_journal = build_decision_journal(
+            replay_report,
+            transparency_receipt_context=replay_receipt_context,
+        )
+        if replay_decision_journal != expected_decision_journal:
+            failures.append(
+                "Deterministic replay did not reproduce the decision_journal.json payload."
+            )
         replay_profile_descriptor = replay_report["contracts"]["verification_profile_descriptor"]
         if replay_profile_descriptor != expected_profile_descriptor:
             failures.append(
@@ -1025,6 +1088,7 @@ def _build_multi_series_bundle_manifest(
     report: Mapping[str, Any],
     evidence_payload: Mapping[str, Any],
     anchored_evidence_payload: Mapping[str, Any],
+    decision_journal: Mapping[str, Any],
     transcript: Mapping[str, Any],
     replay_descriptor: Mapping[str, Any],
     log_snapshot: Mapping[str, Any],
@@ -1069,6 +1133,7 @@ def _build_multi_series_bundle_manifest(
             "evidence_hash": hash_canonical_json(evidence_payload),
             "anchored_evidence_hash": hash_canonical_json(anchored_evidence_payload),
             "verification_report_hash": hash_canonical_json(report),
+            "decision_journal_hash": hash_canonical_json(decision_journal),
             "transcript_hash": hash_canonical_json(transcript),
             "transparency_log_hash": _sha256_hex(log_snapshot["bytes"]),
             "transparency_prefix_hash": replay_descriptor["expected_hashes"][
@@ -1188,6 +1253,7 @@ def _build_multi_series_replay_descriptor(
     before_state: Mapping[str, Any],
     state: Mapping[str, Any],
     report: Mapping[str, Any],
+    decision_journal: Mapping[str, Any],
     evidence_payload: Mapping[str, Any],
     anchored_evidence_payload: Mapping[str, Any],
     log_snapshot: Mapping[str, Any],
@@ -1226,6 +1292,7 @@ def _build_multi_series_replay_descriptor(
             "evidence_hash": hash_canonical_json(evidence_payload),
             "anchored_evidence_hash": hash_canonical_json(anchored_evidence_payload),
             "verification_report_hash": hash_canonical_json(report),
+            "decision_journal_hash": hash_canonical_json(decision_journal),
             "transparency_prefix_hash": _sha256_hex(prefix_bytes),
         },
     }
@@ -1236,6 +1303,7 @@ def _verify_multi_series_deterministic_replay(
     input_state: Mapping[str, Any],
     expected_state: Mapping[str, Any],
     expected_report: Mapping[str, Any],
+    expected_decision_journal: Mapping[str, Any],
     expected_evidence_payload: Mapping[str, Any],
     expected_profile_descriptor: Mapping[str, Any],
     expected_member_bytes: Mapping[str, bytes],
@@ -1258,6 +1326,7 @@ def _verify_multi_series_deterministic_replay(
             _transparency_log_payload_from_mapping(expected_evidence_payload)
         ),
         "verification_report_hash": hash_canonical_json(expected_report),
+        "decision_journal_hash": hash_canonical_json(expected_decision_journal),
         "transparency_prefix_hash": _sha256_hex(
             _serialise_transparency_entries(log_snapshot["entries"][: receipt_entry["index"]])
         ),
@@ -1314,6 +1383,22 @@ def _verify_multi_series_deterministic_replay(
         if replay_report != expected_report:
             failures.append(
                 "Deterministic replay did not reproduce the verification_report.json payload."
+            )
+        replay_receipt_context = build_transparency_receipt_context(
+            reference=_transparency_receipt(replay_evidence_payload)["reference"],
+            entry_hash=str(log_snapshot["entries"][receipt_entry["index"]]["entry_hash"]),
+            previous_entry_hash=log_snapshot["entries"][receipt_entry["index"]].get("previous_entry_hash"),
+            checkpoint=log_snapshot["entries"][-1]["entry_hash"] if log_snapshot["entries"] else None,
+            entry_index=int(receipt_entry["index"]),
+            log_length=len(log_snapshot["entries"]),
+        )
+        replay_decision_journal = build_decision_journal(
+            replay_report,
+            transparency_receipt_context=replay_receipt_context,
+        )
+        if replay_decision_journal != expected_decision_journal:
+            failures.append(
+                "Deterministic replay did not reproduce the decision_journal.json payload."
             )
         replay_profile_descriptor = replay_report["contracts"]["verification_profile_descriptor"]
         if replay_profile_descriptor != expected_profile_descriptor:
