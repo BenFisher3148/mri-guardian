@@ -21,6 +21,30 @@ from .timing import build_timing_overlay_snapshot
 _MAX_DIFFERENCE_ROWS = 64
 
 
+def _translate_overlay_mask(mask: np.ndarray, shift_zyx: list[int] | tuple[int, ...] | None) -> np.ndarray:
+    if shift_zyx is None:
+        return np.asarray(mask, dtype=np.int64)
+    delta_z, delta_y, delta_x = (int(value) for value in shift_zyx)
+    translated = np.zeros_like(mask, dtype=np.int64)
+    src_z = slice(max(0, -delta_z), mask.shape[0] - max(0, delta_z))
+    dst_z = slice(max(0, delta_z), mask.shape[0] - max(0, -delta_z))
+    src_y = slice(max(0, -delta_y), mask.shape[1] - max(0, delta_y))
+    dst_y = slice(max(0, delta_y), mask.shape[1] - max(0, -delta_y))
+    src_x = slice(max(0, -delta_x), mask.shape[2] - max(0, delta_x))
+    dst_x = slice(max(0, delta_x), mask.shape[2] - max(0, -delta_x))
+    if (
+        src_z.start >= src_z.stop
+        or src_y.start >= src_y.stop
+        or src_x.start >= src_x.stop
+        or dst_z.start >= dst_z.stop
+        or dst_y.start >= dst_y.stop
+        or dst_x.start >= dst_x.stop
+    ):
+        return translated
+    translated[dst_z, dst_y, dst_x] = np.asarray(mask, dtype=np.int64)[src_z, src_y, src_x]
+    return translated
+
+
 def build_side_by_side_view_model(
     state: dict[str, Any],
     *,
@@ -47,9 +71,13 @@ def build_side_by_side_view_model(
     verified_mask = np.asarray(analysis["verified_mask"], dtype=np.int64)
     prior_verified_mask = None
     if longitudinal["overlay_enabled"]:
-        prior_verified_mask = np.asarray(
+        raw_prior_verified_mask = np.asarray(
             report["contracts"]["prior_verified_context"]["verified_mask"],
             dtype=np.int64,
+        )
+        prior_verified_mask = _translate_overlay_mask(
+            raw_prior_verified_mask,
+            longitudinal["overlay_translation_zyx_voxels"],
         )
     intensity_mismatch_mask = (
         np.abs(ai_reconstruction - verified_reconstruction)
@@ -222,6 +250,7 @@ def _build_multi_series_view_model(state: dict[str, Any]) -> dict[str, Any]:
             "withheld_series_ids": report["analysis"]["withheld_series_ids"],
             "geometry_verification": report["analysis"]["geometry_verification"],
             "lesion_corroboration": report["analysis"]["lesion_corroboration"],
+            "study_temporal_aggregation": report["analysis"]["study_temporal_aggregation"],
             "profile_descriptor_hash": hash_canonical_json(
                 report["contracts"]["verification_profile_descriptor"]
             ),
@@ -451,6 +480,7 @@ def _render_multi_series_report_html(
         <li>Auxiliary series: {escape(", ".join(view_model['study']['auxiliary_series_ids']))}</li>
         <li>Geometry rule: {escape(view_model['study']['geometry_verification']['rule'])}</li>
         <li>Corroboration rule: {escape(view_model['study']['lesion_corroboration']['rule'])}</li>
+        <li>Study temporal disposition: {escape(view_model['study']['study_temporal_aggregation']['final_temporal_disposition'])}</li>
       </ul>
     </section>
     <section>
@@ -1855,6 +1885,11 @@ def _build_longitudinal_summary(report: dict[str, Any]) -> dict[str, Any]:
         return {
             "comparison_status": "not_evaluated",
             "comparison_scope": "not_evaluated",
+            "spatial_comparison_mode": "none",
+            "primary_selection_mode": "none",
+            "selected_prior_count": 0,
+            "trajectory_class": "not_evaluated",
+            "registration_status": "not_evaluated",
             "status_label": "Not Evaluated",
             "scope_label": "No prior context",
             "status_note": "No temporal trace is available for this report.",
@@ -1869,16 +1904,22 @@ def _build_longitudinal_summary(report: dict[str, Any]) -> dict[str, Any]:
             "geometry_reason_code": "geometry_not_sufficient_for_volume_only",
             "chronology_reason_code": "no_prior_context",
             "top_flags": [],
+            "trajectory_flags": [],
             "top_reason_codes": [],
             "skipped_reason_codes": [],
             "overlay_enabled": False,
+            "overlay_translation_zyx_voxels": None,
         }
     computed_metrics = temporal_trace["computed_metrics"]
     chronology = temporal_trace["chronology_assessment"]
     geometry = temporal_trace["geometry_assessment"]
     comparison_scope = temporal_trace["comparison_scope"]
     comparison_status = temporal_trace["comparison_status"]
+    spatial_comparison_mode = temporal_trace["spatial_comparison_mode"]
     prior_context = report["contracts"].get("prior_verified_context") or {}
+    selection_trace = report["contracts"].get("longitudinal_selection_trace") or {}
+    trajectory_trace = report["contracts"].get("temporal_trajectory_trace") or {}
+    registration_trace = report["contracts"].get("longitudinal_registration_trace") or {}
     top_reason_codes = sorted(
         {
             str(item.get("code"))
@@ -1913,6 +1954,11 @@ def _build_longitudinal_summary(report: dict[str, Any]) -> dict[str, Any]:
     return {
         "comparison_status": comparison_status,
         "comparison_scope": comparison_scope,
+        "spatial_comparison_mode": spatial_comparison_mode,
+        "primary_selection_mode": selection_trace.get("primary_selection_mode", "none"),
+        "selected_prior_count": selection_trace.get("selected_prior_count", 0),
+        "trajectory_class": trajectory_trace.get("trajectory_class", "not_evaluated"),
+        "registration_status": registration_trace.get("status", "not_evaluated"),
         "status_label": comparison_status.replace("_", " ").title(),
         "scope_label": scope_label_map.get(comparison_scope, comparison_scope.replace("_", " ").title()),
         "status_note": status_note,
@@ -1949,11 +1995,18 @@ def _build_longitudinal_summary(report: dict[str, Any]) -> dict[str, Any]:
         "geometry_reason_code": geometry["reason_code"],
         "chronology_reason_code": chronology["reason_code"],
         "top_flags": list(temporal_trace["flags"]),
+        "trajectory_flags": list(trajectory_trace.get("flags", [])),
         "top_reason_codes": top_reason_codes,
         "skipped_reason_codes": skipped_reason_codes,
         "overlay_enabled": bool(
             comparison_scope == "full"
             and report["contracts"].get("prior_verified_context") is not None
+            and spatial_comparison_mode in {"exact", "registered"}
+        ),
+        "overlay_translation_zyx_voxels": (
+            None
+            if not isinstance(registration_trace.get("transform"), dict)
+            else registration_trace["transform"].get("translation_zyx_voxels")
         ),
     }
 

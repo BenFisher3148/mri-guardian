@@ -26,6 +26,7 @@ The base case state is the canonical input to the verification harness.
 | `study_acquired_at` | `str | None` | Optional canonical UTC study timestamp (`YYYY-MM-DDTHH:MM:SSZ`) used for Level 3 temporal comparison. |
 | `study_timestamp_provenance` | `str` | Optional current-case timestamp trust class: `trusted_study_metadata`, `missing`, or `untrusted`. |
 | `spatial_geometry` | `dict | None` | Optional geometry object with `frame_of_reference_uid` plus canonical `affine_ijk_to_mm`. |
+| `prior_verified_contexts` | `list[dict] | None` | Optional canonical source list of prior Guardian-verified comparators used by multi-prior longitudinal selection and trajectory analysis. |
 | `prior_verified_context` | `dict | None` | Optional compact prior Guardian-verified comparator used only by single-series Level 3 longitudinal review. |
 | `verification_profile_descriptor` | `dict` | Canonical runtime profile descriptor embedded with the case state and replayed on verification. |
 | `verified_manifest` | `dict | None` | Deterministic proof manifest, populated only on release. |
@@ -107,6 +108,10 @@ Defined in [`../mri_guardian/contracts.py`](../mri_guardian/contracts.py).
 | `VerifiedReconstructionTrace` | Proof trace from raw k-space to verified reconstruction, mask, and volume | `profile_name`, `profile_revision`, `profile_digest`, `icsd_policy_id`, `icsd_policy_version`, raw hash, derived hash, verified mask hash, measurement metrics, claim comparison metrics |
 | `PriorVerifiedContext` | Compact canonical summary of one admissible prior Guardian-verified comparator | prior bundle/report hashes, prior profile identity, prior release class, prior verified mask, verified volume, timestamp provenance, and geometry |
 | `TemporalConsistencyTrace` | Deterministic single-series Level 3 temporal trace | `comparison_status`, `comparison_scope`, `prior_admissibility`, `chronology_assessment`, `geometry_assessment`, `computed_metrics`, `flags`, `skipped_metrics` |
+| `LongitudinalSelectionTrace` | Deterministic selection trace over supplied prior contexts | supplied count, selected count, primary-selection mode, per-prior admissibility and selection outcomes |
+| `TemporalTrajectoryTrace` | Deterministic multi-prior trajectory trace | selected count, usable interval count, trajectory class, aggregate metrics, interval summaries, flags, skipped metrics |
+| `LongitudinalRegistrationTrace` | Deterministic current-vs-primary registration trace | algorithm identity, transform payload, blocking admissibility, quality metrics |
+| `StudyTemporalAggregationTrace` | Deterministic study-level temporal aggregation for `multi_series_v2` | per-series temporal disposition, top flags/reasons, final study temporal disposition, gating summary |
 | `CrossSeriesVerificationPolicy` | Study-level multi-series gate contract | `primary_series_id`, canonicalized `supporting_series_ids`, canonicalized `required_series_ids`, geometry rule, corroboration rule |
 | `CrossSeriesVerificationTrace` | Study-level trace for geometry, corroboration, and merged release evaluation | `geometry_verification`, `lesion_corroboration`, `merged_release_evaluation` |
 | `MultiSeriesVerificationProfileDescriptorSet` | Ordered wrapper around per-series runtime profile descriptors | proof-significant ordered `series_descriptors` list |
@@ -261,7 +266,13 @@ When temporal context is present on single-series cases, the mocked PACS and int
 
 - `temporal_comparison_status`
 - `temporal_comparison_scope`
+- `temporal_spatial_comparison_mode`
+- `temporal_primary_selection_mode`
+- `temporal_selected_prior_count`
+- `temporal_trajectory_class`
+- `temporal_registration_status`
 - `temporal_top_flags`
+- `temporal_trajectory_flags`
 - `temporal_top_reason_codes`
 
 On fail-soft structural rejects, `dicom_input.json` may legitimately carry `ai_claim_envelope = null` because the mocked ingress artifact is preserved even when proof-only contract members could not be derived from the malformed input.
@@ -282,10 +293,18 @@ The portable bundle written by [`../mri_guardian/bundle.py`](../mri_guardian/bun
 - `replay.json`
 - `transparency-log.jsonl`
 
-When a single-series case carries prior longitudinal context, the bundle also contains:
+When a single-series case carries longitudinal context, the bundle also contains:
 
+- `prior_verified_contexts.json`
 - `prior_verified_context.json`
+- `longitudinal_selection_trace.json`
+- `temporal_trajectory_trace.json`
+- `longitudinal_registration_trace.json`
 - `temporal_consistency_trace.json`
+
+For `multi_series_v2`, the bundle also contains:
+
+- `study_temporal_aggregation_trace.json`
 
 ## Notes on Determinism
 

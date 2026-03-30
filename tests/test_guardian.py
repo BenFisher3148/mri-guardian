@@ -852,6 +852,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
             released_state=prior_result.after_state,
             released_report=prior_report,
+            timestamp_provenance="trusted_study_metadata",
         )
 
         report = build_case_verification_report(current_state)
@@ -896,6 +897,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
             released_state=prior_result.after_state,
             released_report=prior_report,
+            timestamp_provenance="trusted_study_metadata",
         )
         current_state["prior_verified_context"]["prior_bundle_sha256"] = ""
 
@@ -948,7 +950,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
             temporal_trace["skipped_metrics"],
         )
 
-    def test_temporal_geometry_mismatch_falls_back_to_volume_only_comparison(self) -> None:
+    def test_temporal_affine_geometry_mismatch_uses_registered_full_comparison(self) -> None:
         prior_state = self._attach_temporal_metadata(
             build_demo_case(),
             study_acquired_at="2025-02-01T00:00:00Z",
@@ -971,23 +973,20 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
         report = build_case_verification_report(current_state)
         temporal_trace = report["contracts"]["temporal_consistency_trace"]
+        registration_trace = report["contracts"]["longitudinal_registration_trace"]
 
         self.assertEqual(temporal_trace["comparison_status"], "degraded")
-        self.assertEqual(temporal_trace["comparison_scope"], "volume_only")
+        self.assertEqual(temporal_trace["comparison_scope"], "full")
+        self.assertEqual(temporal_trace["spatial_comparison_mode"], "registered")
         self.assertEqual(
             temporal_trace["geometry_assessment"]["reason_code"],
-            "geometry_not_exactly_comparable",
+            "geometry_registered_match",
         )
-        self.assertIn(
+        self.assertEqual(registration_trace["status"], "used")
+        self.assertTrue(registration_trace["quality"]["spatial_use_allowed"])
+        self.assertNotIn(
             {
                 "metric": "intersection_over_union",
-                "reason_code": "geometry_not_exactly_comparable",
-            },
-            temporal_trace["skipped_metrics"],
-        )
-        self.assertIn(
-            {
-                "metric": "global_centroid_shift_mm",
                 "reason_code": "geometry_not_exactly_comparable",
             },
             temporal_trace["skipped_metrics"],
@@ -1131,17 +1130,204 @@ class MriGuardianHarnessTests(unittest.TestCase):
             member_names = set(archive.namelist())
             manifest = self._read_bundle_json(archive, "bundle.json")
             prior_context = self._read_bundle_json(archive, "prior_verified_context.json")
+            selection_trace = self._read_bundle_json(archive, "longitudinal_selection_trace.json")
+            trajectory_trace = self._read_bundle_json(archive, "temporal_trajectory_trace.json")
+            registration_trace = self._read_bundle_json(archive, "longitudinal_registration_trace.json")
             temporal_contract = self._read_bundle_json(archive, "temporal_consistency_trace.json")
         self.assertIn("prior_verified_context.json", member_names)
+        self.assertIn("longitudinal_selection_trace.json", member_names)
+        self.assertIn("temporal_trajectory_trace.json", member_names)
+        self.assertIn("longitudinal_registration_trace.json", member_names)
         self.assertIn("temporal_consistency_trace.json", member_names)
         self.assertEqual(
             manifest["hashes"]["prior_verified_context_hash"],
             hash_canonical_json(prior_context),
         )
         self.assertEqual(
+            manifest["hashes"]["longitudinal_selection_trace_hash"],
+            hash_canonical_json(selection_trace),
+        )
+        self.assertEqual(
+            manifest["hashes"]["temporal_trajectory_trace_hash"],
+            hash_canonical_json(trajectory_trace),
+        )
+        self.assertEqual(
+            manifest["hashes"]["longitudinal_registration_trace_hash"],
+            hash_canonical_json(registration_trace),
+        )
+        self.assertEqual(
             manifest["hashes"]["temporal_consistency_trace_hash"],
             hash_canonical_json(temporal_contract),
         )
+
+    def test_longitudinal_selection_trace_is_deterministic_for_multi_prior_history(self) -> None:
+        prior_zero_state = self._attach_temporal_metadata(
+            self._build_zero_mask_case(),
+            study_acquired_at="2024-01-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_zero_result = self._release_demo_case_with_state(prior_zero_state)
+        prior_zero_report = build_case_verification_report(prior_zero_result.after_state)
+        prior_mid_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-01-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_mid_result = self._release_demo_case_with_state(prior_mid_state)
+        prior_mid_report = build_case_verification_report(prior_mid_result.after_state)
+        prior_recent_state = self._attach_temporal_metadata(
+            self._build_warning_stack_case(),
+            study_acquired_at="2025-06-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_recent_result = self._release_demo_case_with_state(prior_recent_state)
+        prior_recent_report = build_case_verification_report(prior_recent_result.after_state)
+        current_state = self._attach_temporal_metadata(
+            self._build_warning_stack_case(),
+            study_acquired_at="2026-01-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        prior_zero_context = self._build_prior_verified_context_from_release(
+            released_state=prior_zero_result.after_state,
+            released_report=prior_zero_report,
+        )
+        prior_mid_context = self._build_prior_verified_context_from_release(
+            released_state=prior_mid_result.after_state,
+            released_report=prior_mid_report,
+        )
+        prior_recent_context = self._build_prior_verified_context_from_release(
+            released_state=prior_recent_result.after_state,
+            released_report=prior_recent_report,
+        )
+        current_state["prior_verified_contexts"] = [
+            prior_recent_context,
+            prior_zero_context,
+            prior_mid_context,
+        ]
+
+        report = build_case_verification_report(current_state)
+        selection_trace = report["contracts"]["longitudinal_selection_trace"]
+        trajectory_trace = report["contracts"]["temporal_trajectory_trace"]
+
+        self.assertEqual(selection_trace["selected_prior_count"], 3)
+        self.assertEqual(selection_trace["primary_selection_mode"], "trajectory_most_recent")
+        self.assertEqual(
+            report["contracts"]["prior_verified_context"]["prior_bundle_sha256"],
+            prior_recent_context["prior_bundle_sha256"],
+        )
+        self.assertEqual(
+            [entry["study_acquired_at"] for entry in selection_trace["entries"]],
+            [
+                "2024-01-01T00:00:00Z",
+                "2025-01-01T00:00:00Z",
+                "2025-06-01T00:00:00Z",
+            ],
+        )
+        self.assertEqual(trajectory_trace["trajectory_class"], "monotonic_growth")
+        self.assertIn("trajectory_recurrence_after_zero", trajectory_trace["flags"])
+
+    def test_strict_research_profile_can_block_on_temporal_growth(self) -> None:
+        prior_state = self._attach_temporal_metadata(
+            build_demo_case(profile_name="strict_research_mode"),
+            study_acquired_at="2025-01-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        self._rewrite_case_for_profile(
+            prior_state,
+            _reconstruction_with_hot_voxels(
+                (4, 4, 4),
+                ((0, 0, 0), (1, 1, 1), (2, 2, 2)),
+                hot_value=4.0,
+            ),
+        )
+        _, prior_result = self._release_demo_case_with_state(
+            prior_state,
+            profile_name="strict_research_mode",
+        )
+        prior_report = build_case_verification_report(
+            prior_result.after_state,
+            profile_name="strict_research_mode",
+        )
+        current_state = self._attach_temporal_metadata(
+            build_demo_case(profile_name="strict_research_mode"),
+            study_acquired_at="2025-07-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        self._rewrite_case_for_profile(
+            current_state,
+            _reconstruction_with_hot_voxels(
+                (4, 4, 4),
+                (
+                    (0, 0, 0),
+                    (0, 0, 1),
+                    (1, 1, 1),
+                    (1, 1, 2),
+                    (2, 2, 2),
+                    (2, 2, 3),
+                ),
+                hot_value=4.0,
+            ),
+        )
+        current_state["prior_verified_context"] = self._build_prior_verified_context_from_release(
+            released_state=prior_result.after_state,
+            released_report=prior_report,
+            timestamp_provenance="trusted_study_metadata",
+        )
+
+        report = build_case_verification_report(
+            current_state,
+            profile_name="strict_research_mode",
+        )
+
+        self.assertFalse(report["release_eligible"])
+        self.assertEqual(report["decision_summary"]["block_category"], "heuristic_block")
+        self.assertIn(
+            "temporal_volume_change_warning",
+            {
+                item["code"]
+                for item in report["manifest"]["clinical_plausibility"]["blocking_failures"]
+            },
+        )
+        self.assertEqual(
+            report["contracts"]["temporal_consistency_trace"]["comparison_status"],
+            "aligned",
+        )
+
+    def test_multi_series_temporal_aggregation_tracks_required_series_coverage(self) -> None:
+        prior_state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-01-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+        _, prior_result = self._release_demo_case_with_state(prior_state)
+        prior_report = build_case_verification_report(prior_result.after_state)
+        primary_prior_context = self._build_prior_verified_context_from_release(
+            released_state=prior_result.after_state,
+            released_report=prior_report,
+        )
+        state = build_multi_series_demo_case()
+        primary_entry = self._series_entry(state, "t1-primary")
+        primary_entry["study_acquired_at"] = "2025-08-01T00:00:00Z"
+        primary_entry["study_timestamp_provenance"] = "trusted_study_metadata"
+        primary_entry["spatial_geometry"] = deepcopy(self._base_spatial_geometry())
+        state["prior_verified_context_by_series"] = {"t1-primary": primary_prior_context}
+
+        report = build_multi_series_case_verification_report(state)
+        study_temporal_trace = report["contracts"]["study_temporal_aggregation_trace"]
+
+        self.assertEqual(study_temporal_trace["final_temporal_disposition"], "advisory")
+        self.assertIn(
+            "t2-supporting",
+            study_temporal_trace["gating_summary"]["required_series_without_usable_temporal"],
+        )
+        self.assertIn(
+            "flair-supporting",
+            study_temporal_trace["gating_summary"]["required_series_without_usable_temporal"],
+        )
+        primary_series = next(
+            item for item in study_temporal_trace["per_series"] if item["series_id"] == "t1-primary"
+        )
+        self.assertTrue(primary_series["usable_temporal_result"])
 
 
     def test_ai_claim_envelope_preserves_legacy_shape_when_ai_stack_identity_is_absent(self) -> None:
@@ -3560,6 +3746,30 @@ class MriGuardianHarnessTests(unittest.TestCase):
             if entry["series_id"] == series_id:
                 return entry
         raise AssertionError(f"Series {series_id!r} not found.")
+
+    def _rewrite_case_for_profile(
+        self,
+        state: dict[str, object],
+        reconstruction: np.ndarray,
+    ) -> None:
+        descriptor = verification_profile_descriptor_from_dict(
+            dict(state["verification_profile_descriptor"])
+        )
+        raw_kspace = np.fft.fft2(reconstruction, axes=(-2, -1))
+        derived_reconstruction = np.fft.ifft2(raw_kspace, axes=(-2, -1)).real
+        verified_mask = derive_verified_mask(
+            derived_reconstruction,
+            descriptor.mask_rules,
+        ).verified_mask
+        voxel_spacing = np.asarray(state["voxel_spacing_mm"], dtype=np.float64)
+        state["raw_real"] = raw_kspace.real.tolist()
+        state["raw_imag"] = raw_kspace.imag.tolist()
+        state["ai_reconstruction"] = derived_reconstruction.tolist()
+        state["tumor_mask"] = verified_mask.astype(np.int64).tolist()
+        state["tumor_volume_mm3"] = round(
+            float(np.count_nonzero(verified_mask) * np.prod(voxel_spacing)),
+            9,
+        )
 
     def _rewrite_series_for_profile(
         self,

@@ -36,7 +36,10 @@ _OPTIONAL_STATE_FIELDS = (
     "study_acquired_at",
     "study_timestamp_provenance",
     "spatial_geometry",
+    "prior_verified_contexts",
     "prior_verified_context",
+    "prior_verified_contexts_by_series",
+    "prior_verified_context_by_series",
 )
 _AI_RUNTIME_CONTEXT_FIELDS = (
     "inference_runtime_version",
@@ -405,6 +408,15 @@ def build_mock_pacs_submission(
                 "profile_policy_status": report["decision_summary"]["profile_policy_status"],
                 "released_series_ids": report["analysis"]["released_series_ids"],
                 "withheld_series_ids": report["analysis"]["withheld_series_ids"],
+                "study_temporal_disposition": report["analysis"]["study_temporal_aggregation"][
+                    "final_temporal_disposition"
+                ],
+                "study_temporal_top_flags": list(
+                    report["analysis"]["study_temporal_aggregation"]["top_flags"]
+                ),
+                "study_temporal_top_reason_codes": list(
+                    report["analysis"]["study_temporal_aggregation"]["top_reason_codes"]
+                ),
                 "bundle_reference": bundle_reference,
                 "evidence_hash": evidence_hash,
                 "verification_profile_descriptor_hash": hash_canonical_json(
@@ -416,6 +428,7 @@ def build_mock_pacs_submission(
                 "verification_profile_descriptor": contracts["verification_profile_descriptor"],
                 "cross_series_verification_policy": contracts["cross_series_verification_policy"],
                 "cross_series_verification_trace": contracts["cross_series_verification_trace"],
+                "study_temporal_aggregation_trace": contracts["study_temporal_aggregation_trace"],
             },
         }
         if runtime_context is not None:
@@ -543,6 +556,15 @@ def build_mock_pacs_block_notice(
                 "profile_policy_status": report["decision_summary"]["profile_policy_status"],
                 "released_series_ids": report["analysis"]["released_series_ids"],
                 "withheld_series_ids": report["analysis"]["withheld_series_ids"],
+                "study_temporal_disposition": report["analysis"]["study_temporal_aggregation"][
+                    "final_temporal_disposition"
+                ],
+                "study_temporal_top_flags": list(
+                    report["analysis"]["study_temporal_aggregation"]["top_flags"]
+                ),
+                "study_temporal_top_reason_codes": list(
+                    report["analysis"]["study_temporal_aggregation"]["top_reason_codes"]
+                ),
                 "verification_profile_descriptor_hash": hash_canonical_json(
                     contracts["verification_profile_descriptor"]
                 ),
@@ -552,6 +574,7 @@ def build_mock_pacs_block_notice(
                 "verification_profile_descriptor": contracts["verification_profile_descriptor"],
                 "cross_series_verification_policy": contracts["cross_series_verification_policy"],
                 "cross_series_verification_trace": contracts["cross_series_verification_trace"],
+                "study_temporal_aggregation_trace": contracts["study_temporal_aggregation_trace"],
             },
             "withheld_series": [
                 {
@@ -652,6 +675,15 @@ def build_mock_integration_trace(
                 "canonical_decision": deepcopy(report["decision"]),
                 "primary_reason": _primary_reason_summary(report),
                 "tier_statuses": _tier_statuses(report),
+                "study_temporal_disposition": report["analysis"]["study_temporal_aggregation"][
+                    "final_temporal_disposition"
+                ],
+                "study_temporal_top_flags": list(
+                    report["analysis"]["study_temporal_aggregation"]["top_flags"]
+                ),
+                "study_temporal_top_reason_codes": list(
+                    report["analysis"]["study_temporal_aggregation"]["top_reason_codes"]
+                ),
             },
                 {
                     "stage": "pacs_egress",
@@ -820,10 +852,16 @@ def _single_series_proof_contracts(report: dict[str, Any]) -> dict[str, Any]:
         "verified_reconstruction_trace",
         "mask_derivation_policy",
         "verification_tolerance_policy",
+        "longitudinal_selection_trace",
+        "temporal_trajectory_trace",
+        "longitudinal_registration_trace",
         "temporal_consistency_trace",
     ):
         if key in contracts:
             payload[key] = contracts[key]
+    prior_verified_contexts = contracts.get("prior_verified_contexts")
+    if prior_verified_contexts is not None:
+        payload["prior_verified_contexts"] = prior_verified_contexts
     prior_verified_context = contracts.get("prior_verified_context")
     if prior_verified_context is not None:
         payload["prior_verified_context"] = prior_verified_context
@@ -834,6 +872,9 @@ def _single_series_temporal_summary(report: dict[str, Any]) -> dict[str, Any]:
     temporal_trace = report["contracts"].get("temporal_consistency_trace")
     if not isinstance(temporal_trace, Mapping):
         return {}
+    selection_trace = report["contracts"].get("longitudinal_selection_trace")
+    trajectory_trace = report["contracts"].get("temporal_trajectory_trace")
+    registration_trace = report["contracts"].get("longitudinal_registration_trace")
     temporal_reason_codes = sorted(
         {
             str(item.get("code"))
@@ -844,7 +885,33 @@ def _single_series_temporal_summary(report: dict[str, Any]) -> dict[str, Any]:
     return {
         "temporal_comparison_status": temporal_trace["comparison_status"],
         "temporal_comparison_scope": temporal_trace["comparison_scope"],
+        "temporal_spatial_comparison_mode": temporal_trace["spatial_comparison_mode"],
+        "temporal_primary_selection_mode": (
+            None
+            if not isinstance(selection_trace, Mapping)
+            else selection_trace["primary_selection_mode"]
+        ),
+        "temporal_selected_prior_count": (
+            None
+            if not isinstance(selection_trace, Mapping)
+            else selection_trace["selected_prior_count"]
+        ),
+        "temporal_trajectory_class": (
+            None
+            if not isinstance(trajectory_trace, Mapping)
+            else trajectory_trace["trajectory_class"]
+        ),
+        "temporal_registration_status": (
+            None
+            if not isinstance(registration_trace, Mapping)
+            else registration_trace["status"]
+        ),
         "temporal_top_flags": list(temporal_trace["flags"]),
+        "temporal_trajectory_flags": (
+            []
+            if not isinstance(trajectory_trace, Mapping)
+            else list(trajectory_trace["flags"])
+        ),
         "temporal_top_reason_codes": temporal_reason_codes,
     }
 

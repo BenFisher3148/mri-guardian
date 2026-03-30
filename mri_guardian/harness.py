@@ -22,14 +22,19 @@ from .contracts import (
     build_ai_claim_envelope,
     build_cross_series_verification_policy,
     build_cross_series_verification_trace,
+    build_longitudinal_registration_trace,
+    build_longitudinal_selection_trace,
     build_mask_derivation_policy,
     build_multi_series_verification_profile_descriptor_set,
     build_prior_verified_context,
+    build_study_temporal_aggregation_trace,
     build_temporal_consistency_trace,
+    build_temporal_trajectory_trace,
     build_verification_profile_contract,
     build_verification_tolerance_policy,
     build_verified_reconstruction_trace,
     canonicalise_prior_verified_context,
+    canonicalise_prior_verified_contexts,
     canonicalise_ai_stack_identity,
     canonicalise_spatial_geometry,
     canonicalise_study_acquired_at,
@@ -110,6 +115,11 @@ TEMPORAL_SCOPE_FULL = "full"
 TEMPORAL_SCOPE_VOLUME_ONLY = "volume_only"
 TEMPORAL_SCOPE_NONE = "none"
 
+TEMPORAL_SPATIAL_MODE_EXACT = "exact"
+TEMPORAL_SPATIAL_MODE_REGISTERED = "registered"
+TEMPORAL_SPATIAL_MODE_VOLUME_ONLY = "volume_only"
+TEMPORAL_SPATIAL_MODE_NONE = "none"
+
 TEMPORAL_PAIR_PROVENANCE_VERIFIED_BUNDLE = "verified_bundle_pair"
 TEMPORAL_PAIR_PROVENANCE_TRUSTED_METADATA = "trusted_metadata_pair"
 TEMPORAL_PAIR_PROVENANCE_MIXED = "mixed_provenance"
@@ -117,9 +127,11 @@ TEMPORAL_PAIR_PROVENANCE_MISSING = "timestamp_missing"
 TEMPORAL_PAIR_PROVENANCE_UNTRUSTED = "timestamp_untrusted"
 
 TEMPORAL_GEOMETRY_EXACT_MATCH = "exact_match"
+TEMPORAL_GEOMETRY_REGISTERED_MATCH = "registered_match"
 TEMPORAL_GEOMETRY_VOLUME_ONLY = "volume_basis_only"
 TEMPORAL_GEOMETRY_INSUFFICIENT = "insufficient_geometry_trust"
 TEMPORAL_GEOMETRY_REASON_EXACT_MATCH = "geometry_exact_match"
+TEMPORAL_GEOMETRY_REASON_REGISTERED = "geometry_registered_match"
 TEMPORAL_GEOMETRY_REASON_NOT_EXACT = "geometry_not_exactly_comparable"
 TEMPORAL_GEOMETRY_REASON_NOT_SUFFICIENT = "geometry_not_sufficient_for_volume_only"
 
@@ -134,9 +146,22 @@ TEMPORAL_REASON_VOLUME_WARNING = "temporal_volume_change_warning"
 TEMPORAL_REASON_RATE_WARNING = "temporal_growth_rate_warning"
 TEMPORAL_REASON_IOU_WARNING = "temporal_intersection_over_union_warning"
 TEMPORAL_REASON_CENTROID_WARNING = "temporal_centroid_shift_warning"
+TEMPORAL_REASON_TRAJECTORY_ACCELERATION = "temporal_trajectory_acceleration"
+TEMPORAL_REASON_TRAJECTORY_INFLECTION = "temporal_trajectory_inflection"
+TEMPORAL_REASON_TRAJECTORY_RECURRENCE = "temporal_trajectory_recurrence_after_zero"
+TEMPORAL_REASON_TRAJECTORY_COMPONENT_CHANGE = "temporal_component_count_trajectory_change"
 
 TEMPORAL_FLAG_COMPONENT_COUNT_CHANGED = "component_count_changed"
 TEMPORAL_FLAG_RATE_NOT_EVALUATED = "temporal_rate_not_evaluated"
+TEMPORAL_FLAG_TRAJECTORY_ACCELERATION = "trajectory_acceleration_detected"
+TEMPORAL_FLAG_TRAJECTORY_INFLECTION = "trajectory_inflection_detected"
+TEMPORAL_FLAG_TRAJECTORY_RECURRENCE = "trajectory_recurrence_after_zero"
+TEMPORAL_FLAG_TRAJECTORY_COMPONENT_CHANGE = "trajectory_component_count_changed"
+
+TEMPORAL_REGISTRATION_STATUS_NOT_EVALUATED = "not_evaluated"
+TEMPORAL_REGISTRATION_STATUS_USED = "used"
+TEMPORAL_REGISTRATION_STATUS_REJECTED = "rejected"
+TEMPORAL_REGISTRATION_STATUS_NOT_APPLICABLE = "not_applicable"
 
 TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT = "no_prior_context"
 TEMPORAL_SKIPPED_PRIOR_BUNDLE_IDENTITY_MISSING = "prior_bundle_identity_missing"
@@ -154,6 +179,9 @@ TEMPORAL_SKIPPED_ZERO_PRIOR_VOLUME = "zero_prior_volume"
 TEMPORAL_SKIPPED_EMPTY_PRIOR_MASK = "empty_prior_mask"
 TEMPORAL_SKIPPED_EMPTY_CURRENT_MASK = "empty_current_mask"
 TEMPORAL_SKIPPED_BOTH_MASKS_EMPTY = "both_masks_empty"
+TEMPORAL_SKIPPED_NO_SELECTED_PRIORS = "no_selected_priors"
+TEMPORAL_SKIPPED_NO_USABLE_INTERVALS = "no_usable_trajectory_intervals"
+TEMPORAL_SKIPPED_OLDEST_SELECTED_PRIOR_ZERO = "oldest_selected_prior_zero_volume"
 
 
 class MriGuardianHarness:
@@ -274,7 +302,11 @@ def build_case_verification_report(
         raise RuntimeError("Single-series report preparation did not resolve a descriptor.")
     profile_contract = build_verification_profile_contract(descriptor.profile_name)
     analysis = _analyse_case(state, descriptor)
-    temporal_consistency = _build_temporal_consistency_section(state, analysis, descriptor)
+    temporal_consistency = _build_temporal_consistency_section_v2(
+        state,
+        analysis,
+        descriptor,
+    )
     contracts = _build_claim_to_proof_contracts(
         state,
         analysis,
@@ -1031,6 +1063,28 @@ def _build_multi_series_context(state: Mapping[str, Any]) -> dict[str, Any]:
         geometry_rule=MULTI_SERIES_GEOMETRY_RULE,
         corroboration_rule=MULTI_SERIES_CORROBORATION_RULE,
     )
+    prior_verified_contexts_by_series = state.get("prior_verified_contexts_by_series")
+    if prior_verified_contexts_by_series is None:
+        canonical_prior_verified_contexts_by_series: dict[str, Any] = {}
+    elif not isinstance(prior_verified_contexts_by_series, Mapping):
+        raise ValueError("prior_verified_contexts_by_series must be an object keyed by series_id.")
+    else:
+        canonical_prior_verified_contexts_by_series = {}
+        for series_id, payload in prior_verified_contexts_by_series.items():
+            if not isinstance(series_id, str) or not series_id.strip():
+                raise ValueError("prior_verified_contexts_by_series keys must be non-empty strings.")
+            canonical_prior_verified_contexts_by_series[series_id.strip()] = deepcopy(payload)
+    prior_verified_context_by_series = state.get("prior_verified_context_by_series")
+    if prior_verified_context_by_series is None:
+        canonical_prior_verified_context_by_series: dict[str, Any] = {}
+    elif not isinstance(prior_verified_context_by_series, Mapping):
+        raise ValueError("prior_verified_context_by_series must be an object keyed by series_id.")
+    else:
+        canonical_prior_verified_context_by_series = {}
+        for series_id, payload in prior_verified_context_by_series.items():
+            if not isinstance(series_id, str) or not series_id.strip():
+                raise ValueError("prior_verified_context_by_series keys must be non-empty strings.")
+            canonical_prior_verified_context_by_series[series_id.strip()] = deepcopy(payload)
     return {
         "case_id": str(state["case_id"]),
         "patient_pseudonym": str(state["patient_pseudonym"]),
@@ -1046,6 +1100,8 @@ def _build_multi_series_context(state: Mapping[str, Any]) -> dict[str, Any]:
         "auxiliary_series_ids": auxiliary_series_ids,
         "missing_required_series_ids": missing_required,
         "cross_series_policy": policy_contract,
+        "prior_verified_contexts_by_series": canonical_prior_verified_contexts_by_series,
+        "prior_verified_context_by_series": canonical_prior_verified_context_by_series,
         "state": dict(state),
     }
 
@@ -1076,6 +1132,17 @@ def _build_multi_series_series_state(
     }
     if "ai_stack_identity" in entry:
         payload["ai_stack_identity"] = deepcopy(entry["ai_stack_identity"])
+    for optional_field in ("study_acquired_at", "study_timestamp_provenance", "spatial_geometry"):
+        if optional_field in entry:
+            payload[optional_field] = deepcopy(entry[optional_field])
+    if series_id in context["prior_verified_contexts_by_series"]:
+        payload["prior_verified_contexts"] = deepcopy(
+            context["prior_verified_contexts_by_series"][series_id]
+        )
+    elif series_id in context["prior_verified_context_by_series"]:
+        payload["prior_verified_context"] = deepcopy(
+            context["prior_verified_context_by_series"][series_id]
+        )
     return payload
 
 
@@ -1469,6 +1536,115 @@ def _build_multi_series_verification_tiers(
     }
 
 
+def _build_study_temporal_aggregation_section(
+    context: Mapping[str, Any],
+    series_reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    required_series_ids = tuple(context["required_series_ids"])
+    auxiliary_series_ids = tuple(context["auxiliary_series_ids"])
+    per_series: list[dict[str, Any]] = []
+    top_flags: set[str] = set()
+    top_reason_codes: set[str] = set()
+    required_series_without_usable_temporal: list[str] = []
+    temporal_blocked_required_series: list[str] = []
+    required_series_aligned: list[bool] = []
+    any_temporal_evaluated = False
+    primary_report = next(
+        report for report in series_reports if report["series_id"] == context["primary_series_id"]
+    )
+    allow_blocking = bool(
+        primary_report["profile"]["temporal_rules"]["gating_rules"]["allow_blocking"]
+    )
+    for report in series_reports:
+        temporal_trace = report["contracts"].get("temporal_consistency_trace")
+        trajectory_trace = report["contracts"].get("temporal_trajectory_trace")
+        clinical_plausibility = report.get("manifest", {}).get("clinical_plausibility", {})
+        clinical_heuristics = clinical_plausibility.get("heuristics", [])
+        blocking_failures = clinical_plausibility.get("blocking_failures", [])
+        comparison_status = "not_evaluated"
+        comparison_scope = "not_evaluated"
+        spatial_comparison_mode = TEMPORAL_SPATIAL_MODE_NONE
+        if isinstance(temporal_trace, Mapping):
+            comparison_status = str(temporal_trace["comparison_status"])
+            comparison_scope = str(temporal_trace["comparison_scope"])
+            spatial_comparison_mode = str(temporal_trace["spatial_comparison_mode"])
+            top_flags.update(str(item) for item in temporal_trace["flags"])
+        if isinstance(trajectory_trace, Mapping):
+            top_flags.update(str(item) for item in trajectory_trace["flags"])
+        temporal_reason_codes = sorted(
+            {
+                str(item.get("code"))
+                for item in clinical_heuristics
+                if isinstance(item, Mapping) and str(item.get("code", "")).startswith("temporal_")
+            }
+        )
+        top_reason_codes.update(temporal_reason_codes)
+        usable_temporal = comparison_scope in {TEMPORAL_SCOPE_FULL, TEMPORAL_SCOPE_VOLUME_ONLY} and comparison_status in {
+            TEMPORAL_STATUS_ALIGNED,
+            TEMPORAL_STATUS_DEGRADED,
+        }
+        any_temporal_evaluated = any_temporal_evaluated or comparison_status != TEMPORAL_STATUS_NOT_EVALUATED
+        if report["gating_status"] == "required":
+            required_series_aligned.append(
+                comparison_status == TEMPORAL_STATUS_ALIGNED and comparison_scope == TEMPORAL_SCOPE_FULL
+            )
+            if not usable_temporal:
+                required_series_without_usable_temporal.append(report["series_id"])
+            if any(
+                str(item.get("code", "")).startswith("temporal_")
+                for item in blocking_failures
+            ):
+                temporal_blocked_required_series.append(report["series_id"])
+        per_series.append(
+            {
+                "series_id": report["series_id"],
+                "resolved_role": report["resolved_role"],
+                "gating_status": report["gating_status"],
+                "comparison_status": comparison_status,
+                "comparison_scope": comparison_scope,
+                "spatial_comparison_mode": spatial_comparison_mode,
+                "trajectory_class": (
+                    None
+                    if not isinstance(trajectory_trace, Mapping)
+                    else trajectory_trace["trajectory_class"]
+                ),
+                "usable_temporal_result": usable_temporal,
+                "top_flags": (
+                    []
+                    if not isinstance(temporal_trace, Mapping)
+                    else list(temporal_trace["flags"])
+                ),
+                "top_reason_codes": temporal_reason_codes,
+            }
+        )
+    all_required_series_temporal_usable = not required_series_without_usable_temporal
+    if not any_temporal_evaluated:
+        final_temporal_disposition = "not_evaluated"
+    elif allow_blocking and all_required_series_temporal_usable and temporal_blocked_required_series:
+        final_temporal_disposition = "blocked"
+    elif required_series_aligned and all(required_series_aligned):
+        final_temporal_disposition = "aligned"
+    else:
+        final_temporal_disposition = "advisory"
+    trace = build_study_temporal_aggregation_trace(
+        case_id=str(context["case_id"]),
+        required_series_ids=list(required_series_ids),
+        auxiliary_series_ids=list(auxiliary_series_ids),
+        per_series=per_series,
+        final_temporal_disposition=final_temporal_disposition,
+        top_flags=sorted(top_flags),
+        top_reason_codes=sorted(top_reason_codes),
+        gating_summary={
+            "allow_blocking": allow_blocking,
+            "all_required_series_temporal_usable": all_required_series_temporal_usable,
+            "required_series_without_usable_temporal": required_series_without_usable_temporal,
+            "temporal_blocked_required_series": temporal_blocked_required_series,
+            "any_temporal_evaluated": any_temporal_evaluated,
+        },
+    )
+    return {"trace": trace}
+
+
 def _build_multi_series_study_report(
     context: Mapping[str, Any],
     series_reports: list[dict[str, Any]],
@@ -1514,6 +1690,10 @@ def _build_multi_series_study_report(
             released_series_ids.append(report["series_id"])
         else:
             withheld_series_ids.append(report["series_id"])
+    study_temporal_aggregation = _build_study_temporal_aggregation_section(
+        context,
+        updated_series_reports,
+    )
     block_category = "none"
     if missing_required:
         block_category = "missing_required_series"
@@ -1589,6 +1769,7 @@ def _build_multi_series_study_report(
         "verification_profile_descriptor": verification_profile_descriptor,
         "cross_series_policy": context["cross_series_policy"],
         "cross_series_verification": cross_series_trace,
+        "study_temporal_aggregation": study_temporal_aggregation["trace"],
         "series_manifests": [
             _build_multi_series_series_manifest(report) for report in updated_series_reports
         ],
@@ -1623,11 +1804,13 @@ def _build_multi_series_study_report(
             ],
             "geometry_verification": geometry_verification,
             "lesion_corroboration": lesion_corroboration,
+            "study_temporal_aggregation": study_temporal_aggregation["trace"],
         },
         "contracts": {
             "verification_profile_descriptor": verification_profile_descriptor,
             "cross_series_verification_policy": context["cross_series_policy"],
             "cross_series_verification_trace": cross_series_trace,
+            "study_temporal_aggregation_trace": study_temporal_aggregation["trace"],
         },
         "series_reports": updated_series_reports,
         "manifest": manifest,
@@ -1827,6 +2010,10 @@ def _build_release_transition(
             Invariant(
                 name="prior_verified_context_valid",
                 check=_check_prior_verified_context,
+            ),
+            Invariant(
+                name="prior_verified_contexts_valid",
+                check=_check_prior_verified_contexts,
             ),
             Invariant(
                 name="raw_real_numeric",
@@ -2128,6 +2315,19 @@ def _check_prior_verified_context(state: Mapping[str, Any]) -> InvariantFailure 
             code="invalid_prior_verified_context",
             message=str(exc),
             details={"field": "prior_verified_context"},
+        )
+    return None
+
+
+def _check_prior_verified_contexts(state: Mapping[str, Any]) -> InvariantFailure | None:
+    try:
+        canonicalise_prior_verified_contexts(state.get("prior_verified_contexts"))
+    except ValueError as exc:
+        return InvariantFailure(
+            invariant="prior_verified_contexts_valid",
+            code="invalid_prior_verified_contexts",
+            message=str(exc),
+            details={"field": "prior_verified_contexts"},
         )
     return None
 
@@ -2555,6 +2755,751 @@ def _mask_centroid_mm(
     )
     transformed = (affine @ homogeneous.T).T[:, :3]
     return np.mean(transformed, axis=0)
+
+
+def _temporal_parse_timestamp(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    return datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ")
+
+
+def _temporal_pair_is_fully_trusted(pair_provenance: str) -> bool:
+    return pair_provenance in {
+        TEMPORAL_PAIR_PROVENANCE_VERIFIED_BUNDLE,
+        TEMPORAL_PAIR_PROVENANCE_TRUSTED_METADATA,
+    }
+
+
+def _temporal_sequence_is_compatible(
+    prior_context: Mapping[str, Any],
+    descriptor: Any,
+) -> bool:
+    prior_sequence_family = str(prior_context["prior_profile"]["sequence_family"])
+    compatibility_rules = dict(descriptor.temporal_rules.get("sequence_compatibility_rules", {}))
+    if bool(descriptor.temporal_rules.get("same_sequence_family_required", True)):
+        return prior_sequence_family == descriptor.sequence_family
+    allowed = compatibility_rules.get("allowed_prior_sequence_families", [])
+    if not isinstance(allowed, list):
+        return False
+    return prior_sequence_family in {str(item) for item in allowed}
+
+
+def _temporal_prior_admissibility(
+    prior_context: Mapping[str, Any],
+    descriptor: Any,
+) -> tuple[str, str]:
+    if not _temporal_prior_identity_fields_present(prior_context):
+        return TEMPORAL_PRIOR_INADMISSIBLE, TEMPORAL_SKIPPED_PRIOR_BUNDLE_IDENTITY_MISSING
+    prior_release = dict(prior_context["prior_release"])
+    if prior_release["release_status"] != RELEASE_STATUS_RELEASED:
+        return TEMPORAL_PRIOR_INADMISSIBLE, TEMPORAL_SKIPPED_PRIOR_NOT_RELEASED
+    if prior_release["final_disposition"] != "released":
+        return TEMPORAL_PRIOR_INADMISSIBLE, TEMPORAL_SKIPPED_PRIOR_NOT_RELEASED
+    if prior_release["decision_class"] not in {
+        DECISION_CLASS_VERIFIED_CLEAN,
+        DECISION_CLASS_VERIFIED_BOUNDARY_HUGGING,
+        DECISION_CLASS_VERIFIED_WITH_ADVISORY,
+    }:
+        return TEMPORAL_PRIOR_INADMISSIBLE, TEMPORAL_SKIPPED_PRIOR_NOT_RELEASED
+    if not _temporal_sequence_is_compatible(prior_context, descriptor):
+        return TEMPORAL_PRIOR_INADMISSIBLE, TEMPORAL_SKIPPED_SEQUENCE_FAMILY_MISMATCH
+    return TEMPORAL_PRIOR_ADMISSIBLE, "admissible"
+
+
+def _temporal_prior_sort_key(
+    prior_context: Mapping[str, Any],
+) -> tuple[bool, str, str, str]:
+    timestamp = prior_context.get("study_acquired_at")
+    return (
+        timestamp is None,
+        "" if timestamp is None else str(timestamp),
+        str(prior_context["prior_bundle_sha256"]),
+        str(prior_context["prior_case_id"]),
+    )
+
+
+def _temporal_collect_prior_contexts(
+    state: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if state.get("prior_verified_contexts") is not None:
+        return canonicalise_prior_verified_contexts(state.get("prior_verified_contexts")) or []
+    prior_payload = state.get("prior_verified_context")
+    if prior_payload is None:
+        return []
+    return [build_prior_verified_context(dict(prior_payload))]
+
+
+def _temporal_shift_slices(length: int, offset: int) -> tuple[slice, slice] | None:
+    if offset >= 0:
+        src_start = 0
+        src_end = length - offset
+        dst_start = offset
+        dst_end = length
+    else:
+        src_start = -offset
+        src_end = length
+        dst_start = 0
+        dst_end = length + offset
+    if src_end <= src_start or dst_end <= dst_start:
+        return None
+    return slice(src_start, src_end), slice(dst_start, dst_end)
+
+
+def _temporal_translate_mask(mask: np.ndarray, shift_zyx: tuple[int, int, int]) -> np.ndarray:
+    translated = np.zeros_like(mask, dtype=np.int64)
+    z_slices = _temporal_shift_slices(mask.shape[0], int(shift_zyx[0]))
+    y_slices = _temporal_shift_slices(mask.shape[1], int(shift_zyx[1]))
+    x_slices = _temporal_shift_slices(mask.shape[2], int(shift_zyx[2]))
+    if z_slices is None or y_slices is None or x_slices is None:
+        return translated
+    src_z, dst_z = z_slices
+    src_y, dst_y = y_slices
+    src_x, dst_x = x_slices
+    translated[dst_z, dst_y, dst_x] = np.asarray(mask, dtype=np.int64)[src_z, src_y, src_x]
+    return translated
+
+
+def _temporal_mask_iou(
+    current_mask: np.ndarray,
+    prior_mask: np.ndarray,
+) -> float | None:
+    union_voxel_count = int(np.count_nonzero((current_mask == 1) | (prior_mask == 1)))
+    if union_voxel_count == 0:
+        return None
+    return _round_float(
+        int(np.count_nonzero((current_mask == 1) & (prior_mask == 1))) / union_voxel_count
+    )
+
+
+def _build_longitudinal_selection_section(
+    state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    descriptor: Any,
+) -> dict[str, Any]:
+    single_prior_alias_only = (
+        state.get("prior_verified_contexts") is None
+        and state.get("prior_verified_context") is not None
+    )
+    supplied_priors = sorted(_temporal_collect_prior_contexts(state), key=_temporal_prior_sort_key)
+    current_dt = _temporal_parse_timestamp(analysis["study_acquired_at"])
+    max_selected_priors = int(descriptor.temporal_rules["selection_rules"]["max_selected_priors"])
+    degraded_interval_max_days = float(descriptor.temporal_rules["degraded_interval_max_days"])
+    fallback_enabled = bool(
+        descriptor.temporal_rules["selection_rules"].get("primary_fallback_enabled", False)
+    )
+    admissible_priors: list[dict[str, Any]] = []
+    entry_index: dict[str, dict[str, Any]] = {}
+    first_inadmissible_reason_code: str | None = None
+    for prior_context in supplied_priors:
+        admissibility_status, admissibility_reason_code = _temporal_prior_admissibility(
+            prior_context,
+            descriptor,
+        )
+        prior_dt = _temporal_parse_timestamp(prior_context["study_acquired_at"])
+        earlier_than_current: bool | None = None
+        within_interval_window: bool | None = None
+        interval_days_to_current: float | None = None
+        if current_dt is not None and prior_dt is not None:
+            delta_seconds = (current_dt - prior_dt).total_seconds()
+            earlier_than_current = delta_seconds > 0
+            if delta_seconds > 0:
+                interval_days_to_current = _round_float(delta_seconds / 86400.0)
+                within_interval_window = interval_days_to_current <= degraded_interval_max_days
+            else:
+                within_interval_window = False
+        if admissibility_status == TEMPORAL_PRIOR_ADMISSIBLE:
+            admissible_priors.append(prior_context)
+        elif first_inadmissible_reason_code is None:
+            first_inadmissible_reason_code = admissibility_reason_code
+        entry_index[str(prior_context["prior_bundle_sha256"])] = {
+            "prior_bundle_sha256": str(prior_context["prior_bundle_sha256"]),
+            "prior_case_id": str(prior_context["prior_case_id"]),
+            "study_acquired_at": prior_context["study_acquired_at"],
+            "timestamp_provenance": str(prior_context["timestamp_provenance"]),
+            "sequence_family": str(prior_context["prior_profile"]["sequence_family"]),
+            "admissibility_status": admissibility_status,
+            "admissibility_reason_code": admissibility_reason_code,
+            "earlier_than_current": earlier_than_current,
+            "within_interval_window": within_interval_window,
+            "interval_days_to_current": interval_days_to_current,
+            "eligible_for_selection": False,
+            "selected_for_trajectory": False,
+            "selected_as_primary": False,
+        }
+    selected_candidates: list[dict[str, Any]] = []
+    if current_dt is not None:
+        for prior_context in admissible_priors:
+            prior_dt = _temporal_parse_timestamp(prior_context["study_acquired_at"])
+            if prior_dt is None:
+                continue
+            delta_seconds = (current_dt - prior_dt).total_seconds()
+            if delta_seconds <= 0:
+                continue
+            interval_days = _round_float(delta_seconds / 86400.0)
+            if interval_days > degraded_interval_max_days:
+                continue
+            entry_index[str(prior_context["prior_bundle_sha256"])]["eligible_for_selection"] = True
+            selected_candidates.append(prior_context)
+    selected_priors = selected_candidates[-max_selected_priors:]
+    primary_prior = selected_priors[-1] if selected_priors else None
+    primary_selection_mode = "trajectory_most_recent" if primary_prior is not None else "none"
+    primary_unavailable_reason_code = TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT
+    if supplied_priors:
+        primary_unavailable_reason_code = (
+            first_inadmissible_reason_code
+            if not admissible_priors and first_inadmissible_reason_code is not None
+            else TEMPORAL_SKIPPED_NO_SELECTED_PRIORS
+        )
+    if primary_prior is None and fallback_enabled and admissible_priors:
+        if current_dt is None:
+            primary_prior = admissible_priors[-1]
+            primary_selection_mode = "fallback_missing_current_chronology"
+        elif all(
+            _temporal_parse_timestamp(item["study_acquired_at"]) is None for item in admissible_priors
+        ):
+            primary_prior = admissible_priors[-1]
+            primary_selection_mode = "fallback_missing_prior_chronology"
+        elif single_prior_alias_only and len(admissible_priors) == 1:
+            primary_prior = admissible_priors[0]
+            primary_selection_mode = "single_prior_alias"
+    selected_hashes = {str(item["prior_bundle_sha256"]) for item in selected_priors}
+    primary_hash = None if primary_prior is None else str(primary_prior["prior_bundle_sha256"])
+    entries: list[dict[str, Any]] = []
+    for prior_context in supplied_priors:
+        prior_hash = str(prior_context["prior_bundle_sha256"])
+        entry = dict(entry_index[prior_hash])
+        entry["selected_for_trajectory"] = prior_hash in selected_hashes
+        entry["selected_as_primary"] = primary_hash == prior_hash
+        entries.append(entry)
+    selection_trace = build_longitudinal_selection_trace(
+        case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        supplied_prior_count=len(supplied_priors),
+        selected_prior_count=len(selected_priors),
+        primary_prior_bundle_sha256=primary_hash,
+        primary_selection_mode=primary_selection_mode,
+        entries=entries,
+    )
+    return {
+        "supplied_priors": supplied_priors,
+        "selected_priors": selected_priors,
+        "primary_prior": primary_prior,
+        "primary_selection_mode": primary_selection_mode,
+        "primary_unavailable_reason_code": (
+            primary_unavailable_reason_code if primary_prior is None else "admissible"
+        ),
+        "trace": selection_trace,
+    }
+
+
+def _build_temporal_trajectory_section(
+    state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    descriptor: Any,
+    *,
+    selected_priors: list[dict[str, Any]],
+) -> dict[str, Any]:
+    current_volume = _round_float(float(analysis["computed_tumor_volume_mm3"]))
+    current_component_count = int(analysis["verified_mask_component_count"])
+    aggregate_metrics = {
+        "oldest_selected_prior_volume_mm3": None,
+        "current_volume_mm3": current_volume,
+        "aggregate_signed_volume_delta_mm3": None,
+        "aggregate_signed_volume_change_percent": None,
+        "aggregate_signed_volume_slope_mm3_per_day": None,
+        "aggregate_signed_percent_change_per_30d": None,
+        "current_component_count": current_component_count,
+    }
+    if not selected_priors:
+        trace = build_temporal_trajectory_trace(
+            case_id=str(state["case_id"]),
+            profile_name=descriptor.profile_name,
+            profile_revision=descriptor.profile_revision,
+            profile_digest=descriptor.profile_digest(),
+            selected_prior_count=0,
+            usable_interval_count=0,
+            trajectory_class="not_evaluated",
+            aggregate_metrics=aggregate_metrics,
+            interval_summaries=[],
+            flags=[],
+            skipped_metrics=[
+                _temporal_skipped_metric(
+                    "aggregate_signed_volume_slope_mm3_per_day",
+                    TEMPORAL_SKIPPED_NO_SELECTED_PRIORS,
+                ),
+                _temporal_skipped_metric(
+                    "aggregate_signed_percent_change_per_30d",
+                    TEMPORAL_SKIPPED_NO_SELECTED_PRIORS,
+                ),
+            ],
+        )
+        return {"trace": trace, "heuristics": []}
+    timeline = [
+        {
+            "kind": "prior",
+            "label": str(item["prior_case_id"]),
+            "bundle_sha256": str(item["prior_bundle_sha256"]),
+            "study_acquired_at": item["study_acquired_at"],
+            "timestamp_provenance": str(item["timestamp_provenance"]),
+            "verified_volume_mm3": _round_float(float(item["verified_volume_mm3"])),
+            "component_count": _count_face_connected_components(
+                np.asarray(item["verified_mask"], dtype=np.int64)
+            ),
+        }
+        for item in selected_priors
+    ]
+    timeline.append(
+        {
+            "kind": "current",
+            "label": str(state["case_id"]),
+            "bundle_sha256": None,
+            "study_acquired_at": analysis["study_acquired_at"],
+            "timestamp_provenance": str(analysis["study_timestamp_provenance"]),
+            "verified_volume_mm3": current_volume,
+            "component_count": current_component_count,
+        }
+    )
+    interval_summaries: list[dict[str, Any]] = []
+    usable_deltas: list[float] = []
+    usable_days: list[float] = []
+    usable_slopes: list[float] = []
+    skipped_metrics: list[dict[str, str]] = []
+    flags: list[str] = []
+    for index in range(len(timeline) - 1):
+        previous_entry = timeline[index]
+        next_entry = timeline[index + 1]
+        pair_provenance = _temporal_pair_provenance(
+            str(next_entry["timestamp_provenance"]),
+            str(previous_entry["timestamp_provenance"]),
+        )
+        previous_dt = _temporal_parse_timestamp(previous_entry["study_acquired_at"])
+        next_dt = _temporal_parse_timestamp(next_entry["study_acquired_at"])
+        interval_days: float | None = None
+        signed_volume_slope_mm3_per_day: float | None = None
+        signed_volume_change_percent: float | None = None
+        usable_for_trend = False
+        skip_reason_code: str | None = None
+        if previous_dt is None or next_dt is None:
+            skip_reason_code = TEMPORAL_SKIPPED_TIMESTAMP_MISSING
+        else:
+            delta_seconds = (next_dt - previous_dt).total_seconds()
+            if delta_seconds < 0:
+                skip_reason_code = TEMPORAL_SKIPPED_TIMESTAMP_REVERSED
+            elif delta_seconds == 0:
+                interval_days = 0.0
+                skip_reason_code = TEMPORAL_SKIPPED_ZERO_INTERVAL
+            else:
+                interval_days = _round_float(delta_seconds / 86400.0)
+                if _temporal_pair_is_fully_trusted(pair_provenance):
+                    usable_for_trend = True
+                elif pair_provenance == TEMPORAL_PAIR_PROVENANCE_MIXED:
+                    skip_reason_code = TEMPORAL_SKIPPED_MIXED_PROVENANCE
+                elif pair_provenance == TEMPORAL_PAIR_PROVENANCE_UNTRUSTED:
+                    skip_reason_code = TEMPORAL_SKIPPED_TIMESTAMP_UNTRUSTED
+                else:
+                    skip_reason_code = TEMPORAL_SKIPPED_TIMESTAMP_MISSING
+        signed_volume_delta_mm3 = _round_float(
+            float(next_entry["verified_volume_mm3"]) - float(previous_entry["verified_volume_mm3"])
+        )
+        if usable_for_trend and interval_days is not None and interval_days > 0.0:
+            signed_volume_slope_mm3_per_day = _round_float(
+                signed_volume_delta_mm3 / float(interval_days)
+            )
+            usable_deltas.append(signed_volume_delta_mm3)
+            usable_days.append(float(interval_days))
+            usable_slopes.append(float(signed_volume_slope_mm3_per_day))
+        if float(previous_entry["verified_volume_mm3"]) > 0.0:
+            signed_volume_change_percent = _round_float(
+                (signed_volume_delta_mm3 / float(previous_entry["verified_volume_mm3"])) * 100.0
+            )
+        interval_summaries.append(
+            {
+                "from_label": previous_entry["label"],
+                "to_label": next_entry["label"],
+                "from_bundle_sha256": previous_entry["bundle_sha256"],
+                "to_bundle_sha256": next_entry["bundle_sha256"],
+                "pair_provenance": pair_provenance,
+                "interval_days": interval_days,
+                "signed_volume_delta_mm3": signed_volume_delta_mm3,
+                "signed_volume_change_percent": signed_volume_change_percent,
+                "signed_volume_slope_mm3_per_day": signed_volume_slope_mm3_per_day,
+                "from_component_count": int(previous_entry["component_count"]),
+                "to_component_count": int(next_entry["component_count"]),
+                "usable_for_trend": usable_for_trend,
+                "skip_reason_code": skip_reason_code,
+            }
+        )
+    oldest_selected_prior = selected_priors[0]
+    oldest_selected_prior_volume = _round_float(float(oldest_selected_prior["verified_volume_mm3"]))
+    aggregate_metrics["oldest_selected_prior_volume_mm3"] = oldest_selected_prior_volume
+    aggregate_metrics["aggregate_signed_volume_delta_mm3"] = _round_float(
+        current_volume - oldest_selected_prior_volume
+    )
+    if oldest_selected_prior_volume > 0.0:
+        aggregate_metrics["aggregate_signed_volume_change_percent"] = _round_float(
+            (
+                float(aggregate_metrics["aggregate_signed_volume_delta_mm3"])
+                / oldest_selected_prior_volume
+            )
+            * 100.0
+        )
+    else:
+        skipped_metrics.append(
+            _temporal_skipped_metric(
+                "aggregate_signed_percent_change_per_30d",
+                TEMPORAL_SKIPPED_OLDEST_SELECTED_PRIOR_ZERO,
+            )
+        )
+    usable_interval_count = len(usable_slopes)
+    if usable_interval_count:
+        total_usable_days = sum(usable_days)
+        aggregate_metrics["aggregate_signed_volume_slope_mm3_per_day"] = _round_float(
+            sum(usable_deltas) / total_usable_days
+        )
+        if (
+            aggregate_metrics["aggregate_signed_volume_change_percent"] is not None
+            and usable_interval_count == len(interval_summaries)
+            and total_usable_days > 0.0
+        ):
+            aggregate_metrics["aggregate_signed_percent_change_per_30d"] = _round_float(
+                float(aggregate_metrics["aggregate_signed_volume_change_percent"])
+                * 30.0
+                / total_usable_days
+            )
+    else:
+        skipped_metrics.append(
+            _temporal_skipped_metric(
+                "aggregate_signed_volume_slope_mm3_per_day",
+                TEMPORAL_SKIPPED_NO_USABLE_INTERVALS,
+            )
+        )
+        if aggregate_metrics["aggregate_signed_volume_change_percent"] is not None:
+            skipped_metrics.append(
+                _temporal_skipped_metric(
+                    "aggregate_signed_percent_change_per_30d",
+                    TEMPORAL_SKIPPED_NO_USABLE_INTERVALS,
+                )
+            )
+    trajectory_class = "not_evaluated"
+    if usable_deltas:
+        if all(delta == 0.0 for delta in usable_deltas):
+            trajectory_class = "monotonic_stable"
+        elif all(delta >= 0.0 for delta in usable_deltas) and any(delta > 0.0 for delta in usable_deltas):
+            trajectory_class = "monotonic_growth"
+        elif all(delta <= 0.0 for delta in usable_deltas) and any(delta < 0.0 for delta in usable_deltas):
+            trajectory_class = "monotonic_shrink"
+        else:
+            trajectory_class = "oscillating"
+    component_counts = [
+        _count_face_connected_components(np.asarray(item["verified_mask"], dtype=np.int64))
+        for item in selected_priors
+    ]
+    component_counts.append(current_component_count)
+    if len(set(component_counts)) > 1:
+        flags.append(TEMPORAL_FLAG_TRAJECTORY_COMPONENT_CHANGE)
+    if any(_round_float(float(item["verified_volume_mm3"])) == 0.0 for item in selected_priors) and current_volume > 0.0:
+        flags.append(TEMPORAL_FLAG_TRAJECTORY_RECURRENCE)
+    if usable_interval_count >= int(
+        descriptor.temporal_rules["trajectory_rules"]["min_intervals_for_acceleration"]
+    ):
+        slope_signs = [1 if slope > 0.0 else -1 if slope < 0.0 else 0 for slope in usable_slopes]
+        non_zero_signs = [sign for sign in slope_signs if sign != 0]
+        if any(
+            non_zero_signs[index] != non_zero_signs[index - 1]
+            for index in range(1, len(non_zero_signs))
+        ):
+            flags.append(TEMPORAL_FLAG_TRAJECTORY_INFLECTION)
+        if non_zero_signs and len(set(non_zero_signs)) == 1 and any(
+            abs(usable_slopes[index]) > abs(usable_slopes[index - 1])
+            for index in range(1, len(usable_slopes))
+        ):
+            flags.append(TEMPORAL_FLAG_TRAJECTORY_ACCELERATION)
+    trace = build_temporal_trajectory_trace(
+        case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        selected_prior_count=len(selected_priors),
+        usable_interval_count=usable_interval_count,
+        trajectory_class=trajectory_class,
+        aggregate_metrics=aggregate_metrics,
+        interval_summaries=interval_summaries,
+        flags=sorted(set(flags)),
+        skipped_metrics=sorted(
+            skipped_metrics,
+            key=lambda item: (str(item["metric"]), str(item["reason_code"])),
+        ),
+    )
+    heuristics: list[dict[str, Any]] = []
+    if TEMPORAL_FLAG_TRAJECTORY_ACCELERATION in flags:
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_TRAJECTORY_ACCELERATION,
+                label="Trajectory acceleration",
+                severity="advisory",
+                status="advisory",
+                message="The selected prior trajectory shows increasing magnitude of change across usable intervals.",
+            )
+        )
+    if TEMPORAL_FLAG_TRAJECTORY_INFLECTION in flags:
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_TRAJECTORY_INFLECTION,
+                label="Trajectory inflection",
+                severity="advisory",
+                status="advisory",
+                message="The selected prior trajectory changes directional sign across usable intervals.",
+            )
+        )
+    if TEMPORAL_FLAG_TRAJECTORY_RECURRENCE in flags:
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_TRAJECTORY_RECURRENCE,
+                label="Recurrence after zero-volume state",
+                severity="warning",
+                status="warning",
+                message="A selected prior recorded zero verified volume before a later positive verified volume reappeared.",
+            )
+        )
+    if TEMPORAL_FLAG_TRAJECTORY_COMPONENT_CHANGE in flags:
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_TRAJECTORY_COMPONENT_CHANGE,
+                label="Component-count trajectory change",
+                severity="advisory",
+                status="advisory",
+                message="Component counts vary across the selected longitudinal trajectory.",
+            )
+        )
+    return {"trace": trace, "heuristics": heuristics}
+
+
+def _build_longitudinal_registration_section(
+    state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    descriptor: Any,
+    *,
+    primary_prior: Mapping[str, Any] | None,
+    prior_admissibility_status: str,
+) -> dict[str, Any]:
+    registration_rules = dict(descriptor.temporal_rules.get("registration_rules", {}))
+    algorithm = {
+        "name": str(registration_rules.get("algorithm", "disabled")),
+        "max_translation_voxels": int(registration_rules.get("max_translation_voxels", 0)),
+    }
+    if primary_prior is None:
+        trace = build_longitudinal_registration_trace(
+            case_id=str(state["case_id"]),
+            profile_name=descriptor.profile_name,
+            profile_revision=descriptor.profile_revision,
+            profile_digest=descriptor.profile_digest(),
+            prior_bundle_sha256=None,
+            status=TEMPORAL_REGISTRATION_STATUS_NOT_EVALUATED,
+            blocking_admissible=False,
+            algorithm=algorithm,
+            transform=None,
+            quality={
+                "attempted": False,
+                "reason_code": TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT,
+                "registration_prerequisites_met": False,
+                "exact_iou_before_registration": None,
+                "best_iou_after_registration": None,
+                "candidate_count": 0,
+                "spatial_use_allowed": False,
+                "blocking_use_allowed": False,
+                "minimum_iou_for_spatial_use": _round_float(
+                    float(registration_rules.get("minimum_iou_for_spatial_use", 0.0))
+                ),
+                "minimum_iou_for_blocking": _round_float(
+                    float(registration_rules.get("minimum_iou_for_blocking", 0.0))
+                ),
+            },
+        )
+        return {"trace": trace, "transformed_prior_mask": None}
+    prior_bundle_sha256 = str(primary_prior["prior_bundle_sha256"])
+    current_mask = np.asarray(analysis["verified_mask"], dtype=np.int64)
+    prior_mask = np.asarray(primary_prior["verified_mask"], dtype=np.int64)
+    minimum_iou_for_spatial_use = _round_float(
+        float(registration_rules.get("minimum_iou_for_spatial_use", 0.0))
+    )
+    minimum_iou_for_blocking = _round_float(
+        float(registration_rules.get("minimum_iou_for_blocking", 0.0))
+    )
+    quality = {
+        "attempted": False,
+        "reason_code": "registration_not_required",
+        "registration_prerequisites_met": False,
+        "exact_iou_before_registration": _temporal_mask_iou(current_mask, prior_mask),
+        "best_iou_after_registration": None,
+        "candidate_count": 0,
+        "spatial_use_allowed": False,
+        "blocking_use_allowed": False,
+        "minimum_iou_for_spatial_use": minimum_iou_for_spatial_use,
+        "minimum_iou_for_blocking": minimum_iou_for_blocking,
+    }
+    if prior_admissibility_status != TEMPORAL_PRIOR_ADMISSIBLE:
+        trace = build_longitudinal_registration_trace(
+            case_id=str(state["case_id"]),
+            profile_name=descriptor.profile_name,
+            profile_revision=descriptor.profile_revision,
+            profile_digest=descriptor.profile_digest(),
+            prior_bundle_sha256=prior_bundle_sha256,
+            status=TEMPORAL_REGISTRATION_STATUS_NOT_APPLICABLE,
+            blocking_admissible=False,
+            algorithm=algorithm,
+            transform=None,
+            quality={**quality, "reason_code": TEMPORAL_REASON_TEMPORAL_PRIOR_UNSUITABLE},
+        )
+        return {"trace": trace, "transformed_prior_mask": None}
+    if not bool(registration_rules.get("enabled", False)):
+        trace = build_longitudinal_registration_trace(
+            case_id=str(state["case_id"]),
+            profile_name=descriptor.profile_name,
+            profile_revision=descriptor.profile_revision,
+            profile_digest=descriptor.profile_digest(),
+            prior_bundle_sha256=prior_bundle_sha256,
+            status=TEMPORAL_REGISTRATION_STATUS_NOT_APPLICABLE,
+            blocking_admissible=False,
+            algorithm=algorithm,
+            transform=None,
+            quality={**quality, "reason_code": "registration_disabled"},
+        )
+        return {"trace": trace, "transformed_prior_mask": None}
+    if _temporal_exact_geometry_match(analysis, primary_prior):
+        trace = build_longitudinal_registration_trace(
+            case_id=str(state["case_id"]),
+            profile_name=descriptor.profile_name,
+            profile_revision=descriptor.profile_revision,
+            profile_digest=descriptor.profile_digest(),
+            prior_bundle_sha256=prior_bundle_sha256,
+            status=TEMPORAL_REGISTRATION_STATUS_NOT_APPLICABLE,
+            blocking_admissible=False,
+            algorithm=algorithm,
+            transform=None,
+            quality={**quality, "reason_code": "exact_geometry_available"},
+        )
+        return {"trace": trace, "transformed_prior_mask": None}
+    current_shape = tuple(current_mask.shape)
+    prior_shape = tuple(prior_mask.shape)
+    same_spacing = list(analysis["voxel_spacing_mm"]) == list(primary_prior["voxel_spacing_mm"])
+    if (
+        current_shape != prior_shape
+        or not same_spacing
+        or analysis.get("spatial_geometry") is None
+        or primary_prior.get("spatial_geometry") is None
+        or not _temporal_scalar_basis_trusted(analysis, primary_prior)
+    ):
+        trace = build_longitudinal_registration_trace(
+            case_id=str(state["case_id"]),
+            profile_name=descriptor.profile_name,
+            profile_revision=descriptor.profile_revision,
+            profile_digest=descriptor.profile_digest(),
+            prior_bundle_sha256=prior_bundle_sha256,
+            status=TEMPORAL_REGISTRATION_STATUS_NOT_APPLICABLE,
+            blocking_admissible=False,
+            algorithm=algorithm,
+            transform=None,
+            quality={**quality, "reason_code": TEMPORAL_SKIPPED_GEOMETRY_NOT_SUFFICIENT},
+        )
+        return {"trace": trace, "transformed_prior_mask": None}
+    if not np.any(current_mask == 1) or not np.any(prior_mask == 1):
+        empty_reason = (
+            TEMPORAL_SKIPPED_BOTH_MASKS_EMPTY
+            if not np.any(current_mask == 1) and not np.any(prior_mask == 1)
+            else TEMPORAL_SKIPPED_EMPTY_CURRENT_MASK
+            if not np.any(current_mask == 1)
+            else TEMPORAL_SKIPPED_EMPTY_PRIOR_MASK
+        )
+        trace = build_longitudinal_registration_trace(
+            case_id=str(state["case_id"]),
+            profile_name=descriptor.profile_name,
+            profile_revision=descriptor.profile_revision,
+            profile_digest=descriptor.profile_digest(),
+            prior_bundle_sha256=prior_bundle_sha256,
+            status=TEMPORAL_REGISTRATION_STATUS_NOT_APPLICABLE,
+            blocking_admissible=False,
+            algorithm=algorithm,
+            transform=None,
+            quality={**quality, "reason_code": empty_reason},
+        )
+        return {"trace": trace, "transformed_prior_mask": None}
+    max_translation_voxels = int(registration_rules["max_translation_voxels"])
+    best_shift = (0, 0, 0)
+    best_iou = -1.0
+    best_translated_mask = prior_mask.copy()
+    candidate_count = 0
+    for delta_z in range(-max_translation_voxels, max_translation_voxels + 1):
+        for delta_y in range(-max_translation_voxels, max_translation_voxels + 1):
+            for delta_x in range(-max_translation_voxels, max_translation_voxels + 1):
+                candidate_count += 1
+                shift = (delta_z, delta_y, delta_x)
+                translated_mask = _temporal_translate_mask(prior_mask, shift)
+                iou = _temporal_mask_iou(current_mask, translated_mask)
+                candidate_iou = -1.0 if iou is None else float(iou)
+                current_best_l1 = sum(abs(value) for value in best_shift)
+                candidate_l1 = sum(abs(value) for value in shift)
+                if (
+                    candidate_iou > best_iou
+                    or (
+                        candidate_iou == best_iou
+                        and (
+                            candidate_l1 < current_best_l1
+                            or (candidate_l1 == current_best_l1 and shift < best_shift)
+                        )
+                    )
+                ):
+                    best_iou = candidate_iou
+                    best_shift = shift
+                    best_translated_mask = translated_mask
+    best_iou_value = None if best_iou < 0.0 else _round_float(best_iou)
+    spatial_use_allowed = best_iou_value is not None and best_iou_value >= minimum_iou_for_spatial_use
+    blocking_use_allowed = best_iou_value is not None and best_iou_value >= minimum_iou_for_blocking
+    transform_payload = {
+        "type": "integer_translation_zyx_voxels",
+        "translation_zyx_voxels": [int(best_shift[0]), int(best_shift[1]), int(best_shift[2])],
+        "transform_hash": hash_canonical_json(
+            {
+                "type": "integer_translation_zyx_voxels",
+                "translation_zyx_voxels": [int(best_shift[0]), int(best_shift[1]), int(best_shift[2])],
+            }
+        ),
+    }
+    quality = {
+        **quality,
+        "attempted": True,
+        "reason_code": (
+            "registration_quality_passed"
+            if spatial_use_allowed
+            else "registration_quality_below_spatial_threshold"
+        ),
+        "registration_prerequisites_met": True,
+        "best_iou_after_registration": best_iou_value,
+        "candidate_count": candidate_count,
+        "spatial_use_allowed": spatial_use_allowed,
+        "blocking_use_allowed": blocking_use_allowed,
+    }
+    trace = build_longitudinal_registration_trace(
+        case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        prior_bundle_sha256=prior_bundle_sha256,
+        status=(
+            TEMPORAL_REGISTRATION_STATUS_USED
+            if spatial_use_allowed
+            else TEMPORAL_REGISTRATION_STATUS_REJECTED
+        ),
+        blocking_admissible=bool(blocking_use_allowed and spatial_use_allowed),
+        algorithm=algorithm,
+        transform=transform_payload,
+        quality=quality,
+    )
+    return {
+        "trace": trace,
+        "transformed_prior_mask": best_translated_mask if spatial_use_allowed else None,
+    }
 
 
 def _build_temporal_consistency_section(
@@ -3156,6 +4101,619 @@ def _build_temporal_consistency_section(
     }
 
 
+def _build_temporal_not_evaluated_section(
+    state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    descriptor: Any,
+    *,
+    selection_trace: Mapping[str, Any],
+    trajectory_trace: Mapping[str, Any],
+    trajectory_heuristics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    registration_rules = descriptor.temporal_rules["registration_rules"]
+    trace = build_temporal_consistency_trace(
+        case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        comparison_status=TEMPORAL_STATUS_NOT_EVALUATED,
+        comparison_scope=TEMPORAL_SCOPE_NOT_EVALUATED,
+        spatial_comparison_mode=TEMPORAL_SPATIAL_MODE_NONE,
+        prior_admissibility={
+            "status": TEMPORAL_PRIOR_INADMISSIBLE,
+            "reason_code": TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT,
+        },
+        chronology_assessment={
+            "pair_provenance": TEMPORAL_PAIR_PROVENANCE_MISSING,
+            "current_timestamp_provenance": analysis["study_timestamp_provenance"],
+            "prior_timestamp_provenance": "missing",
+            "current_study_acquired_at": analysis["study_acquired_at"],
+            "prior_study_acquired_at": None,
+            "interval_days": None,
+            "ordered": False,
+            "time_metrics_available": False,
+            "reason_code": TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT,
+        },
+        geometry_assessment={
+            "comparability_class": TEMPORAL_GEOMETRY_INSUFFICIENT,
+            "reason_code": TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT,
+        },
+        computed_metrics={
+            "signed_volume_delta_mm3": None,
+            "absolute_volume_delta_mm3": None,
+            "signed_volume_change_percent": None,
+            "signed_normalized_percent_change_per_30d": None,
+            "volume_change_direction": "not_evaluated",
+            "normalized_rate_direction": "not_evaluated",
+            "intersection_over_union": None,
+            "global_centroid_shift_mm": None,
+            "prior_component_count": None,
+            "current_component_count": int(analysis["verified_mask_component_count"]),
+            "component_count_delta": None,
+        },
+        flags=[],
+        skipped_metrics=[
+            _temporal_skipped_metric("signed_volume_delta_mm3", TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT),
+            _temporal_skipped_metric("absolute_volume_delta_mm3", TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT),
+            _temporal_skipped_metric("signed_volume_change_percent", TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT),
+            _temporal_skipped_metric(
+                "signed_normalized_percent_change_per_30d",
+                TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT,
+            ),
+            _temporal_skipped_metric("intersection_over_union", TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT),
+            _temporal_skipped_metric("global_centroid_shift_mm", TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT),
+        ],
+    )
+    registration_trace = build_longitudinal_registration_trace(
+        case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        prior_bundle_sha256=None,
+        status=TEMPORAL_REGISTRATION_STATUS_NOT_EVALUATED,
+        blocking_admissible=False,
+        algorithm={
+            "name": str(registration_rules["algorithm"]),
+            "max_translation_voxels": int(registration_rules["max_translation_voxels"]),
+        },
+        transform=None,
+        quality={
+            "attempted": False,
+            "reason_code": TEMPORAL_SKIPPED_NO_PRIOR_CONTEXT,
+            "registration_prerequisites_met": False,
+            "exact_iou_before_registration": None,
+            "best_iou_after_registration": None,
+            "candidate_count": 0,
+            "spatial_use_allowed": False,
+            "blocking_use_allowed": False,
+            "minimum_iou_for_spatial_use": _round_float(
+                float(registration_rules["minimum_iou_for_spatial_use"])
+            ),
+            "minimum_iou_for_blocking": _round_float(
+                float(registration_rules["minimum_iou_for_blocking"])
+            ),
+        },
+    )
+    return {
+        "prior_verified_contexts": None,
+        "prior_verified_context": None,
+        "selection_trace": selection_trace,
+        "trajectory_trace": trajectory_trace,
+        "registration_trace": registration_trace,
+        "trace": trace,
+        "heuristics": list(trajectory_heuristics),
+        "summary": "No prior verified context was supplied; longitudinal verification was not evaluated.",
+    }
+
+
+def _build_temporal_no_primary_section(
+    state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    descriptor: Any,
+    *,
+    supplied_priors: list[dict[str, Any]],
+    selection_section: Mapping[str, Any],
+    trajectory_trace: Mapping[str, Any],
+    trajectory_heuristics: list[dict[str, Any]],
+    registration_trace: Mapping[str, Any],
+) -> dict[str, Any]:
+    prior_admissibility_status = (
+        TEMPORAL_PRIOR_ADMISSIBLE
+        if any(
+            _temporal_prior_admissibility(item, descriptor)[0] == TEMPORAL_PRIOR_ADMISSIBLE
+            for item in supplied_priors
+        )
+        else TEMPORAL_PRIOR_INADMISSIBLE
+    )
+    prior_admissibility_reason = str(selection_section["primary_unavailable_reason_code"])
+    trace = build_temporal_consistency_trace(
+        case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        comparison_status=TEMPORAL_STATUS_UNSUITABLE,
+        comparison_scope=TEMPORAL_SCOPE_NONE,
+        spatial_comparison_mode=TEMPORAL_SPATIAL_MODE_NONE,
+        prior_admissibility={
+            "status": prior_admissibility_status,
+            "reason_code": prior_admissibility_reason,
+        },
+        chronology_assessment={
+            "pair_provenance": TEMPORAL_PAIR_PROVENANCE_MISSING,
+            "current_timestamp_provenance": analysis["study_timestamp_provenance"],
+            "prior_timestamp_provenance": "missing",
+            "current_study_acquired_at": analysis["study_acquired_at"],
+            "prior_study_acquired_at": None,
+            "interval_days": None,
+            "ordered": False,
+            "time_metrics_available": False,
+            "reason_code": prior_admissibility_reason,
+        },
+        geometry_assessment={
+            "comparability_class": TEMPORAL_GEOMETRY_INSUFFICIENT,
+            "reason_code": TEMPORAL_GEOMETRY_REASON_NOT_SUFFICIENT,
+        },
+        computed_metrics={
+            "signed_volume_delta_mm3": None,
+            "absolute_volume_delta_mm3": None,
+            "signed_volume_change_percent": None,
+            "signed_normalized_percent_change_per_30d": None,
+            "volume_change_direction": "not_evaluated",
+            "normalized_rate_direction": "not_evaluated",
+            "intersection_over_union": None,
+            "global_centroid_shift_mm": None,
+            "prior_component_count": None,
+            "current_component_count": int(analysis["verified_mask_component_count"]),
+            "component_count_delta": None,
+        },
+        flags=[],
+        skipped_metrics=[
+            _temporal_skipped_metric("signed_volume_delta_mm3", prior_admissibility_reason),
+            _temporal_skipped_metric("absolute_volume_delta_mm3", prior_admissibility_reason),
+            _temporal_skipped_metric("signed_volume_change_percent", prior_admissibility_reason),
+            _temporal_skipped_metric("signed_normalized_percent_change_per_30d", prior_admissibility_reason),
+            _temporal_skipped_metric("intersection_over_union", prior_admissibility_reason),
+            _temporal_skipped_metric("global_centroid_shift_mm", prior_admissibility_reason),
+        ],
+    )
+    heuristics = list(trajectory_heuristics)
+    if prior_admissibility_status == TEMPORAL_PRIOR_INADMISSIBLE:
+        heuristics.insert(
+            0,
+            _heuristic_entry(
+                code=TEMPORAL_REASON_TEMPORAL_PRIOR_UNSUITABLE,
+                label="Prior admissibility",
+                severity="warning",
+                status="warning",
+                message=(
+                    "Supplied prior contexts are inadmissible for longitudinal comparison "
+                    f"({prior_admissibility_reason})."
+                ),
+            )
+        )
+    return {
+        "prior_verified_contexts": supplied_priors,
+        "prior_verified_context": None,
+        "selection_trace": selection_section["trace"],
+        "trajectory_trace": trajectory_trace,
+        "registration_trace": registration_trace,
+        "trace": trace,
+        "heuristics": heuristics,
+        "summary": "Supplied prior contexts did not yield a usable primary comparator under the configured temporal policy.",
+    }
+
+
+def _build_temporal_primary_section(
+    state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    descriptor: Any,
+    *,
+    supplied_priors: list[dict[str, Any]],
+    primary_prior: Mapping[str, Any],
+    selection_trace: Mapping[str, Any],
+    trajectory_trace: Mapping[str, Any],
+    trajectory_heuristics: list[dict[str, Any]],
+    registration_trace: Mapping[str, Any],
+    transformed_prior_mask: np.ndarray | None,
+) -> dict[str, Any]:
+    pair_provenance = _temporal_pair_provenance(
+        str(analysis["study_timestamp_provenance"]),
+        str(primary_prior["timestamp_provenance"]),
+    )
+    chronology_reason = "chronology_available"
+    interval_days: float | None = None
+    ordered = False
+    time_metrics_available = False
+    current_timestamp = analysis["study_acquired_at"]
+    prior_timestamp = primary_prior["study_acquired_at"]
+    current_dt = _temporal_parse_timestamp(current_timestamp)
+    prior_dt = _temporal_parse_timestamp(prior_timestamp)
+    if pair_provenance == TEMPORAL_PAIR_PROVENANCE_UNTRUSTED:
+        chronology_reason = TEMPORAL_SKIPPED_TIMESTAMP_UNTRUSTED
+    elif pair_provenance == TEMPORAL_PAIR_PROVENANCE_MISSING:
+        chronology_reason = TEMPORAL_SKIPPED_TIMESTAMP_MISSING
+    elif current_dt is None or prior_dt is None:
+        chronology_reason = TEMPORAL_SKIPPED_TIMESTAMP_MISSING
+    else:
+        delta_seconds = (current_dt - prior_dt).total_seconds()
+        if delta_seconds < 0:
+            chronology_reason = TEMPORAL_SKIPPED_TIMESTAMP_REVERSED
+        elif delta_seconds == 0:
+            chronology_reason = TEMPORAL_SKIPPED_ZERO_INTERVAL
+            interval_days = 0.0
+            ordered = True
+        else:
+            ordered = True
+            interval_days = _round_float(delta_seconds / 86400.0)
+            if interval_days > float(descriptor.temporal_rules["degraded_interval_max_days"]):
+                chronology_reason = TEMPORAL_SKIPPED_INTERVAL_EXCEEDS_MAX
+            elif pair_provenance == TEMPORAL_PAIR_PROVENANCE_MIXED:
+                chronology_reason = TEMPORAL_SKIPPED_MIXED_PROVENANCE
+                time_metrics_available = True
+            elif interval_days > float(descriptor.temporal_rules["aligned_interval_max_days"]):
+                chronology_reason = "interval_within_degraded_window"
+                time_metrics_available = True
+            else:
+                chronology_reason = "interval_within_aligned_window"
+                time_metrics_available = True
+    geometry_class = TEMPORAL_GEOMETRY_INSUFFICIENT
+    geometry_reason = TEMPORAL_GEOMETRY_REASON_NOT_SUFFICIENT
+    spatial_comparison_mode = TEMPORAL_SPATIAL_MODE_NONE
+    if _temporal_exact_geometry_match(analysis, primary_prior):
+        geometry_class = TEMPORAL_GEOMETRY_EXACT_MATCH
+        geometry_reason = TEMPORAL_GEOMETRY_REASON_EXACT_MATCH
+        spatial_comparison_mode = TEMPORAL_SPATIAL_MODE_EXACT
+    elif registration_trace["status"] == TEMPORAL_REGISTRATION_STATUS_USED:
+        geometry_class = TEMPORAL_GEOMETRY_REGISTERED_MATCH
+        geometry_reason = TEMPORAL_GEOMETRY_REASON_REGISTERED
+        spatial_comparison_mode = TEMPORAL_SPATIAL_MODE_REGISTERED
+    elif _temporal_scalar_basis_trusted(analysis, primary_prior):
+        geometry_class = TEMPORAL_GEOMETRY_VOLUME_ONLY
+        geometry_reason = TEMPORAL_GEOMETRY_REASON_NOT_EXACT
+        spatial_comparison_mode = TEMPORAL_SPATIAL_MODE_VOLUME_ONLY
+    comparison_scope = {
+        TEMPORAL_GEOMETRY_EXACT_MATCH: TEMPORAL_SCOPE_FULL,
+        TEMPORAL_GEOMETRY_REGISTERED_MATCH: TEMPORAL_SCOPE_FULL,
+        TEMPORAL_GEOMETRY_VOLUME_ONLY: TEMPORAL_SCOPE_VOLUME_ONLY,
+        TEMPORAL_GEOMETRY_INSUFFICIENT: TEMPORAL_SCOPE_NONE,
+    }[geometry_class]
+    comparison_status = TEMPORAL_STATUS_ALIGNED
+    if chronology_reason in {TEMPORAL_SKIPPED_TIMESTAMP_REVERSED, TEMPORAL_SKIPPED_INTERVAL_EXCEEDS_MAX}:
+        comparison_status = TEMPORAL_STATUS_UNSUITABLE
+        comparison_scope = TEMPORAL_SCOPE_NONE
+        spatial_comparison_mode = TEMPORAL_SPATIAL_MODE_NONE
+    elif comparison_scope == TEMPORAL_SCOPE_NONE:
+        comparison_status = TEMPORAL_STATUS_UNSUITABLE
+    elif spatial_comparison_mode in {TEMPORAL_SPATIAL_MODE_REGISTERED, TEMPORAL_SPATIAL_MODE_VOLUME_ONLY}:
+        comparison_status = TEMPORAL_STATUS_DEGRADED
+    elif pair_provenance in {
+        TEMPORAL_PAIR_PROVENANCE_MISSING,
+        TEMPORAL_PAIR_PROVENANCE_UNTRUSTED,
+        TEMPORAL_PAIR_PROVENANCE_MIXED,
+    } or chronology_reason in {TEMPORAL_SKIPPED_ZERO_INTERVAL, "interval_within_degraded_window"}:
+        comparison_status = TEMPORAL_STATUS_DEGRADED
+    current_mask = np.asarray(analysis["verified_mask"], dtype=np.int64)
+    prior_mask = np.asarray(primary_prior["verified_mask"], dtype=np.int64)
+    spatial_prior_mask = prior_mask if transformed_prior_mask is None else transformed_prior_mask
+    spatial_prior_affine = (
+        analysis["spatial_geometry"]["affine_ijk_to_mm"]
+        if spatial_comparison_mode == TEMPORAL_SPATIAL_MODE_REGISTERED
+        else primary_prior["spatial_geometry"]["affine_ijk_to_mm"]
+    )
+    signed_volume_delta_mm3: float | None = None
+    absolute_volume_delta_mm3: float | None = None
+    signed_volume_change_percent: float | None = None
+    signed_normalized_percent_change_per_30d: float | None = None
+    intersection_over_union: float | None = None
+    global_centroid_shift_mm: float | None = None
+    skipped_metrics: list[dict[str, str]] = []
+    flags: list[str] = []
+    if comparison_scope == TEMPORAL_SCOPE_NONE:
+        blocking_reason = chronology_reason
+        if geometry_reason == TEMPORAL_GEOMETRY_REASON_NOT_SUFFICIENT:
+            blocking_reason = TEMPORAL_SKIPPED_GEOMETRY_NOT_SUFFICIENT
+        for metric_name in (
+            "signed_volume_delta_mm3",
+            "absolute_volume_delta_mm3",
+            "signed_volume_change_percent",
+            "signed_normalized_percent_change_per_30d",
+            "intersection_over_union",
+            "global_centroid_shift_mm",
+        ):
+            skipped_metrics.append(_temporal_skipped_metric(metric_name, str(blocking_reason)))
+    else:
+        signed_volume_delta_mm3 = _round_float(
+            float(analysis["computed_tumor_volume_mm3"]) - float(primary_prior["verified_volume_mm3"])
+        )
+        absolute_volume_delta_mm3 = _round_float(abs(float(signed_volume_delta_mm3)))
+        if float(primary_prior["verified_volume_mm3"]) > 0.0:
+            signed_volume_change_percent = _round_float(
+                (signed_volume_delta_mm3 / float(primary_prior["verified_volume_mm3"])) * 100.0
+            )
+            if time_metrics_available and interval_days is not None and interval_days > 0.0:
+                signed_normalized_percent_change_per_30d = _round_float(
+                    signed_volume_change_percent * 30.0 / float(interval_days)
+                )
+            else:
+                if chronology_reason in {
+                    TEMPORAL_SKIPPED_TIMESTAMP_MISSING,
+                    TEMPORAL_SKIPPED_TIMESTAMP_UNTRUSTED,
+                    TEMPORAL_SKIPPED_MIXED_PROVENANCE,
+                    TEMPORAL_SKIPPED_ZERO_INTERVAL,
+                }:
+                    flags.append(TEMPORAL_FLAG_RATE_NOT_EVALUATED)
+                skipped_metrics.append(
+                    _temporal_skipped_metric(
+                        "signed_normalized_percent_change_per_30d",
+                        str(chronology_reason),
+                    )
+                )
+        else:
+            skipped_metrics.append(
+                _temporal_skipped_metric(
+                    "signed_volume_change_percent",
+                    TEMPORAL_SKIPPED_ZERO_PRIOR_VOLUME,
+                )
+            )
+            skipped_metrics.append(
+                _temporal_skipped_metric(
+                    "signed_normalized_percent_change_per_30d",
+                    TEMPORAL_SKIPPED_ZERO_PRIOR_VOLUME,
+                )
+            )
+        if comparison_scope == TEMPORAL_SCOPE_FULL:
+            intersection_over_union = _temporal_mask_iou(current_mask, spatial_prior_mask)
+            if intersection_over_union is None:
+                skipped_metrics.append(
+                    _temporal_skipped_metric(
+                        "intersection_over_union",
+                        TEMPORAL_SKIPPED_BOTH_MASKS_EMPTY,
+                    )
+                )
+            if not np.any(spatial_prior_mask == 1):
+                skipped_metrics.append(
+                    _temporal_skipped_metric(
+                        "global_centroid_shift_mm",
+                        TEMPORAL_SKIPPED_EMPTY_PRIOR_MASK,
+                    )
+                )
+            elif not np.any(current_mask == 1):
+                skipped_metrics.append(
+                    _temporal_skipped_metric(
+                        "global_centroid_shift_mm",
+                        TEMPORAL_SKIPPED_EMPTY_CURRENT_MASK,
+                    )
+                )
+            else:
+                current_centroid = _mask_centroid_mm(
+                    current_mask,
+                    analysis["spatial_geometry"]["affine_ijk_to_mm"],
+                )
+                prior_centroid = _mask_centroid_mm(
+                    spatial_prior_mask,
+                    spatial_prior_affine,
+                )
+                if current_centroid is not None and prior_centroid is not None:
+                    global_centroid_shift_mm = _round_float(
+                        float(np.linalg.norm(current_centroid - prior_centroid))
+                    )
+        else:
+            skipped_metrics.append(
+                _temporal_skipped_metric(
+                    "intersection_over_union",
+                    TEMPORAL_SKIPPED_GEOMETRY_NOT_EXACT,
+                )
+            )
+            skipped_metrics.append(
+                _temporal_skipped_metric(
+                    "global_centroid_shift_mm",
+                    TEMPORAL_SKIPPED_GEOMETRY_NOT_EXACT,
+                )
+            )
+    prior_component_count = _count_face_connected_components(prior_mask)
+    current_component_count = int(analysis["verified_mask_component_count"])
+    component_count_delta = abs(current_component_count - prior_component_count)
+    if component_count_delta:
+        flags.append(TEMPORAL_FLAG_COMPONENT_COUNT_CHANGED)
+    computed_metrics = {
+        "signed_volume_delta_mm3": signed_volume_delta_mm3,
+        "absolute_volume_delta_mm3": absolute_volume_delta_mm3,
+        "signed_volume_change_percent": signed_volume_change_percent,
+        "signed_normalized_percent_change_per_30d": signed_normalized_percent_change_per_30d,
+        "volume_change_direction": _temporal_metric_direction(signed_volume_change_percent),
+        "normalized_rate_direction": _temporal_metric_direction(signed_normalized_percent_change_per_30d),
+        "intersection_over_union": intersection_over_union,
+        "global_centroid_shift_mm": global_centroid_shift_mm,
+        "prior_component_count": prior_component_count,
+        "current_component_count": current_component_count,
+        "component_count_delta": component_count_delta,
+    }
+    metric_rules = descriptor.temporal_rules["metrics"]
+    heuristics: list[dict[str, Any]] = list(trajectory_heuristics)
+    if comparison_scope == TEMPORAL_SCOPE_VOLUME_ONLY:
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_GEOMETRY_LIMITED,
+                label="Geometry comparability",
+                severity="advisory",
+                status="advisory",
+                message="Geometry was not spatially comparable enough for overlap metrics, so only scalar volume comparison ran.",
+            )
+        )
+    if chronology_reason == TEMPORAL_SKIPPED_TIMESTAMP_REVERSED:
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_TIMESTAMP_REVERSED,
+                label="Chronology ordering",
+                severity="warning",
+                status="warning",
+                message="The selected prior timestamp is later than the current case timestamp.",
+            )
+        )
+    if comparison_status == TEMPORAL_STATUS_DEGRADED and chronology_reason in {
+        TEMPORAL_SKIPPED_TIMESTAMP_MISSING,
+        TEMPORAL_SKIPPED_TIMESTAMP_UNTRUSTED,
+        TEMPORAL_SKIPPED_MIXED_PROVENANCE,
+        TEMPORAL_SKIPPED_ZERO_INTERVAL,
+        "interval_within_degraded_window",
+    }:
+        heuristics.append(
+            _heuristic_entry(
+                code=TEMPORAL_REASON_INTERVAL_DEGRADED,
+                label="Chronology quality",
+                severity="advisory",
+                status="advisory",
+                message="Chronology quality is degraded, so time-dependent interpretation is limited.",
+            )
+        )
+    for code, label, metric_name, high_rule, low_rule in (
+        (TEMPORAL_REASON_VOLUME_WARNING, "Signed volume change percent", "signed_volume_change_percent", metric_rules["signed_volume_change_percent"]["warning_abs_threshold"], metric_rules["signed_volume_change_percent"]["advisory_abs_threshold"]),
+        (TEMPORAL_REASON_RATE_WARNING, "Signed normalized percent change per 30d", "signed_normalized_percent_change_per_30d", metric_rules["signed_normalized_percent_change_per_30d"]["warning_abs_threshold"], metric_rules["signed_normalized_percent_change_per_30d"]["advisory_abs_threshold"]),
+    ):
+        value = computed_metrics[metric_name]
+        if value is None:
+            continue
+        if abs(float(value)) >= float(high_rule):
+            heuristics.append(_heuristic_entry(code=code, label=label, severity="warning", status="warning", message=f"Absolute {label.lower()} exceeded the configured warning threshold ({value}).", observed=value, threshold=float(high_rule)))
+        elif abs(float(value)) >= float(low_rule):
+            heuristics.append(_heuristic_entry(code=code, label=label, severity="advisory", status="advisory", message=f"Absolute {label.lower()} exceeded the configured advisory threshold ({value}).", observed=value, threshold=float(low_rule)))
+    if intersection_over_union is not None:
+        if float(intersection_over_union) < float(metric_rules["intersection_over_union"]["warning_floor"]):
+            heuristics.append(_heuristic_entry(code=TEMPORAL_REASON_IOU_WARNING, label="Intersection over union", severity="warning", status="warning", message=f"Spatial overlap fell below the configured warning floor ({intersection_over_union}).", observed=intersection_over_union, threshold=float(metric_rules["intersection_over_union"]["warning_floor"])))
+        elif float(intersection_over_union) < float(metric_rules["intersection_over_union"]["advisory_floor"]):
+            heuristics.append(_heuristic_entry(code=TEMPORAL_REASON_IOU_WARNING, label="Intersection over union", severity="advisory", status="advisory", message=f"Spatial overlap fell below the configured advisory floor ({intersection_over_union}).", observed=intersection_over_union, threshold=float(metric_rules["intersection_over_union"]["advisory_floor"])))
+    if global_centroid_shift_mm is not None:
+        if float(global_centroid_shift_mm) > float(metric_rules["global_centroid_shift_mm"]["warning_threshold"]):
+            heuristics.append(_heuristic_entry(code=TEMPORAL_REASON_CENTROID_WARNING, label="Global centroid shift", severity="warning", status="warning", message=f"Centroid shift exceeded the configured warning threshold ({global_centroid_shift_mm} mm).", observed=global_centroid_shift_mm, threshold=float(metric_rules["global_centroid_shift_mm"]["warning_threshold"])))
+        elif float(global_centroid_shift_mm) > float(metric_rules["global_centroid_shift_mm"]["advisory_threshold"]):
+            heuristics.append(_heuristic_entry(code=TEMPORAL_REASON_CENTROID_WARNING, label="Global centroid shift", severity="advisory", status="advisory", message=f"Centroid shift exceeded the configured advisory threshold ({global_centroid_shift_mm} mm).", observed=global_centroid_shift_mm, threshold=float(metric_rules["global_centroid_shift_mm"]["advisory_threshold"])))
+    chronology_assessment = {
+        "pair_provenance": pair_provenance,
+        "current_timestamp_provenance": analysis["study_timestamp_provenance"],
+        "prior_timestamp_provenance": primary_prior["timestamp_provenance"],
+        "current_study_acquired_at": current_timestamp,
+        "prior_study_acquired_at": prior_timestamp,
+        "interval_days": interval_days,
+        "ordered": ordered,
+        "time_metrics_available": time_metrics_available,
+        "reason_code": chronology_reason,
+    }
+    geometry_assessment = {"comparability_class": geometry_class, "reason_code": geometry_reason}
+    blocking_rules = descriptor.temporal_rules["gating_rules"]
+    if (
+        bool(blocking_rules.get("allow_blocking", False))
+        and ordered
+        and interval_days is not None
+        and interval_days > 0.0
+        and _temporal_pair_is_fully_trusted(pair_provenance)
+        and chronology_reason in {"interval_within_aligned_window", "interval_within_degraded_window"}
+        and (
+            spatial_comparison_mode != TEMPORAL_SPATIAL_MODE_REGISTERED
+            or bool(registration_trace["blocking_admissible"])
+        )
+    ):
+        blocking_codes = {str(item) for item in blocking_rules.get("blocking_trigger_codes", [])}
+        heuristics = [
+            {
+                **entry,
+                "severity": HEURISTIC_BLOCKING,
+                "status": "failed",
+                "message": f"{entry['message']} Temporal blocking was enabled for this profile and the gating prerequisites were satisfied.",
+            }
+            if entry["status"] == "warning" and entry["code"] in blocking_codes
+            else entry
+            for entry in heuristics
+        ]
+    trace = build_temporal_consistency_trace(
+        case_id=str(state["case_id"]),
+        profile_name=descriptor.profile_name,
+        profile_revision=descriptor.profile_revision,
+        profile_digest=descriptor.profile_digest(),
+        comparison_status=comparison_status,
+        comparison_scope=comparison_scope,
+        spatial_comparison_mode=spatial_comparison_mode,
+        prior_admissibility={"status": TEMPORAL_PRIOR_ADMISSIBLE, "reason_code": "admissible"},
+        chronology_assessment=chronology_assessment,
+        geometry_assessment=geometry_assessment,
+        computed_metrics=computed_metrics,
+        flags=sorted(set(flags)),
+        skipped_metrics=sorted(skipped_metrics, key=lambda item: (str(item["metric"]), str(item["reason_code"]))),
+    )
+    summary = {
+        TEMPORAL_STATUS_ALIGNED: "Longitudinal comparison ran with full aligned temporal context.",
+        TEMPORAL_STATUS_DEGRADED: "Longitudinal comparison ran with degraded temporal context.",
+        TEMPORAL_STATUS_UNSUITABLE: "Longitudinal comparison was suppressed by temporal policy.",
+        TEMPORAL_STATUS_NOT_EVALUATED: "Longitudinal comparison was not evaluated.",
+    }[comparison_status]
+    return {
+        "prior_verified_contexts": supplied_priors,
+        "prior_verified_context": primary_prior,
+        "selection_trace": selection_trace,
+        "trajectory_trace": trajectory_trace,
+        "registration_trace": registration_trace,
+        "trace": trace,
+        "heuristics": heuristics,
+        "summary": summary,
+    }
+
+
+def _build_temporal_consistency_section_v2(
+    state: Mapping[str, Any],
+    analysis: Mapping[str, Any],
+    descriptor: Any,
+) -> dict[str, Any]:
+    selection_section = _build_longitudinal_selection_section(state, analysis, descriptor)
+    trajectory_section = _build_temporal_trajectory_section(
+        state,
+        analysis,
+        descriptor,
+        selected_priors=selection_section["selected_priors"],
+    )
+    if not selection_section["supplied_priors"]:
+        return _build_temporal_not_evaluated_section(
+            state,
+            analysis,
+            descriptor,
+            selection_trace=selection_section["trace"],
+            trajectory_trace=trajectory_section["trace"],
+            trajectory_heuristics=list(trajectory_section["heuristics"]),
+        )
+    registration_section = _build_longitudinal_registration_section(
+        state,
+        analysis,
+        descriptor,
+        primary_prior=selection_section["primary_prior"],
+        prior_admissibility_status=(
+            TEMPORAL_PRIOR_ADMISSIBLE
+            if selection_section["primary_prior"] is not None
+            else TEMPORAL_PRIOR_INADMISSIBLE
+        ),
+    )
+    if selection_section["primary_prior"] is None:
+        return _build_temporal_no_primary_section(
+            state,
+            analysis,
+            descriptor,
+            supplied_priors=selection_section["supplied_priors"],
+            selection_section=selection_section,
+            trajectory_trace=trajectory_section["trace"],
+            trajectory_heuristics=list(trajectory_section["heuristics"]),
+            registration_trace=registration_section["trace"],
+        )
+    return _build_temporal_primary_section(
+        state,
+        analysis,
+        descriptor,
+        supplied_priors=selection_section["supplied_priors"],
+        primary_prior=selection_section["primary_prior"],
+        selection_trace=selection_section["trace"],
+        trajectory_trace=trajectory_section["trace"],
+        trajectory_heuristics=list(trajectory_section["heuristics"]),
+        registration_trace=registration_section["trace"],
+        transformed_prior_mask=registration_section["transformed_prior_mask"],
+    )
+
+
 def _build_verified_manifest(
     state: Mapping[str, Any],
     analysis: Mapping[str, Any],
@@ -3479,6 +5037,9 @@ def _build_clinical_plausibility_manifest(
         "advisories": advisories,
         "blocking_failures": blocking_failures,
         "heuristics": heuristics,
+        "longitudinal_selection": deepcopy(temporal_consistency["selection_trace"]),
+        "temporal_trajectory": deepcopy(temporal_consistency["trajectory_trace"]),
+        "longitudinal_registration": deepcopy(temporal_consistency["registration_trace"]),
         "temporal_consistency": deepcopy(temporal_consistency["trace"]),
     }
 
@@ -3590,6 +5151,12 @@ def _build_structural_validity_checks(
             label="Prior verified context",
             failure=_check_prior_verified_context(state),
             success_message="prior_verified_context is absent or canonically valid for longitudinal comparison.",
+        ),
+        _invariant_check_result(
+            code="prior_verified_contexts_valid",
+            label="Prior verified context set",
+            failure=_check_prior_verified_contexts(state),
+            success_message="prior_verified_contexts is absent or canonically valid for longitudinal comparison.",
         ),
     ]
     checks.extend(_numeric_field_checks(state))
@@ -4873,7 +6440,11 @@ def _build_claim_to_proof_contracts(
         "verified_reconstruction_trace": verified_reconstruction_trace,
         "mask_derivation_policy": mask_derivation_policy,
         "verification_tolerance_policy": verification_tolerance_policy,
+        "prior_verified_contexts": temporal_consistency["prior_verified_contexts"],
         "prior_verified_context": prior_verified_context,
+        "longitudinal_selection_trace": temporal_consistency["selection_trace"],
+        "temporal_trajectory_trace": temporal_consistency["trajectory_trace"],
+        "longitudinal_registration_trace": temporal_consistency["registration_trace"],
         "temporal_consistency_trace": temporal_consistency["trace"],
     }
 

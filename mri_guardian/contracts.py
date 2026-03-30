@@ -675,6 +675,7 @@ class TemporalConsistencyTrace:
     profile_digest: str
     comparison_status: str
     comparison_scope: str
+    spatial_comparison_mode: str
     prior_admissibility: dict[str, Any]
     chronology_assessment: dict[str, Any]
     geometry_assessment: dict[str, Any]
@@ -692,6 +693,7 @@ class TemporalConsistencyTrace:
             "profile_digest": self.profile_digest,
             "comparison_status": self.comparison_status,
             "comparison_scope": self.comparison_scope,
+            "spatial_comparison_mode": self.spatial_comparison_mode,
             "prior_admissibility": deepcopy(self.prior_admissibility),
             "chronology_assessment": deepcopy(self.chronology_assessment),
             "geometry_assessment": deepcopy(self.geometry_assessment),
@@ -699,6 +701,140 @@ class TemporalConsistencyTrace:
             "flags": list(self.flags),
             "skipped_metrics": [deepcopy(item) for item in self.skipped_metrics],
         }
+
+
+@dataclass(frozen=True)
+class LongitudinalSelectionTrace:
+    """Deterministic selection trace for longitudinal prior selection."""
+
+    case_id: str
+    profile_name: str
+    profile_revision: str
+    profile_digest: str
+    supplied_prior_count: int
+    selected_prior_count: int
+    primary_prior_bundle_sha256: str | None
+    primary_selection_mode: str
+    entries: tuple[dict[str, Any], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "LongitudinalSelectionTrace",
+            "interface_version": "2026.03",
+            "case_id": self.case_id,
+            "profile_name": self.profile_name,
+            "profile_revision": self.profile_revision,
+            "profile_digest": self.profile_digest,
+            "supplied_prior_count": self.supplied_prior_count,
+            "selected_prior_count": self.selected_prior_count,
+            "primary_prior_bundle_sha256": self.primary_prior_bundle_sha256,
+            "primary_selection_mode": self.primary_selection_mode,
+            "entries": [deepcopy(item) for item in self.entries],
+        }
+
+
+@dataclass(frozen=True)
+class TemporalTrajectoryTrace:
+    """Deterministic multi-prior trajectory trace for Level 3 longitudinal review."""
+
+    case_id: str
+    profile_name: str
+    profile_revision: str
+    profile_digest: str
+    selected_prior_count: int
+    usable_interval_count: int
+    trajectory_class: str
+    aggregate_metrics: dict[str, Any]
+    interval_summaries: tuple[dict[str, Any], ...]
+    flags: tuple[str, ...]
+    skipped_metrics: tuple[dict[str, Any], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "TemporalTrajectoryTrace",
+            "interface_version": "2026.03",
+            "case_id": self.case_id,
+            "profile_name": self.profile_name,
+            "profile_revision": self.profile_revision,
+            "profile_digest": self.profile_digest,
+            "selected_prior_count": self.selected_prior_count,
+            "usable_interval_count": self.usable_interval_count,
+            "trajectory_class": self.trajectory_class,
+            "aggregate_metrics": deepcopy(self.aggregate_metrics),
+            "interval_summaries": [deepcopy(item) for item in self.interval_summaries],
+            "flags": list(self.flags),
+            "skipped_metrics": [deepcopy(item) for item in self.skipped_metrics],
+        }
+
+
+@dataclass(frozen=True)
+class LongitudinalRegistrationTrace:
+    """Deterministic registration trace for current-vs-primary temporal alignment."""
+
+    case_id: str
+    profile_name: str
+    profile_revision: str
+    profile_digest: str
+    prior_bundle_sha256: str | None
+    status: str
+    blocking_admissible: bool
+    algorithm: dict[str, Any]
+    transform: dict[str, Any] | None
+    quality: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "LongitudinalRegistrationTrace",
+            "interface_version": "2026.03",
+            "case_id": self.case_id,
+            "profile_name": self.profile_name,
+            "profile_revision": self.profile_revision,
+            "profile_digest": self.profile_digest,
+            "prior_bundle_sha256": self.prior_bundle_sha256,
+            "status": self.status,
+            "blocking_admissible": self.blocking_admissible,
+            "algorithm": deepcopy(self.algorithm),
+            "transform": deepcopy(self.transform),
+            "quality": deepcopy(self.quality),
+        }
+
+
+@dataclass(frozen=True)
+class StudyTemporalAggregationTrace:
+    """Deterministic study-level aggregation of per-series temporal outputs."""
+
+    case_id: str
+    required_series_ids: tuple[str, ...]
+    auxiliary_series_ids: tuple[str, ...]
+    per_series: tuple[dict[str, Any], ...]
+    final_temporal_disposition: str
+    top_flags: tuple[str, ...]
+    top_reason_codes: tuple[str, ...]
+    gating_summary: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interface_type": "StudyTemporalAggregationTrace",
+            "interface_version": "2026.03",
+            "case_id": self.case_id,
+            "required_series_ids": list(self.required_series_ids),
+            "auxiliary_series_ids": list(self.auxiliary_series_ids),
+            "per_series": [deepcopy(item) for item in self.per_series],
+            "final_temporal_disposition": self.final_temporal_disposition,
+            "top_flags": list(self.top_flags),
+            "top_reason_codes": list(self.top_reason_codes),
+            "gating_summary": deepcopy(self.gating_summary),
+        }
+
+
+def canonicalise_prior_verified_contexts(
+    payload: Any,
+) -> list[dict[str, Any]] | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, list):
+        raise ValueError("prior_verified_contexts must be a list.")
+    return [build_prior_verified_context(item) for item in payload]
 
 
 def canonicalise_prior_verified_context(
@@ -1081,6 +1217,7 @@ def build_temporal_consistency_trace(
     profile_digest: str,
     comparison_status: str,
     comparison_scope: str,
+    spatial_comparison_mode: str,
     prior_admissibility: Mapping[str, Any],
     chronology_assessment: Mapping[str, Any],
     geometry_assessment: Mapping[str, Any],
@@ -1095,10 +1232,117 @@ def build_temporal_consistency_trace(
         profile_digest=str(profile_digest),
         comparison_status=str(comparison_status),
         comparison_scope=str(comparison_scope),
+        spatial_comparison_mode=str(spatial_comparison_mode),
         prior_admissibility=dict(prior_admissibility),
         chronology_assessment=dict(chronology_assessment),
         geometry_assessment=dict(geometry_assessment),
         computed_metrics=dict(computed_metrics),
         flags=tuple(str(item) for item in flags),
         skipped_metrics=tuple(dict(item) for item in skipped_metrics),
+    ).to_dict()
+
+
+def build_longitudinal_selection_trace(
+    *,
+    case_id: str,
+    profile_name: str,
+    profile_revision: str,
+    profile_digest: str,
+    supplied_prior_count: int,
+    selected_prior_count: int,
+    primary_prior_bundle_sha256: str | None,
+    primary_selection_mode: str,
+    entries: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    return LongitudinalSelectionTrace(
+        case_id=str(case_id),
+        profile_name=str(profile_name),
+        profile_revision=str(profile_revision),
+        profile_digest=str(profile_digest),
+        supplied_prior_count=int(supplied_prior_count),
+        selected_prior_count=int(selected_prior_count),
+        primary_prior_bundle_sha256=(
+            None if primary_prior_bundle_sha256 is None else str(primary_prior_bundle_sha256)
+        ),
+        primary_selection_mode=str(primary_selection_mode),
+        entries=tuple(dict(item) for item in entries),
+    ).to_dict()
+
+
+def build_temporal_trajectory_trace(
+    *,
+    case_id: str,
+    profile_name: str,
+    profile_revision: str,
+    profile_digest: str,
+    selected_prior_count: int,
+    usable_interval_count: int,
+    trajectory_class: str,
+    aggregate_metrics: Mapping[str, Any],
+    interval_summaries: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    flags: list[str] | tuple[str, ...],
+    skipped_metrics: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    return TemporalTrajectoryTrace(
+        case_id=str(case_id),
+        profile_name=str(profile_name),
+        profile_revision=str(profile_revision),
+        profile_digest=str(profile_digest),
+        selected_prior_count=int(selected_prior_count),
+        usable_interval_count=int(usable_interval_count),
+        trajectory_class=str(trajectory_class),
+        aggregate_metrics=dict(aggregate_metrics),
+        interval_summaries=tuple(dict(item) for item in interval_summaries),
+        flags=tuple(str(item) for item in flags),
+        skipped_metrics=tuple(dict(item) for item in skipped_metrics),
+    ).to_dict()
+
+
+def build_longitudinal_registration_trace(
+    *,
+    case_id: str,
+    profile_name: str,
+    profile_revision: str,
+    profile_digest: str,
+    prior_bundle_sha256: str | None,
+    status: str,
+    blocking_admissible: bool,
+    algorithm: Mapping[str, Any],
+    transform: Mapping[str, Any] | None,
+    quality: Mapping[str, Any],
+) -> dict[str, Any]:
+    return LongitudinalRegistrationTrace(
+        case_id=str(case_id),
+        profile_name=str(profile_name),
+        profile_revision=str(profile_revision),
+        profile_digest=str(profile_digest),
+        prior_bundle_sha256=None if prior_bundle_sha256 is None else str(prior_bundle_sha256),
+        status=str(status),
+        blocking_admissible=bool(blocking_admissible),
+        algorithm=dict(algorithm),
+        transform=None if transform is None else dict(transform),
+        quality=dict(quality),
+    ).to_dict()
+
+
+def build_study_temporal_aggregation_trace(
+    *,
+    case_id: str,
+    required_series_ids: list[str] | tuple[str, ...],
+    auxiliary_series_ids: list[str] | tuple[str, ...],
+    per_series: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    final_temporal_disposition: str,
+    top_flags: list[str] | tuple[str, ...],
+    top_reason_codes: list[str] | tuple[str, ...],
+    gating_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    return StudyTemporalAggregationTrace(
+        case_id=str(case_id),
+        required_series_ids=tuple(str(item) for item in required_series_ids),
+        auxiliary_series_ids=tuple(str(item) for item in auxiliary_series_ids),
+        per_series=tuple(dict(item) for item in per_series),
+        final_temporal_disposition=str(final_temporal_disposition),
+        top_flags=tuple(str(item) for item in top_flags),
+        top_reason_codes=tuple(str(item) for item in top_reason_codes),
+        gating_summary=dict(gating_summary),
     ).to_dict()

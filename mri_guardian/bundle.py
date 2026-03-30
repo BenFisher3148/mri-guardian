@@ -44,8 +44,13 @@ _PROFILE_DESCRIPTOR_NAME = "verification_profile_descriptor.json"
 _TRANSCRIPT_NAME = "transcript.json"
 _REPLAY_DESCRIPTOR_NAME = "replay.json"
 _TRANSPARENCY_LOG_NAME = "transparency-log.jsonl"
+_PRIOR_VERIFIED_CONTEXTS_NAME = "prior_verified_contexts.json"
 _PRIOR_VERIFIED_CONTEXT_NAME = "prior_verified_context.json"
+_LONGITUDINAL_SELECTION_TRACE_NAME = "longitudinal_selection_trace.json"
+_TEMPORAL_TRAJECTORY_TRACE_NAME = "temporal_trajectory_trace.json"
+_LONGITUDINAL_REGISTRATION_TRACE_NAME = "longitudinal_registration_trace.json"
 _TEMPORAL_CONSISTENCY_TRACE_NAME = "temporal_consistency_trace.json"
+_STUDY_TEMPORAL_AGGREGATION_TRACE_NAME = "study_temporal_aggregation_trace.json"
 _REQUIRED_BUNDLE_MEMBERS = (
     _BUNDLE_MANIFEST_NAME,
     _SIGNATURES_NAME,
@@ -60,8 +65,13 @@ _REQUIRED_BUNDLE_MEMBERS = (
     _TRANSPARENCY_LOG_NAME,
 )
 _OPTIONAL_BUNDLE_MEMBERS = (
+    _PRIOR_VERIFIED_CONTEXTS_NAME,
     _PRIOR_VERIFIED_CONTEXT_NAME,
+    _LONGITUDINAL_SELECTION_TRACE_NAME,
+    _TEMPORAL_TRAJECTORY_TRACE_NAME,
+    _LONGITUDINAL_REGISTRATION_TRACE_NAME,
     _TEMPORAL_CONSISTENCY_TRACE_NAME,
+    _STUDY_TEMPORAL_AGGREGATION_TRACE_NAME,
 )
 
 
@@ -136,7 +146,7 @@ def write_portable_evidence_bundle(
         _REPLAY_DESCRIPTOR_NAME: _json_bytes(replay_descriptor),
         _TRANSPARENCY_LOG_NAME: log_snapshot["bytes"],
     }
-    members.update(_build_single_series_optional_bundle_members(report))
+    members.update(_build_optional_bundle_members(report))
     signatures = _build_signature_catalog(members)
     members[_SIGNATURES_NAME] = _json_bytes(signatures)
 
@@ -215,7 +225,7 @@ def verify_portable_evidence_bundle(bundle_path: Path | str) -> dict[str, Any]:
         if not expected_report["release_eligible"]:
             failures.append("released_state.json is not release-eligible.")
 
-        expected_optional_members = _build_single_series_optional_bundle_members(expected_report)
+        expected_optional_members = _build_optional_bundle_members(expected_report)
         for member_name in expected_optional_members:
             if member_name not in member_bytes:
                 failures.append(f"Bundle is missing expected optional member {member_name!r}.")
@@ -352,7 +362,10 @@ def _build_bundle_manifest(
     analysis = report["analysis"]
     contracts = report["contracts"]
     members = list(_REQUIRED_BUNDLE_MEMBERS)
-    if contracts.get("prior_verified_context") is not None:
+    if (
+        contracts.get("prior_verified_context") is not None
+        or contracts.get("prior_verified_contexts") is not None
+    ):
         members.extend(_OPTIONAL_BUNDLE_MEMBERS)
     hashes = {
         "verification_profile_descriptor_hash": hash_canonical_json(
@@ -389,8 +402,18 @@ def _build_bundle_manifest(
         ],
     }
     prior_verified_context = contracts.get("prior_verified_context")
+    prior_verified_contexts = contracts.get("prior_verified_contexts")
+    if prior_verified_contexts is not None:
+        hashes["prior_verified_contexts_hash"] = hash_canonical_json(prior_verified_contexts)
     if prior_verified_context is not None:
         hashes["prior_verified_context_hash"] = hash_canonical_json(prior_verified_context)
+    for key, hash_name in (
+        ("longitudinal_selection_trace", "longitudinal_selection_trace_hash"),
+        ("temporal_trajectory_trace", "temporal_trajectory_trace_hash"),
+        ("longitudinal_registration_trace", "longitudinal_registration_trace_hash"),
+    ):
+        if contracts.get(key) is not None:
+            hashes[hash_name] = hash_canonical_json(contracts[key])
     return {
         "schema_version": _BUNDLE_SCHEMA_VERSION,
         "bundle_type": "mri_guard_bundle",
@@ -615,14 +638,49 @@ def _build_single_series_optional_bundle_members(
         return {}
     contracts = report["contracts"]
     prior_verified_context = contracts.get("prior_verified_context")
-    if prior_verified_context is None:
+    prior_verified_contexts = contracts.get("prior_verified_contexts")
+    if prior_verified_context is None and prior_verified_contexts is None:
         return {}
-    return {
-        _PRIOR_VERIFIED_CONTEXT_NAME: _json_bytes(prior_verified_context),
+    members = {
+        _LONGITUDINAL_SELECTION_TRACE_NAME: _json_bytes(
+            contracts["longitudinal_selection_trace"]
+        ),
+        _TEMPORAL_TRAJECTORY_TRACE_NAME: _json_bytes(
+            contracts["temporal_trajectory_trace"]
+        ),
+        _LONGITUDINAL_REGISTRATION_TRACE_NAME: _json_bytes(
+            contracts["longitudinal_registration_trace"]
+        ),
         _TEMPORAL_CONSISTENCY_TRACE_NAME: _json_bytes(
             contracts["temporal_consistency_trace"]
         ),
     }
+    if prior_verified_contexts is not None:
+        members[_PRIOR_VERIFIED_CONTEXTS_NAME] = _json_bytes(prior_verified_contexts)
+    if prior_verified_context is not None:
+        members[_PRIOR_VERIFIED_CONTEXT_NAME] = _json_bytes(prior_verified_context)
+    return members
+
+
+def _build_multi_series_optional_bundle_members(
+    report: Mapping[str, Any],
+) -> dict[str, bytes]:
+    if report.get("analysis", {}).get("series") is None:
+        return {}
+    trace = report["contracts"].get("study_temporal_aggregation_trace")
+    if trace is None:
+        return {}
+    return {
+        _STUDY_TEMPORAL_AGGREGATION_TRACE_NAME: _json_bytes(trace),
+    }
+
+
+def _build_optional_bundle_members(
+    report: Mapping[str, Any],
+) -> dict[str, bytes]:
+    members = dict(_build_single_series_optional_bundle_members(report))
+    members.update(_build_multi_series_optional_bundle_members(report))
+    return members
 
 
 def _ordered_bundle_member_names(member_names: Mapping[str, Any] | set[str] | tuple[str, ...]) -> list[str]:
@@ -929,6 +987,9 @@ def _build_multi_series_bundle_manifest(
             ),
             "cross_series_verification_trace_hash": hash_canonical_json(
                 contracts["cross_series_verification_trace"]
+            ),
+            "study_temporal_aggregation_trace_hash": hash_canonical_json(
+                contracts["study_temporal_aggregation_trace"]
             ),
             "series_manifest_hashes": [
                 {

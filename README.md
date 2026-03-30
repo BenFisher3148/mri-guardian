@@ -66,20 +66,32 @@ The repository now also supports an additive `multi_series_v2` study container. 
 - same-grid geometry uses exact equality over canonicalized voxel spacing plus voxel shape
 - positive-lesion corroboration uses exact coordinate intersection count `> 0`
 
-Single-series Level 3 now also supports an optional longitudinal layer. When callers supply one admissible `prior_verified_context`, the report emits a canonical `TemporalConsistencyTrace` with explicit:
+Single-series Level 3 now also supports an optional longitudinal layer. When callers supply longitudinal context, the report emits:
+
+- one selected-primary alias in `prior_verified_context`
+- an optional canonical source list in `prior_verified_contexts`
+- `LongitudinalSelectionTrace`
+- `TemporalTrajectoryTrace`
+- `LongitudinalRegistrationTrace`
+- `TemporalConsistencyTrace`
+
+These surfaces make prior selection, trajectory interpretation, registration quality, and current-vs-primary comparison explicit rather than inferred from prose. The temporal layer now records:
 
 - timestamp trust classes and deterministic pair-provenance derivation
 - `comparison_status` (`not_evaluated`, `aligned`, `degraded`, `unsuitable`)
 - `comparison_scope` (`not_evaluated`, `full`, `volume_only`, `none`)
+- `spatial_comparison_mode` (`exact`, `registered`, `volume_only`, `none`)
 - chronology, geometry, metric, flag, and skipped-metric detail
 
-V1 longitudinal rules are intentionally narrow:
+Longitudinal policy is intentionally staged:
 
-- temporal findings are advisory only and do not change the hard release gate
-- exactly one prior comparator is supported
+- multi-prior trajectory analysis remains Level 3 only
+- `strict_research_mode` is the only shipped profile that can promote certain temporal warnings into blocking failures
+- all other profiles keep temporal findings advisory
 - `<= 730` days is the preferred aligned band, `731-3650` days is degraded-but-usable, and `> 3650` days suppresses temporal comparison by policy
 - these interval bands express comparability confidence only, not clinical expectation
 - missing or untrusted timestamps suppress only time-dependent metrics; exact-geometry or scalar-volume comparison may still run as degraded
+- `multi_series_v2` now aggregates per-series temporal outputs into one study-level `StudyTemporalAggregationTrace`; only required series participate in study temporal gating semantics
 
 ## Runtime Profiles
 
@@ -246,8 +258,13 @@ Inspect the explicit claim-to-proof interfaces:
 - `demo_artifacts/verified_reconstruction_trace.json`
 - `demo_artifacts/mask_derivation_policy.json`
 - `demo_artifacts/verification_tolerance_policy.json`
-- `demo_artifacts/prior_verified_context.json` when a prior comparator is supplied
-- `demo_artifacts/temporal_consistency_trace.json` when a prior comparator is supplied
+- `demo_artifacts/prior_verified_contexts.json` when longitudinal source priors are supplied
+- `demo_artifacts/prior_verified_context.json` when a selected primary prior exists
+- `demo_artifacts/longitudinal_selection_trace.json` when longitudinal context is supplied
+- `demo_artifacts/temporal_trajectory_trace.json` when longitudinal context is supplied
+- `demo_artifacts/longitudinal_registration_trace.json` when longitudinal context is supplied
+- `demo_artifacts/temporal_consistency_trace.json` when longitudinal context is supplied
+- `demo_artifacts/study_temporal_aggregation_trace.json` for `multi_series_v2`
 
 Inspect the performance evidence:
 
@@ -305,7 +322,11 @@ That interface is now explicit rather than implied. The harness emits:
 - `VerificationProfileDescriptor`: the canonical runtime profile contract with `profile_name`, `profile_revision`, `profile_digest`, release semantics, authority requirements, heuristics, and performance expectations
 - `VerifiedReconstructionTrace`: the proof object that links the raw measurements, derived reconstruction, mask policy, and verified volume back to the original claim
 - `PriorVerifiedContext`: the compact canonical summary of one admissible prior Guardian-verified comparator
-- `TemporalConsistencyTrace`: the deterministic Level 3 longitudinal trace with chronology, geometry, signed change metrics, flags, and skipped-metric reasons
+- `LongitudinalSelectionTrace`: deterministic primary-prior selection over the supplied longitudinal source set
+- `TemporalTrajectoryTrace`: deterministic multi-prior trajectory classification, usable-interval summaries, and trajectory flags
+- `LongitudinalRegistrationTrace`: deterministic registration algorithm identity, transform payload, and quality outcome for current-vs-primary spatial comparison
+- `TemporalConsistencyTrace`: the deterministic current-vs-primary Level 3 temporal trace with chronology, geometry, signed change metrics, flags, and skipped-metric reasons
+- `StudyTemporalAggregationTrace`: deterministic study-level aggregation of per-series temporal outcomes in `multi_series_v2`
 
 When present, `ai_stack_identity` is canonical claim provenance rather than a new physical proof. Guardian canonicalizes and hashes the producer declaration into the claim identity, but it does not independently verify that the declared model stack itself is true.
 

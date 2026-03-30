@@ -75,10 +75,16 @@ For single-series cases with longitudinal context, those same mocked surfaces no
 
 - `temporal_comparison_status`
 - `temporal_comparison_scope`
+- `temporal_spatial_comparison_mode`
+- `temporal_primary_selection_mode`
+- `temporal_selected_prior_count`
+- `temporal_trajectory_class`
+- `temporal_registration_status`
 - `temporal_top_flags`
+- `temporal_trajectory_flags`
 - `temporal_top_reason_codes`
 
-These temporal fields are interoperability-facing confidence signals only. They do not change released versus blocked disposition in V1, and their interval bands should not be read as clinical expectation statements.
+These temporal fields are interoperability-facing confidence signals. In the shipped profile set, only `strict_research_mode` may promote certain temporal findings into blocking failures. For every other profile, longitudinal output remains advisory. The interval bands still express comparability confidence only, not clinical expectation statements.
 
 Mocked operational envelopes may also carry optional `ai_runtime_context`:
 
@@ -94,10 +100,15 @@ opening the full manifest. That visibility does not change the semantics:
 `ai_claim_envelope.ai_stack_identity` is canonical claim provenance, not runtime
 provenance and not independently verified model validity.
 
-When a prior comparator is supplied, single-series `proof_contracts` also carries
-`prior_verified_context` plus `temporal_consistency_trace` so downstream audit
-systems can consume the exact longitudinal contract without reparsing the full
-verification report.
+When longitudinal context is supplied, single-series `proof_contracts` also carries
+`prior_verified_contexts`, `prior_verified_context`, `longitudinal_selection_trace`,
+`temporal_trajectory_trace`, `longitudinal_registration_trace`, and
+`temporal_consistency_trace` so downstream audit systems can consume the exact
+longitudinal contract without reparsing the full verification report.
+
+For `multi_series_v2`, `proof_contracts` also carries
+`study_temporal_aggregation_trace` so study-level consumers can distinguish
+required-series temporal coverage from auxiliary-series informational output.
 
 For deterministic structural rejects, the mocked DICOM ingress and downstream trace artifacts still remain available even if proof-only contract members such as the AI claim envelope could not be derived. Those fields may therefore be absent or `null` on fail-soft structural examples.
 

@@ -173,7 +173,7 @@ Take extra care when touching:
 - canonical hashes and serialised outputs
 - runtime profile descriptor identity and digesting
 - tolerance policy and verification semantics
-- longitudinal timestamp trust classes, pair provenance, and geometry comparability matrices
+- longitudinal timestamp trust classes, multi-prior selection determinism, trajectory metrics, registration quality floors, and study temporal aggregation
 - released state shape
 - bundle member ordering and replayability
 - integration envelopes and PACS handoff behaviour

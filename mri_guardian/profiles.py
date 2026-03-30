@@ -339,6 +339,16 @@ def _profile(
     requires_operator_review_on_warning: bool,
     success_decision_class: str,
 ) -> VerificationProfileDescriptor:
+    resolved_temporal_rules = deepcopy(temporal_rules)
+    compatibility = dict(resolved_temporal_rules.get("sequence_compatibility_rules", {}))
+    compatibility["current_sequence_family"] = sequence_family
+    allowed_prior_sequence_families = compatibility.get("allowed_prior_sequence_families")
+    if not isinstance(allowed_prior_sequence_families, list) or not allowed_prior_sequence_families:
+        compatibility["allowed_prior_sequence_families"] = [sequence_family]
+    resolved_temporal_rules["sequence_compatibility_rules"] = compatibility
+    gating_rules = dict(resolved_temporal_rules.get("gating_rules", {}))
+    gating_rules["allow_blocking"] = bool(resolved_temporal_rules.get("allow_blocking", False))
+    resolved_temporal_rules["gating_rules"] = gating_rules
     return VerificationProfileDescriptor(
         profile_name=profile_name,
         profile_revision=DEFAULT_PROFILE_REVISION,
@@ -372,7 +382,7 @@ def _profile(
             "required_source_types": list(required_authority_source_types),
         },
         heuristic_rules=deepcopy(heuristic_rules),
-        temporal_rules=deepcopy(temporal_rules),
+        temporal_rules=resolved_temporal_rules,
         performance_expectations={
             "normative": False,
             "representative_total_ms_budget": float(representative_total_ms_budget),
@@ -401,6 +411,8 @@ def _heuristic(
 def _temporal_rules(
     *,
     enabled: bool = True,
+    allow_multiple_priors: bool = True,
+    allow_blocking: bool = False,
     aligned_interval_max_days: int = 730,
     degraded_interval_max_days: int = 3650,
     signed_volume_change_percent_advisory: float = 30.0,
@@ -415,10 +427,40 @@ def _temporal_rules(
     return {
         "enabled": bool(enabled),
         "same_sequence_family_required": True,
-        "allow_multiple_priors": False,
-        "allow_blocking": False,
+        "allow_multiple_priors": bool(allow_multiple_priors),
+        "allow_blocking": bool(allow_blocking),
         "aligned_interval_max_days": int(aligned_interval_max_days),
         "degraded_interval_max_days": int(degraded_interval_max_days),
+        "selection_rules": {
+            "max_selected_priors": 3,
+            "primary_fallback_enabled": True,
+        },
+        "trajectory_rules": {
+            "require_trusted_positive_nonzero_intervals": True,
+            "min_intervals_for_acceleration": 2,
+        },
+        "registration_rules": {
+            "enabled": True,
+            "algorithm": "integer_translation_mask_iou_v1",
+            "max_translation_voxels": 2,
+            "minimum_iou_for_spatial_use": 0.25,
+            "minimum_iou_for_blocking": 0.60,
+        },
+        "sequence_compatibility_rules": {
+            "current_sequence_family": None,
+            "allowed_prior_sequence_families": [],
+        },
+        "gating_rules": {
+            "allow_blocking": bool(allow_blocking),
+            "require_trusted_chronology": True,
+            "require_usable_primary_prior": True,
+            "blocking_trigger_codes": [
+                "temporal_volume_change_warning",
+                "temporal_growth_rate_warning",
+                "temporal_intersection_over_union_warning",
+                "temporal_centroid_shift_warning",
+            ],
+        },
         "metrics": {
             "signed_volume_change_percent": {
                 "advisory_abs_threshold": float(signed_volume_change_percent_advisory),
@@ -830,7 +872,7 @@ _PROFILES = {
                 threshold=3.0,
             ),
         },
-        temporal_rules=_temporal_rules(),
+        temporal_rules=_temporal_rules(allow_blocking=True),
         representative_total_ms_budget=95.0,
         worst_case_total_ms_budget=200.0,
         final_release_allowed=True,

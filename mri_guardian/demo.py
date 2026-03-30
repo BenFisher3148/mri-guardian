@@ -52,8 +52,13 @@ def run_demo(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     (output_path / "comparison_rejected_candidate.html").unlink(missing_ok=True)
+    (output_path / "prior_verified_contexts.json").unlink(missing_ok=True)
     (output_path / "prior_verified_context.json").unlink(missing_ok=True)
+    (output_path / "longitudinal_selection_trace.json").unlink(missing_ok=True)
+    (output_path / "temporal_trajectory_trace.json").unlink(missing_ok=True)
+    (output_path / "longitudinal_registration_trace.json").unlink(missing_ok=True)
     (output_path / "temporal_consistency_trace.json").unlink(missing_ok=True)
+    (output_path / "study_temporal_aggregation_trace.json").unlink(missing_ok=True)
     descriptor = get_verification_profile(profile_name)
     if case_kind == MULTI_SERIES_CASE_KIND:
         case_state = build_multi_series_demo_case()
@@ -272,6 +277,10 @@ def _write_multi_series_contract_artifacts(
     output_path: Path,
     report: dict[str, Any],
 ) -> None:
+    (output_path / "study_temporal_aggregation_trace.json").write_text(
+        f"{canonical_json_dumps(report['contracts']['study_temporal_aggregation_trace'])}\n",
+        encoding="utf-8",
+    )
     (output_path / "cross_series_verification_policy.json").write_text(
         f"{canonical_json_dumps(report['contracts']['cross_series_verification_policy'])}\n",
         encoding="utf-8",
@@ -305,11 +314,30 @@ def _write_single_series_temporal_artifacts(
     report: dict[str, Any],
 ) -> None:
     contracts = report["contracts"]
+    prior_verified_contexts = contracts.get("prior_verified_contexts")
     prior_verified_context = contracts.get("prior_verified_context")
-    if prior_verified_context is None:
+    if prior_verified_context is None and prior_verified_contexts is None:
         return
-    (output_path / "prior_verified_context.json").write_text(
-        f"{canonical_json_dumps(prior_verified_context)}\n",
+    if prior_verified_contexts is not None:
+        (output_path / "prior_verified_contexts.json").write_text(
+            f"{canonical_json_dumps(prior_verified_contexts)}\n",
+            encoding="utf-8",
+        )
+    if prior_verified_context is not None:
+        (output_path / "prior_verified_context.json").write_text(
+            f"{canonical_json_dumps(prior_verified_context)}\n",
+            encoding="utf-8",
+        )
+    (output_path / "longitudinal_selection_trace.json").write_text(
+        f"{canonical_json_dumps(contracts['longitudinal_selection_trace'])}\n",
+        encoding="utf-8",
+    )
+    (output_path / "temporal_trajectory_trace.json").write_text(
+        f"{canonical_json_dumps(contracts['temporal_trajectory_trace'])}\n",
+        encoding="utf-8",
+    )
+    (output_path / "longitudinal_registration_trace.json").write_text(
+        f"{canonical_json_dumps(contracts['longitudinal_registration_trace'])}\n",
         encoding="utf-8",
     )
     (output_path / "temporal_consistency_trace.json").write_text(

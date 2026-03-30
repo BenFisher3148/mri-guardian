@@ -94,11 +94,17 @@ The verified-mask layer uses a fixed approved algorithm catalogue and canonical 
 5. Compare the AI reconstruction with the raw-derived reconstruction using explicit per-voxel and global-norm tolerances.
 6. Resolve the runtime profile's mask policy canonically, derive the verified mask with the approved dispatcher, and compare it with the AI mask.
 7. Recompute tumour volume from verified voxels and voxel spacing.
-8. Optionally evaluate one admissible prior Guardian-verified comparator for Level 3 temporal consistency:
+8. Optionally evaluate Level 3 longitudinal context:
+   - deterministically canonicalize `prior_verified_contexts` or the legacy single `prior_verified_context`
+   - select an admissible primary prior with `LongitudinalSelectionTrace`
+   - compute `TemporalTrajectoryTrace` over the selected multi-prior history
+   - if needed, attempt deterministic registration for current-vs-primary spatial comparison and record `LongitudinalRegistrationTrace`
+   - emit `TemporalConsistencyTrace` for the current-vs-primary contract surface
    - current-case timestamps accept `trusted_study_metadata`, `missing`, or `untrusted`
    - prior timestamps accept `verified_bundle`, `trusted_study_metadata`, `missing`, or `untrusted`
    - exact geometry requires matching shape, voxel spacing, frame of reference, and canonicalized affine
-   - geometry-limited cases may fall back to scalar `volume_only` comparison
+   - affine-only mismatches may upgrade into deterministic `registered` comparison when registration quality passes the profile floor
+   - geometry-limited cases may otherwise fall back to scalar `volume_only` comparison
    - interval `> 3650` days suppresses all temporal comparison by policy
 9. If deterministic proof passes and the selected profile permits final release, emit:
    - `verified_manifest`
@@ -158,7 +164,9 @@ Deterministic reason ordering:
 | Level 2 | Physical consistency from raw k-space to reconstruction, mask, and volume | Yes |
 | Level 3 | Profile-scoped clinical plausibility heuristics | Profile-dependent |
 
-Within Level 3, longitudinal verification is now a first-class single-series sub-path. It consumes one `PriorVerifiedContext`, produces one `TemporalConsistencyTrace`, and surfaces `comparison_status` plus `comparison_scope` explicitly so viewer, integration, and replay code do not infer temporal meaning from prose.
+Within Level 3, longitudinal verification is now a first-class single-series sub-path. It consumes one or more `PriorVerifiedContext` payloads, produces `LongitudinalSelectionTrace`, `TemporalTrajectoryTrace`, `LongitudinalRegistrationTrace`, and `TemporalConsistencyTrace`, and surfaces `comparison_status`, `comparison_scope`, and `spatial_comparison_mode` explicitly so viewer, integration, and replay code do not infer temporal meaning from prose.
+
+In `multi_series_v2`, each payload series now carries its own optional temporal inputs. The study path verifies those per-series longitudinal results first, then aggregates them into `StudyTemporalAggregationTrace`. Only required series participate in study-level temporal gating semantics; auxiliary series remain informational.
 
 ## State Model
 
@@ -177,7 +185,7 @@ The Guardian Layer emits several artifact classes:
 
 - state artifacts: `released_state.json`, `workstation_payload.json`
 - proof artifacts: `evidence.json`, `bundle_verification.json`, `.mri-guard-bundle`
-- contract artifacts: `verification_profile.json`, `verification_profile_descriptor.json`, `ai_claim_envelope.json`, `verified_reconstruction_trace.json`, `mask_derivation_policy.json`, `verification_tolerance_policy.json`, plus `prior_verified_context.json` and `temporal_consistency_trace.json` when a prior comparator is supplied
+- contract artifacts: `verification_profile.json`, `verification_profile_descriptor.json`, `ai_claim_envelope.json`, `verified_reconstruction_trace.json`, `mask_derivation_policy.json`, `verification_tolerance_policy.json`, plus longitudinal artifacts such as `prior_verified_contexts.json`, `prior_verified_context.json`, `longitudinal_selection_trace.json`, `temporal_trajectory_trace.json`, `longitudinal_registration_trace.json`, and `temporal_consistency_trace.json` when longitudinal context is supplied
 - integration artifacts: `dicom_input.json`, `integration_narrative.json`, `pacs_submission.json`, `integration_trace.json`
 - performance artifacts: `performance_profile.json`
 
