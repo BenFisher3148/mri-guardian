@@ -434,6 +434,13 @@ Guardian Bundle V1 keeps a hard boundary between proof and replay surfaces:
 - `release_artifacts` is only a descriptor table for emitted artifacts and adds no new authority
 - `attachments` are never proof-critical in V1
 
+Compatibility-sensitive invariants are explicit:
+
+- `claim` stays declarative and identity-focused rather than summarizing proof success
+- `transparency-prefix.jsonl` is the minimal canonical UTF-8 JSONL prefix that precedes the anchored entry
+- `bundle_descriptor_hash` canonicalizes `bundle.json` with only `integrity_manifest` redacted
+- archive member order, `integrity_manifest.member_order`, and `integrity_manifest.member_hashes` order must agree exactly
+
 The replay layer makes the bundle regulator-friendly: `verify_bundle(...)` does not just check static integrity. It replays the release from the bundled `input_state.json` plus `transparency-prefix.jsonl`, then confirms that the regenerated released state, evidence payload, decision journal, and canonical bundle surfaces are identical.
 
 Replay identity now includes the embedded runtime profile descriptor. A verifier can therefore prove not just "the profile name was `brain_t1_baseline`" but "the exact canonical descriptor body used at runtime had this digest."

@@ -45,6 +45,51 @@ _PROFILE_ARTIFACT_NAMES = (
     "verification_profile.json",
     "verification_profile_descriptor.json",
 )
+_DEMO_CLEAN_FILES = (
+    "ai_claim_envelope.json",
+    "bundle_verification.json",
+    "comparison.html",
+    "comparison_rejected_candidate.html",
+    "cross_series_verification_policy.json",
+    "cross_series_verification_trace.json",
+    "decision_journal.json",
+    "dicom_input.json",
+    "evidence.json",
+    "integration_narrative.json",
+    "integration_trace.json",
+    "longitudinal_registration_trace.json",
+    "longitudinal_selection_trace.json",
+    "mask_derivation_policy.json",
+    "measurement_integrity_proof.json",
+    "pacs_submission.json",
+    "performance_profile.json",
+    "prior_verified_context.json",
+    "prior_verified_contexts.json",
+    "proof_core_evidence_trace.json",
+    "reconstruction_parity_proof.json",
+    "released_state.json",
+    "segmentation_policy_proof.json",
+    "series_contracts.json",
+    "study_temporal_aggregation_trace.json",
+    "temporal_consistency_trace.json",
+    "temporal_trajectory_trace.json",
+    "transparency-log.jsonl",
+    "verification_profile.json",
+    "verification_profile_descriptor.json",
+    "verification_report.json",
+    "verification_threat_corpus.json",
+    "verification_tolerance_policy.json",
+    "volume_computation_proof.json",
+    "workstation_payload.json",
+)
+_DEMO_CLEAN_GLOBS = (
+    "*.guardian-bundle",
+    "*.mri-guard-bundle",
+    "tamper_*.html",
+    "tamper_*_dicom_input.json",
+    "tamper_*_integration_trace.json",
+    "tamper_*_pacs_block.json",
+)
 
 
 def run_demo(
@@ -56,15 +101,7 @@ def run_demo(
 ) -> None:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    (output_path / "comparison_rejected_candidate.html").unlink(missing_ok=True)
-    (output_path / "prior_verified_contexts.json").unlink(missing_ok=True)
-    (output_path / "prior_verified_context.json").unlink(missing_ok=True)
-    (output_path / "longitudinal_selection_trace.json").unlink(missing_ok=True)
-    (output_path / "temporal_trajectory_trace.json").unlink(missing_ok=True)
-    (output_path / "longitudinal_registration_trace.json").unlink(missing_ok=True)
-    (output_path / "temporal_consistency_trace.json").unlink(missing_ok=True)
-    (output_path / "study_temporal_aggregation_trace.json").unlink(missing_ok=True)
-    (output_path / "verification_threat_corpus.json").unlink(missing_ok=True)
+    _clear_demo_artifacts(output_path)
     descriptor = get_verification_profile(profile_name)
     if case_kind == MULTI_SERIES_CASE_KIND:
         case_state = build_multi_series_demo_case()
@@ -326,6 +363,16 @@ def _write_decision_journal(output_path: Path, report: dict[str, Any]) -> None:
         f"{canonical_json_dumps(journal)}\n",
         encoding="utf-8",
     )
+
+
+def _clear_demo_artifacts(output_path: Path) -> None:
+    # Keep regenerated demo directories deterministic even when callers reuse the same path.
+    for filename in _DEMO_CLEAN_FILES:
+        (output_path / filename).unlink(missing_ok=True)
+    for pattern in _DEMO_CLEAN_GLOBS:
+        for path in output_path.glob(pattern):
+            if path.is_file():
+                path.unlink()
 
 
 def _write_profile_artifacts(output_path: Path, payload: dict[str, object]) -> None:

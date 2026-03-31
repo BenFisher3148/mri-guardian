@@ -338,8 +338,6 @@ def _build_multi_series_claim(*, state: Mapping[str, Any], report: Mapping[str, 
             {
                 "series_id": series_report["series_id"],
                 "series_uid": series_report["series_uid"],
-                "resolved_role": series_report["resolved_role"],
-                "gating_status": series_report["gating_status"],
                 "claim": _build_single_series_claim(series_report["contracts"]["ai_claim_envelope"]),
             }
             for series_report in report["series_reports"]
@@ -520,9 +518,6 @@ def _build_multi_series_replay_inputs(
         contracts = series_report["contracts"]
         payload: dict[str, Any] = {
             "series_id": series_report["series_id"],
-            "series_uid": series_report["series_uid"],
-            "resolved_role": series_report["resolved_role"],
-            "gating_status": series_report["gating_status"],
             "verification_profile_descriptor": deepcopy(contracts["verification_profile_descriptor"]),
             "mask_derivation_policy": deepcopy(contracts["mask_derivation_policy"]),
             "verification_tolerance_policy": deepcopy(contracts["verification_tolerance_policy"]),

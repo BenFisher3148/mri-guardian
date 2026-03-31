@@ -23,7 +23,13 @@ Guardian Bundle V1 keeps a strict surface split:
 - `release_artifacts` is only a descriptor table for emitted artifacts
 - `attachments` are optional auxiliary members and are never proof-critical in V1
 
-The canonical bundle removes `transcript.json`, `replay.json`, `signatures.json`, and the full bundled transparency-log snapshot. Instead it carries:
+Guardian Bundle V1 also freezes these compatibility-sensitive rules:
+
+- `transparency-prefix.jsonl` is the minimal canonical UTF-8 JSONL prefix required to recreate the anchored entry context
+- `bundle_descriptor_hash` is computed from canonical `bundle.json` with only `integrity_manifest` redacted and no other exclusions
+- archive member order, `integrity_manifest.member_order`, and `integrity_manifest.member_hashes` order must agree exactly
+
+The canonical bundle removes `transcript.json`, `replay.json`, `signatures.json`, and the full bundled transparency-log snapshot. If `transcript.json` is retained at all, it is only an external or demo-oriented artifact rather than a canonical bundle member. Instead the bundle carries:
 
 - canonical top-level sections in `bundle.json`
 - `input_state.json`

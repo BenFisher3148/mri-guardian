@@ -3962,12 +3962,27 @@ class MriGuardianHarnessTests(unittest.TestCase):
             output_path=bundle_path,
         )
         verification = verify_bundle(bundle_path)
+        with ZipFile(bundle_path, mode="r") as archive:
+            manifest = self._read_bundle_json(archive, "bundle.json")
+        first_series_claim = manifest["claim"]["series_claims"][0]
+        first_series_contract = manifest["replay_inputs"]["contracts"]["series_contracts"][0]
 
         self.assertEqual(dicom_input["study"]["case_kind"], MULTI_SERIES_CASE_KIND)
         self.assertEqual(pacs_submission["verification_summary"]["case_kind"], MULTI_SERIES_CASE_KIND)
         self.assertEqual(integration_trace["pipeline"][1]["case_kind"], MULTI_SERIES_CASE_KIND)
         self.assertTrue(verification["verified"])
         self.assertTrue(verification["details"]["replay_verified"])
+        self.assertNotIn("resolved_role", first_series_claim)
+        self.assertNotIn("gating_status", first_series_claim)
+        self.assertEqual(
+            set(first_series_contract),
+            {
+                "series_id",
+                "verification_profile_descriptor",
+                "mask_derivation_policy",
+                "verification_tolerance_policy",
+            },
+        )
 
     def test_run_demo_multi_series_emits_verified_artifacts(self) -> None:
         demo_root = self.runtime_root / "multi_series_demo"
@@ -3986,6 +4001,49 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertTrue((demo_root / "comparison.html").exists())
         self.assertTrue((demo_root / "decision_journal.json").exists())
         self.assertTrue((demo_root / "bundle_verification.json").exists())
+
+    def test_run_demo_reuses_output_directory_without_stale_bundle_artifacts(self) -> None:
+        demo_root = self.runtime_root / "reused_demo"
+
+        run_demo(
+            output_dir=demo_root,
+            tamper_mode=True,
+        )
+        (demo_root / "legacy.mri-guard-bundle").write_text("legacy", encoding="utf-8")
+        run_demo(
+            output_dir=demo_root,
+            case_kind=MULTI_SERIES_CASE_KIND,
+        )
+
+        present_after_multi = {path.name for path in demo_root.iterdir()}
+        guardian_bundles = sorted(path.name for path in demo_root.glob(f"*{GUARDIAN_BUNDLE_EXTENSION}"))
+        report = json.loads((demo_root / "verification_report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(guardian_bundles, ["mri-study-0001.guardian-bundle"])
+        self.assertNotIn("legacy.mri-guard-bundle", present_after_multi)
+        self.assertNotIn("ai_claim_envelope.json", present_after_multi)
+        self.assertNotIn("measurement_integrity_proof.json", present_after_multi)
+        self.assertIn("series_contracts.json", present_after_multi)
+        self.assertEqual(report["case_kind"], MULTI_SERIES_CASE_KIND)
+
+        run_demo(
+            output_dir=demo_root,
+            profile_name="fast_triage_mode",
+            tamper_mode=False,
+        )
+        present_after_triage = {path.name for path in demo_root.iterdir()}
+
+        self.assertEqual(
+            present_after_triage,
+            {
+                "comparison.html",
+                "decision_journal.json",
+                "performance_profile.json",
+                "verification_profile.json",
+                "verification_profile_descriptor.json",
+                "verification_report.json",
+            },
+        )
 
     def test_cli_verify_command_reports_directory_success(self) -> None:
         _, result = self._release_demo_case()
