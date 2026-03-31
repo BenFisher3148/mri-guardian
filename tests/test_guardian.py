@@ -27,6 +27,12 @@ from mri_guardian.bundle import (
     write_portable_evidence_bundle,
 )
 from mri_guardian.cli import run_test_command, run_verify_command
+from mri_guardian.dicom_model import (
+    DICOM_MODEL_SCHEMA_VERSION,
+    GUARDIAN_EXTENSION_NAMESPACE,
+    SIDECAR_TYPE_ICSD_EVIDENCE_JSON,
+    deterministic_uid,
+)
 from mri_guardian.demo import run_demo
 from mri_guardian.harness import (
     MRI_GUARDIAN_POLICY_NAME,
@@ -2170,8 +2176,13 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
 
         self.assertEqual(dicom_input["kind"], "mock_dicom_input")
-        self.assertEqual(dicom_input["study"]["case_id"], state["case_id"])
-        self.assertIsNone(dicom_input["ai_claim_envelope"])
+        self.assertEqual(dicom_input["schema_version"], DICOM_MODEL_SCHEMA_VERSION)
+        self.assertEqual(
+            dicom_input["study"]["extensions"][GUARDIAN_EXTENSION_NAMESPACE]["source_case_id"],
+            state["case_id"],
+        )
+        self.assertNotIn("ai_claim_envelope", dicom_input)
+        self.assertEqual(dicom_input["debug"]["guardian_case_snapshot"], state)
         self.assertEqual(
             integration_trace["pipeline"][1]["canonical_decision"]["decision_class"],
             "blocked_structural",
@@ -2191,7 +2202,10 @@ class MriGuardianHarnessTests(unittest.TestCase):
             report["verification_pipeline"]["phases"]["proof_core"]["status"],
             "not_evaluated",
         )
-        self.assertEqual(pacs_block["study"]["case_id"], "unknown-case")
+        self.assertEqual(
+            pacs_block["study"]["extensions"][GUARDIAN_EXTENSION_NAMESPACE]["source_case_id"],
+            "unknown-case",
+        )
         self.assertEqual(
             pacs_block["verification_summary"]["canonical_decision"]["decision_class"],
             "blocked_structural",
@@ -2208,7 +2222,12 @@ class MriGuardianHarnessTests(unittest.TestCase):
             pacs_output=pacs_block,
         )
 
-        self.assertEqual(dicom_input["study"]["series_uid"], "unknown-series")
+        self.assertEqual(
+            dicom_input["source_series"][0]["series"]["extensions"][GUARDIAN_EXTENSION_NAMESPACE][
+                "source_series_uid"
+            ],
+            "unknown-series",
+        )
         self.assertEqual(
             integration_trace["pipeline"][0]["series_uid"],
             "unknown-series",
@@ -2643,13 +2662,36 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
         dicom_input = build_mock_dicom_input(state)
         restored_state = restore_case_state_from_dicom_input(dicom_input)
+        reconstruction_group = next(
+            group
+            for group in dicom_input["source_series"]
+            if group["series"]["semantic_role"] == "source_reconstruction_series"
+        )
+        claim_group = next(
+            group
+            for group in dicom_input["source_series"]
+            if group["series"]["semantic_role"] == "source_claim_series"
+        )
 
         self.assertEqual(restored_state, state)
+        self.assertEqual(dicom_input["schema_version"], DICOM_MODEL_SCHEMA_VERSION)
         self.assertEqual(dicom_input["endpoint"]["destination_ae_title"], "MRI-GUARDIAN-LAYER")
-        self.assertEqual(dicom_input["objects"][0]["role"], "raw_kspace")
-        self.assertEqual(dicom_input["ai_claim_envelope"]["interface_type"], "AIClaimEnvelope")
         self.assertEqual(
-            dicom_input["verification_profile_descriptor"]["profile_name"],
+            dicom_input["study"]["extensions"][GUARDIAN_EXTENSION_NAMESPACE]["source_case_id"],
+            state["case_id"],
+        )
+        self.assertEqual(
+            reconstruction_group["acquisition_provenance"][0]["object_kind"],
+            "acquisition_provenance",
+        )
+        self.assertEqual(
+            claim_group["instances"][0]["document_kind"],
+            "ai_volume_claim_sr_like",
+        )
+        self.assertEqual(
+            dicom_input["debug"]["guardian_case_snapshot"]["verification_profile_descriptor"][
+                "profile_name"
+            ],
             DEFAULT_PROFILE_NAME,
         )
         self.assertEqual(
@@ -2662,12 +2704,18 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
         dicom_input = build_mock_dicom_input(state)
         restored_state = restore_case_state_from_dicom_input(dicom_input)
+        claim_group = next(
+            group
+            for group in dicom_input["source_series"]
+            if group["series"]["semantic_role"] == "source_claim_series"
+        )
 
         self.assertEqual(restored_state, state)
         self.assertEqual(
-            dicom_input["ai_claim_envelope"]["ai_stack_identity"],
+            dicom_input["debug"]["guardian_case_snapshot"]["ai_stack_identity"],
             state["ai_stack_identity"],
         )
+        self.assertNotIn("ai_stack_identity", canonical_json_dumps(claim_group))
 
     def test_mock_pacs_submission_exposes_verified_handoff_contract(self) -> None:
         _, result = self._release_demo_case()
@@ -2695,7 +2743,18 @@ class MriGuardianHarnessTests(unittest.TestCase):
             pacs_submission["proof_contracts"]["verification_profile_descriptor"]["profile_name"],
             DEFAULT_PROFILE_NAME,
         )
-        self.assertEqual(pacs_submission["series"][0]["role"], "verified_reconstruction")
+        self.assertEqual(
+            [group["series"]["semantic_role"] for group in pacs_submission["released_series"]],
+            [
+                "verified_reconstruction_series",
+                "verified_segmentation_series",
+                "guardian_verification_manifest_series",
+            ],
+        )
+        self.assertEqual(
+            pacs_submission["sidecars"][0]["sidecar_type"],
+            SIDECAR_TYPE_ICSD_EVIDENCE_JSON,
+        )
         self.assertEqual(
             pacs_submission["integration_narrative"]["failure_mode"]["current_guardian_decision"],
             "released",
@@ -2703,6 +2762,92 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(integration_trace["pipeline"][0]["label"], "DICOM Input")
         self.assertEqual(integration_trace["pipeline"][1]["decision_class"], "final_release_candidate")
         self.assertEqual(integration_trace["pipeline"][2]["label"], "PACS Output")
+
+    def test_dicom_uid_generation_is_stable_and_separates_object_identity_classes(self) -> None:
+        shared_seed = {"source_case_id": "case-1", "source_study_key": "study-1"}
+        study_uid = deterministic_uid(object_kind="study", seed=shared_seed)
+        same_study_uid = deterministic_uid(
+            object_kind="study",
+            seed={"source_study_key": "study-1", "source_case_id": "case-1"},
+        )
+        series_uid = deterministic_uid(object_kind="series", seed=shared_seed)
+        child_uid = deterministic_uid(
+            object_kind="instance",
+            seed={
+                "parent_series_uid": series_uid,
+                "semantic_role": "verified_reconstruction_image",
+                "content_hash": "a" * 64,
+            },
+        )
+        different_parent_child_uid = deterministic_uid(
+            object_kind="instance",
+            seed={
+                "parent_series_uid": deterministic_uid(
+                    object_kind="series",
+                    seed={"source_case_id": "case-1", "source_study_key": "study-2"},
+                ),
+                "semantic_role": "verified_reconstruction_image",
+                "content_hash": "a" * 64,
+            },
+        )
+
+        self.assertEqual(study_uid, same_study_uid)
+        self.assertNotEqual(study_uid, series_uid)
+        self.assertNotEqual(child_uid, different_parent_child_uid)
+
+    def test_mock_dicom_input_rejects_guardian_fields_outside_extension_namespace(self) -> None:
+        dicom_input = build_mock_dicom_input(build_demo_case())
+        dicom_input["study"]["case_kind"] = "single_series_v1"
+
+        with self.assertRaisesRegex(ValueError, "outside the Guardian extension container"):
+            restore_case_state_from_dicom_input(dicom_input)
+
+    def test_mock_dicom_input_rejects_unknown_guardian_extension_keys(self) -> None:
+        dicom_input = build_mock_dicom_input(build_demo_case())
+        dicom_input["study"]["extensions"][GUARDIAN_EXTENSION_NAMESPACE]["unexpected"] = "value"
+
+        with self.assertRaisesRegex(ValueError, "contains unsupported fields"):
+            restore_case_state_from_dicom_input(dicom_input)
+
+    def test_restore_case_state_requires_quarantined_debug_snapshot_only(self) -> None:
+        dicom_input = build_mock_dicom_input(build_demo_case())
+        reviewer_surface = {key: value for key, value in dicom_input.items() if key != "debug"}
+
+        self.assertNotIn("guardian_case_snapshot", canonical_json_dumps(reviewer_surface))
+        dicom_input["debug"] = {}
+
+        with self.assertRaisesRegex(ValueError, "missing debug.guardian_case_snapshot"):
+            restore_case_state_from_dicom_input(dicom_input)
+
+    def test_mock_dicom_input_preserves_frame_of_reference_honesty(self) -> None:
+        state = self._attach_temporal_metadata(
+            build_demo_case(),
+            study_acquired_at="2025-01-01T00:00:00Z",
+            study_timestamp_provenance="trusted_study_metadata",
+        )
+
+        dicom_input = build_mock_dicom_input(state)
+        reconstruction_group = next(
+            group
+            for group in dicom_input["source_series"]
+            if group["series"]["semantic_role"] == "source_reconstruction_series"
+        )
+        segmentation_group = next(
+            group
+            for group in dicom_input["source_series"]
+            if group["series"]["semantic_role"] == "source_segmentation_series"
+        )
+
+        self.assertNotIn("frame_of_reference_uid", reconstruction_group["series"])
+        self.assertNotIn("frame_of_reference_uid", segmentation_group["series"])
+        self.assertEqual(
+            reconstruction_group["lineage"]["frame_of_reference_status"],
+            "upstream_non_dicom_uid",
+        )
+        self.assertEqual(
+            segmentation_group["lineage"]["frame_of_reference_status"],
+            "upstream_non_dicom_uid",
+        )
 
     def test_single_series_proof_contracts_include_ai_claim_envelope(self) -> None:
         state = self._attach_ai_stack_identity(build_demo_case())
@@ -3967,9 +4112,13 @@ class MriGuardianHarnessTests(unittest.TestCase):
         first_series_claim = manifest["claim"]["series_claims"][0]
         first_series_contract = manifest["replay_inputs"]["contracts"]["series_contracts"][0]
 
-        self.assertEqual(dicom_input["study"]["case_kind"], MULTI_SERIES_CASE_KIND)
+        self.assertEqual(
+            dicom_input["study"]["extensions"][GUARDIAN_EXTENSION_NAMESPACE]["case_kind"],
+            MULTI_SERIES_CASE_KIND,
+        )
         self.assertEqual(pacs_submission["verification_summary"]["case_kind"], MULTI_SERIES_CASE_KIND)
         self.assertEqual(integration_trace["pipeline"][1]["case_kind"], MULTI_SERIES_CASE_KIND)
+        self.assertNotIn("profile_name", pacs_submission["verification_summary"])
         self.assertTrue(verification["verified"])
         self.assertTrue(verification["details"]["replay_verified"])
         self.assertNotIn("resolved_role", first_series_claim)

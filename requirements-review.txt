@@ -3,3 +3,4 @@ dpa-icsd[speed-numba,speed-extensions]==1.1.0
 numpy==2.4.3
 numba==0.64.0
 cython==3.2.4
+pydicom==3.0.2

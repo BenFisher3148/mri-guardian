@@ -1,10 +1,10 @@
 # Interoperability
 
-This document explains how the MRI Guardian Layer fits into hospital imaging infrastructure and how the current repository models DICOM and PACS interaction.
+This document explains how the MRI Guardian Layer fits into hospital imaging infrastructure and how the repository now models mocked DICOM and PACS interaction.
 
 ## Interoperability Goal
 
-The Guardian Layer should be understandable to hospital stakeholders as a verification proxy, not as a replacement clinical system. It must therefore answer three questions clearly:
+The Guardian Layer should be understandable to hospital stakeholders as a verification proxy, not as a replacement clinical system. The interoperability model therefore focuses on three questions:
 
 - what DICOM-shaped objects move through the boundary
 - where the Guardian Layer sits in the network
@@ -18,126 +18,185 @@ MRI scanner --> reconstruction AI --> MRI Guardian Layer --> PACS / VNA --> work
 
 Expected operational role:
 
-- upstream: MRI scanner and raw MRI reconstruction AI
+- upstream: MRI scanner and reconstruction AI
 - midstream: Guardian Layer verification proxy AE on the imaging network
 - downstream: PACS, VNA, and radiologist workstation
 
 The Guardian Layer is intended to sit after the AI and before downstream import. That makes it a gateway or sidecar service rather than a replacement PACS or workstation.
 
-## DICOM Compliance Story
+## DICOM-Shaped Model
 
-The repository currently uses mocked DICOM narratives in [`mri_guardian/integration.py`](../mri_guardian/integration.py). The story is:
+The repository now uses a deterministic study-centred graph in [`mri_guardian/dicom_model.py`](../mri_guardian/dicom_model.py) and [`mri_guardian/integration.py`](../mri_guardian/integration.py). The current mock schema version is `0.2`.
 
-- ingress transport: `dicom-c-store`
-- egress transport: `dicom-c-store`
-- study and patient context are preserved across ingress and egress
-- only Guardian-verified derived series are emitted from the Guardian path
-- in `multi_series_v2`, the ingress envelope carries one study-shaped Guardian case with ordered payload series and one study-level cross-series policy
-- in `multi_series_v2`, the egress package includes one study-level manifest/evidence summary plus only downstream-allowed released series; withheld auxiliary series are explicit in the study payload rather than silently disappearing
+Ingress and egress payloads are shaped as:
 
-Current mocked object mapping:
+- `study`
+- `source_series`
+- `released_series` on accepted egress
+- `withheld_outputs` on blocked or partially withheld egress
+- `relationships`
+- `sidecars`
+- optional `debug`
 
-| Direction | Role | Mock SOP class |
-| --- | --- | --- |
-| Ingress | raw k-space | `MR Raw Data Storage (mock)` |
-| Ingress | AI reconstruction | `MR Image Storage (mock)` |
-| Ingress | AI segmentation | `Segmentation Storage (mock)` |
-| Ingress | AI volume claim | `Comprehensive SR Storage (mock)` |
-| Egress | verified reconstruction | `MR Image Storage (mock)` |
-| Egress | verified segmentation | `Segmentation Storage (mock)` |
-| Egress | verification manifest | `Comprehensive SR Storage (mock)` |
-| Egress | ICSD evidence | `Encapsulated JSON Storage (mock)` |
+The older flat `objects` list is retired. The current model keeps study, series, instances, documents, sidecars, and lineage objects structurally distinct.
 
-For `multi_series_v2`, the mocked egress submission keeps two levels distinct:
+## Standard-Like Boundary
 
-- `series_manifests` covers every payload series in proof-significant order, including failed auxiliaries
-- `series_payloads` covers only the released downstream subset
-- `withheld_series` records series omitted from downstream release together with their role and proof outcome
+The mock payloads are reviewer-facing and standards-shaped, but they are not a claim of certified byte-level DICOM conformance.
 
-## Current Interoperability Artifacts
+Rules:
 
-Generated demo artifacts:
+- every study, series, instance, document, sidecar, and acquisition-provenance object carries exactly one custom namespace: `extensions.guardian_v1`
+- Guardian-specific fields are not allowed anywhere else inside standard-like objects
+- unknown keys inside `extensions.guardian_v1` are rejected
+- SR-like and SEG-like objects follow the same rule as image-like series and manifest-like outputs
 
-- [`../demo_artifacts/dicom_input.json`](../demo_artifacts/dicom_input.json)
-- [`../demo_artifacts/integration_narrative.json`](../demo_artifacts/integration_narrative.json)
-- [`../demo_artifacts/pacs_submission.json`](../demo_artifacts/pacs_submission.json)
-- [`../demo_artifacts/integration_trace.json`](../demo_artifacts/integration_trace.json)
+This keeps the mocked interoperability surface honest and prevents Guardian-specific semantics from leaking through ad hoc fields.
 
-These are narrative and schema examples, not a formal DICOM conformance package.
+## Object Kinds and Relationships
 
-The mocked PACS and trace surfaces mirror the canonical decision object from the verification report:
+Closed object-kind vocabulary:
 
-- `pacs_submission.json -> verification_summary.canonical_decision`
-- `pacs_block_notice.json -> verification_summary.canonical_decision`
-- `integration_trace.json -> pipeline[guardian_layer].canonical_decision`
+- `study`
+- `series`
+- `instance`
+- `document`
+- `sidecar`
+- `acquisition_provenance`
 
-For single-series cases with longitudinal context, those same mocked surfaces now also mirror:
+Closed relationship vocabulary:
 
-- `temporal_comparison_status`
-- `temporal_comparison_scope`
-- `temporal_spatial_comparison_mode`
-- `temporal_primary_selection_mode`
-- `temporal_selected_prior_count`
-- `temporal_trajectory_class`
-- `temporal_registration_status`
-- `temporal_top_flags`
-- `temporal_trajectory_flags`
-- `temporal_top_reason_codes`
+- `contains_series`
+- `contains_instance`
+- `derived_from`
+- `references`
+- `same_frame_of_reference`
+- `blocked_output_for`
+- `sidecar_for`
 
-These temporal fields are interoperability-facing confidence signals. In the shipped profile set, only `strict_research_mode` may promote certain temporal findings into blocking failures. For every other profile, longitudinal output remains advisory. The interval bands still express comparability confidence only, not clinical expectation statements.
+Directionality is explicit in the model:
 
-Mocked operational envelopes may also carry optional `ai_runtime_context`:
+- `derived_from`, `references`, `blocked_output_for`, and `sidecar_for` are directional
+- `same_frame_of_reference` is symmetric
+- source and target object kinds are validated for each relationship type
 
-- `inference_runtime_version`
-- `inference_device_class`
+## UID and Frame-of-Reference Rules
 
-This runtime context is operational-only. It is excluded from Guardian core state,
-proof hashes, manifests, evidence, bundle hashes, and replay material.
+Study, series, and instance identities use deterministic mock DICOM UIDs.
 
-For single-series summaries, `proof_contracts.ai_claim_envelope` is now surfaced
-directly so audit consumers can inspect canonical declared claim provenance without
-opening the full manifest. That visibility does not change the semantics:
-`ai_claim_envelope.ai_stack_identity` is canonical claim provenance, not runtime
-provenance and not independently verified model validity.
+UID invariants:
 
-When longitudinal context is supplied, single-series `proof_contracts` also carries
-`prior_verified_contexts`, `prior_verified_context`, `longitudinal_selection_trace`,
-`temporal_trajectory_trace`, `longitudinal_registration_trace`, and
-`temporal_consistency_trace` so downstream audit systems can consume the exact
-longitudinal contract without reparsing the full verification report.
+- the seed includes schema version, UID namespace version, object kind, and canonical source identity
+- child objects include parent identity in the seed where relevant
+- identical logical seeds produce identical UIDs
+- different object identity classes do not share UID space
+- seeds do not depend on display labels or incidental caller ordering
 
-For `multi_series_v2`, `proof_contracts` also carries
-`study_temporal_aggregation_trace` so study-level consumers can distinguish
-required-series temporal coverage from auxiliary-series informational output.
+Frame-of-reference handling is intentionally strict:
 
-For deterministic structural rejects, the mocked DICOM ingress and downstream trace artifacts still remain available even if proof-only contract members such as the AI claim envelope could not be derived. Those fields may therefore be absent or `null` on fail-soft structural examples.
+- a `frame_of_reference_uid` appears on a derived or source series only when there is explicit upstream lineage for it
+- if upstream lineage is absent or non-DICOM-shaped, the model records availability in series lineage metadata instead of fabricating a pseudo UID
+- mixed or missing frame-of-reference state is reported in integration traces through `frame_of_reference_summary`
 
-## Fail-Open vs Fail-Closed
+## Source and Derived Objects
+
+Ingress modelling uses three source series per logical payload series:
+
+- MR-image-oriented reconstruction series
+- SEG-like segmentation series
+- SR-like AI claim series
+
+Raw-input lineage is represented as `acquisition_provenance`, not as a pretend image or document instance. It records source lineage metadata only and must not be treated as a standards-shaped image/document instance.
+
+Egress modelling uses:
+
+- verified reconstruction series
+- verified segmentation series
+- Guardian verification manifest SR-like series
+- optional withheld-output groups when downstream release is blocked or reduced
+
+For `multi_series_v2`, one study-level manifest SR-like series is emitted alongside the ordered released per-series outputs.
+
+## SR-Like, SEG-Like, and Sidecar Surfaces
+
+SEG-like instances carry explicit segment metadata:
+
+- `segment_number`
+- `segment_label`
+- `algorithm_type`
+- `algorithm_name`
+- referenced source instance UIDs
+
+SR-like documents use fixed reviewer-facing `document_kind` values:
+
+- `ai_volume_claim_sr_like`
+- `guardian_verification_manifest_sr_like`
+- `guardian_study_verification_manifest_sr_like`
+
+These documents are structured review artefacts shaped for interoperability preparation. They are not a claim of exchangeable, standards-certified DICOM SR payloads.
+
+Evidence linkage is modelled as a typed non-DICOM sidecar:
+
+- `sidecar_type` is fixed to `icsd_evidence_json`
+- the sidecar references the manifest document instance UID
+- the sidecar may also record the Guardian bundle path and specific bundle member
+- the sidecar must not become the sole carrier of proof-critical semantics already represented elsewhere
+
+## Proof-State Boundary
+
+The proof system and replay model do not move into the DICOM-shaped layer.
+
+Rules:
+
+- `debug.guardian_case_snapshot` exists only as a restore-only quarantine surface
+- `restore_case_state_from_dicom_input(...)` restores from `debug.guardian_case_snapshot` only
+- standard-like DICOM-shaped objects are ignored for proof-state recovery
+- if the debug snapshot is absent or malformed, restoration fails hard
+- reviewer-facing objects, relationships, and sidecars do not reference the debug snapshot
+
+This preserves the boundary between believable interoperability modelling and Guardian proof semantics.
+
+## Integration Traces
+
+`integration_trace.json` now summarizes the study-centred graph rather than the retired flat object list.
+
+Key operational summaries include:
+
+- released series and instance counts
+- withheld output counts
+- sidecar count
+- `frame_of_reference_summary`
+- `lineage_completeness_status`
+
+For single-series cases with temporal context, temporal comparison summaries remain mirrored into the trace. For `multi_series_v2`, the trace also records study-level temporal disposition summaries.
+
+## Fail-Closed vs Fail-Open
 
 The Guardian Layer is fail-closed for the verified handoff.
 
 Fail-closed means:
 
-- if blocking verification fails, no verified reconstruction, mask, manifest, or evidence series are forwarded from the Guardian path
+- if blocking verification fails, no verified reconstruction, segmentation, manifest, or evidence sidecar is forwarded from the Guardian path
 - if the Guardian Layer is unavailable, the Guardian path does not auto-pass AI outputs through
 - any emergency or business-continuity bypass must be an explicit external workflow, not an implicit fallback inside this repository
 
-This design protects the integrity claim. A fail-open Guardian would undermine the meaning of "verified downstream payload."
+This design protects the meaning of "verified downstream payload."
 
 ## Productionisation Path
 
-To move from mock interoperability to hospital-grade integration, the next layer would typically include:
+To move from mocked interoperability to hospital-grade integration, the next layer would typically include:
 
-- formal DICOM Conformance Statement
+- formal DICOM Conformance Statement work
 - AE-title registration and allow-listing
 - protected network placement and transport security
 - PACS/VNA import rules for verified derived series
-- operational policy for external fallback workflows
+- operator procedures for explicit fallback workflows
 - audit integration for Guardian decisions and downstream releases
 
 ## Non-Goals of the Current Prototype
 
 - full DICOM standards certification
+- real DICOM file or network IO
 - modality worklist, storage commitment, or IHE profile implementation
 - enterprise identity, tenancy, or scheduling workflows
 - replacement of PACS, RIS, or reporting systems
@@ -145,6 +204,8 @@ To move from mock interoperability to hospital-grade integration, the next layer
 ## Related Material
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md)
+- [`DATA_DICT.md`](DATA_DICT.md)
 - [`SECURITY.md`](SECURITY.md)
 - [`adr/0001-guardian-layer-as-verification-proxy.md`](adr/0001-guardian-layer-as-verification-proxy.md)
 - [`adr/0002-fail-closed-guardian-handoff.md`](adr/0002-fail-closed-guardian-handoff.md)
+- [`adr/0018-proper-dicom-object-modelling.md`](adr/0018-proper-dicom-object-modelling.md)

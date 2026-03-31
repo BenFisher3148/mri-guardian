@@ -21,6 +21,7 @@ This directory records architecture decisions that materially affect invariants,
 - [`0015-deterministic-decision-journal-v1.md`](0015-deterministic-decision-journal-v1.md)
 - [`0016-operational-pre-check-and-full-proof-layer-v1.md`](0016-operational-pre-check-and-full-proof-layer-v1.md)
 - [`0017-guardian-bundle-v1-generalization.md`](0017-guardian-bundle-v1-generalization.md)
+- [`0018-proper-dicom-object-modelling.md`](0018-proper-dicom-object-modelling.md)
 
 ## ADR Rules
 

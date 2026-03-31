@@ -445,10 +445,10 @@ For `multi_series_v2`, only the `multi_series_aggregation` entry may include `ch
 
 | Artifact | Purpose |
 | --- | --- |
-| [`../demo_artifacts/dicom_input.json`](../demo_artifacts/dicom_input.json) | Mocked DICOM ingress envelope carrying raw data, AI claim, and embedded Guardian case state |
-| [`../demo_artifacts/pacs_submission.json`](../demo_artifacts/pacs_submission.json) | Mocked accepted PACS handoff with verified series and proof contracts |
-| [`../demo_artifacts/tamper_fake_tumour_pacs_block.json`](../demo_artifacts/tamper_fake_tumour_pacs_block.json) | Mocked rejected PACS notice for a blocked case |
-| [`../demo_artifacts/integration_trace.json`](../demo_artifacts/integration_trace.json) | Boundary trace from DICOM ingress through Guardian decision to PACS egress |
+| [`../demo_artifacts/dicom_input.json`](../demo_artifacts/dicom_input.json) | Mocked DICOM ingress graph with `study`, `source_series`, `relationships`, `sidecars`, and restore-only `debug.guardian_case_snapshot` |
+| [`../demo_artifacts/pacs_submission.json`](../demo_artifacts/pacs_submission.json) | Mocked accepted PACS handoff with `released_series`, `withheld_outputs`, sidecars, and proof-contract summary surfaces |
+| [`../demo_artifacts/tamper_fake_tumour_pacs_block.json`](../demo_artifacts/tamper_fake_tumour_pacs_block.json) | Mocked rejected PACS notice with explicit withheld outputs rather than silent omission |
+| [`../demo_artifacts/integration_trace.json`](../demo_artifacts/integration_trace.json) | Boundary trace from DICOM ingress through Guardian decision to PACS egress with lineage and frame-of-reference summaries |
 | [`../demo_artifacts/integration_narrative.json`](../demo_artifacts/integration_narrative.json) | Standalone DICOM, placement, and fail-closed narrative |
 
 Mirrored integration surfaces now carry the canonical decision alongside the legacy compatibility fields:
@@ -456,6 +456,16 @@ Mirrored integration surfaces now carry the canonical decision alongside the leg
 - `pacs_submission.json -> verification_summary.canonical_decision`
 - `pacs_block_notice.json -> verification_summary.canonical_decision`
 - `integration_trace.json -> pipeline[guardian_layer].canonical_decision`
+
+The mocked DICOM/PACS payloads now use a study-centred graph rather than the retired flat `objects` list.
+
+Integration-model invariants:
+
+- standard-like study, series, instance, and document objects may use only `extensions.guardian_v1` for Guardian-specific fields
+- `acquisition_provenance` records raw-input lineage only and is not a standards-shaped instance substitute
+- SR-like document kinds are reviewer-facing structured artefacts, not byte-level DICOM SR claims
+- sidecars are typed non-DICOM references and may not become the sole carrier of proof-critical semantics
+- `debug.guardian_case_snapshot` is quarantine-only and is ignored by reviewer-facing lineage and relationship objects
 
 When temporal context is present on single-series cases, the mocked PACS and integration summaries also mirror:
 
@@ -470,7 +480,7 @@ When temporal context is present on single-series cases, the mocked PACS and int
 - `temporal_trajectory_flags`
 - `temporal_top_reason_codes`
 
-On fail-soft structural rejects, `dicom_input.json` may legitimately carry `ai_claim_envelope = null` because the mocked ingress artifact is preserved even when proof-only contract members could not be derived from the malformed input.
+On fail-soft structural rejects, the mocked ingress and PACS artefacts still remain available as study-centred graphs. Proof-only surfaces such as `ai_claim_envelope` are not promoted into the DICOM-shaped top level; restore semantics continue to depend only on `debug.guardian_case_snapshot`.
 
 ## Bundle Members
 

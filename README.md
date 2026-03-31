@@ -168,6 +168,7 @@ in a qualifying no-gap run of consecutive slices, not by label rank.
 
 - [mri_guardian/bundle.py](mri_guardian/bundle.py) builds and verifies portable `.guardian-bundle` Guardian Bundle V1 proof artifacts.
 - [mri_guardian/contracts.py](mri_guardian/contracts.py) defines the reusable claim/proof and longitudinal interfaces, including `AIClaimEnvelope`, the four proof-core contracts, strictly derived `ProofCoreEvidenceTrace`, `PriorVerifiedContext`, and `TemporalConsistencyTrace`.
+- [mri_guardian/dicom_model.py](mri_guardian/dicom_model.py) defines the deterministic study-centred DICOM-shaped object model used by the mocked integration layer.
 - [mri_guardian/harness.py](mri_guardian/harness.py) defines the release transition, invariants, deterministic reconstruction checks, and manifest generation.
 - [mri_guardian/integration.py](mri_guardian/integration.py) mocks the DICOM ingress and PACS egress contracts around the verification proxy.
 - [mri_guardian/mask_engine.py](mri_guardian/mask_engine.py) defines the fixed approved mask-algorithm catalogue, canonical parameter resolution, and deterministic dispatcher.
@@ -472,9 +473,9 @@ The tamper-mode reports make failure detection explicit:
 
 The fake integration layer answers the operational question directly. The demo now shows:
 
-- mocked DICOM ingress carrying raw k-space plus the AI claim
+- mocked DICOM ingress as a study-centred graph with source series, acquisition provenance, and SR-like claim documents
 - the Guardian Layer acting as a verification proxy rather than a replacement system
-- mocked PACS egress that either emits verified series or records a blocked handoff with the exact failure reason
+- mocked PACS egress that either emits verified derived series plus evidence sidecars or records explicit withheld outputs with the exact failure reason
 
 The PACS integration narrative is now explicit rather than conceptual:
 
