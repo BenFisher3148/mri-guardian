@@ -477,30 +477,27 @@ On fail-soft structural rejects, `dicom_input.json` may legitimately carry `ai_c
 The portable bundle written by [`../mri_guardian/bundle.py`](../mri_guardian/bundle.py) contains:
 
 - `bundle.json`
-- `signatures.json`
-- `evidence.json`
 - `input_state.json`
 - `released_state.json`
 - `workstation_payload.json`
 - `verification_report.json`
 - `decision_journal.json`
-- `verification_profile_descriptor.json`
-- `transcript.json`
-- `replay.json`
-- `transparency-log.jsonl`
+- `evidence.json`
+- `transparency-prefix.jsonl`
 
-When a single-series case carries longitudinal context, the bundle also contains:
+Inside `bundle.json`, Guardian Bundle V1 carries these canonical top-level sections:
 
-- `prior_verified_contexts.json`
-- `prior_verified_context.json`
-- `longitudinal_selection_trace.json`
-- `temporal_trajectory_trace.json`
-- `longitudinal_registration_trace.json`
-- `temporal_consistency_trace.json`
+- `bundle_type = "dpa-guardian-bundle"`
+- `bundle_schema_version = "1"`
+- `claim`
+- `proof_context`
+- `replay_inputs`
+- `release_artifacts`
+- `integrity_manifest`
+- `transparency_anchor`
+- optional `attachments`
 
-For `multi_series_v2`, the bundle also contains:
-
-- `study_temporal_aggregation_trace.json`
+`integrity_manifest` binds all declared bundle members, while replay verification is evaluated only over the proof-critical deterministic surfaces plus the declared release artifacts. Auxiliary `attachments` are never proof-critical in V1.
 
 ## Notes on Determinism
 

@@ -1,7 +1,9 @@
 """MRI Guardian Layer built on top of dpa-icsd."""
 
 from .bundle import (
-    MRI_GUARD_BUNDLE_EXTENSION,
+    GUARDIAN_BUNDLE_EXTENSION,
+    GUARDIAN_BUNDLE_SCHEMA_VERSION,
+    GUARDIAN_BUNDLE_TYPE,
     verify_bundle,
     verify_portable_evidence_bundle,
     write_portable_evidence_bundle,
@@ -100,7 +102,9 @@ from .timing import build_guardian_performance_profile, build_timing_overlay_sna
 from .viewer import build_side_by_side_view_model, render_side_by_side_report_html
 
 __all__ = [
-    "MRI_GUARD_BUNDLE_EXTENSION",
+    "GUARDIAN_BUNDLE_EXTENSION",
+    "GUARDIAN_BUNDLE_SCHEMA_VERSION",
+    "GUARDIAN_BUNDLE_TYPE",
     "MRI_GUARDIAN_POLICY_NAME",
     "MRI_GUARDIAN_POLICY_VERSION",
     "MULTI_SERIES_CASE_KIND",

@@ -79,7 +79,7 @@ The verified-mask layer uses a fixed approved algorithm catalogue and canonical 
 | [`mri_guardian/profiles.py`](../mri_guardian/profiles.py) | Runtime profile registry, canonical descriptor hashing, and mapping to ICSD invariant policy identities. |
 | [`mri_guardian/contracts.py`](../mri_guardian/contracts.py) | Explicit claim-to-proof interfaces: `AIClaimEnvelope`, `MaskDerivationPolicy`, `VerificationTolerancePolicy`, the four proof-core contracts, strictly derived `ProofCoreEvidenceTrace`, `PriorVerifiedContext`, and `TemporalConsistencyTrace`. |
 | [`mri_guardian/integration.py`](../mri_guardian/integration.py) | Mocked DICOM ingress, PACS egress, and hospital integration narrative. |
-| [`mri_guardian/bundle.py`](../mri_guardian/bundle.py) | Portable `.mri-guard-bundle` writer and deterministic replay verifier. |
+| [`mri_guardian/bundle.py`](../mri_guardian/bundle.py) | Portable `.guardian-bundle` Guardian Bundle V1 writer and deterministic replay verifier. |
 | [`mri_guardian/timing.py`](../mri_guardian/timing.py) | Benchmark ladder, worst-case bound derivation, and streaming-validation strategy. |
 | [`mri_guardian/viewer.py`](../mri_guardian/viewer.py) | Human-facing HTML report for side-by-side review. |
 | [`mri_guardian/transparency.py`](../mri_guardian/transparency.py) | Append-only transparency log used to anchor evidence receipts. |
@@ -194,7 +194,7 @@ Released cases are only valid if the mathematical trace still verifies when reco
 The Guardian Layer emits several artifact classes:
 
 - state artifacts: `released_state.json`, `workstation_payload.json`
-- proof artifacts: `evidence.json`, `bundle_verification.json`, `.mri-guard-bundle`
+- proof artifacts: `evidence.json`, `bundle_verification.json`, `.guardian-bundle`
 - contract artifacts: `verification_profile.json`, `verification_profile_descriptor.json`, `ai_claim_envelope.json`, `measurement_integrity_proof.json`, `reconstruction_parity_proof.json`, `segmentation_policy_proof.json`, `volume_computation_proof.json`, `proof_core_evidence_trace.json`, `mask_derivation_policy.json`, `verification_tolerance_policy.json`, plus longitudinal artifacts such as `prior_verified_contexts.json`, `prior_verified_context.json`, `longitudinal_selection_trace.json`, `temporal_trajectory_trace.json`, `longitudinal_registration_trace.json`, and `temporal_consistency_trace.json` when longitudinal context is supplied
 - integration artifacts: `dicom_input.json`, `integration_narrative.json`, `pacs_submission.json`, `integration_trace.json`
 - performance artifacts: `performance_profile.json`

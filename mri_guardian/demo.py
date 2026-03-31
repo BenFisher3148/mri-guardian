@@ -9,7 +9,7 @@ from typing import Any
 from icsd.core.serialise import canonical_json_dumps
 
 from .bundle import (
-    MRI_GUARD_BUNDLE_EXTENSION,
+    GUARDIAN_BUNDLE_EXTENSION,
     verify_bundle,
     write_portable_evidence_bundle,
 )
@@ -183,7 +183,7 @@ def run_demo(
             f"{canonical_json_dumps(report['contracts']['verification_tolerance_policy'])}\n",
             encoding="utf-8",
         )
-    bundle_path = output_path / f"{case_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
+    bundle_path = output_path / f"{case_state['case_id']}{GUARDIAN_BUNDLE_EXTENSION}"
     bundle_metadata = write_portable_evidence_bundle(
         result=result,
         transparency_log_path=output_path / "transparency-log.jsonl",

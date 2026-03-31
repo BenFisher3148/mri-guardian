@@ -166,7 +166,7 @@ in a qualifying no-gap run of consecutive slices, not by label rank.
 
 ## Structure
 
-- [mri_guardian/bundle.py](mri_guardian/bundle.py) builds and verifies portable `.mri-guard-bundle` proof artifacts.
+- [mri_guardian/bundle.py](mri_guardian/bundle.py) builds and verifies portable `.guardian-bundle` Guardian Bundle V1 proof artifacts.
 - [mri_guardian/contracts.py](mri_guardian/contracts.py) defines the reusable claim/proof and longitudinal interfaces, including `AIClaimEnvelope`, the four proof-core contracts, strictly derived `ProofCoreEvidenceTrace`, `PriorVerifiedContext`, and `TemporalConsistencyTrace`.
 - [mri_guardian/harness.py](mri_guardian/harness.py) defines the release transition, invariants, deterministic reconstruction checks, and manifest generation.
 - [mri_guardian/integration.py](mri_guardian/integration.py) mocks the DICOM ingress and PACS egress contracts around the verification proxy.
@@ -239,7 +239,7 @@ mri-guardian verify demo_artifacts
 
 Inspect the portable proof artifact:
 
-- `demo_artifacts/mri-case-0001.mri-guard-bundle`
+- `demo_artifacts/mri-case-0001.guardian-bundle`
 - `demo_artifacts/bundle_verification.json`
 
 Inspect the mocked integration artifacts:
@@ -291,7 +291,7 @@ Verify the archive or an extracted `bundle.json` replay package in Python:
 ```python
 from mri_guardian import verify_bundle
 
-result = verify_bundle("demo_artifacts/mri-case-0001.mri-guard-bundle")
+result = verify_bundle("demo_artifacts/mri-case-0001.guardian-bundle")
 ```
 
 Open the visual comparison outputs:
@@ -414,20 +414,27 @@ Reason ordering inside `decision.reason_codes` and `decision.decision_reasons` i
 
 `verified_boundary_hugging` is also pinned down explicitly: only passing proof metrics with `boundary_status = near_boundary` are eligible, and `near_boundary` means "within the configured guard band of the relevant failure threshold." The current eligible metrics are the measurement-consistency metrics, AI-reconstruction parity metrics, and the tumour-volume tolerance metric. Exact mask equality is still binary and does not participate in guard-band classification.
 
-The portable bundle pushes that one step further. Each accepted case now emits a shareable `.mri-guard-bundle` archive containing:
+The portable bundle pushes that one step further. Each accepted case now emits a shareable `.guardian-bundle` archive with bundle identity `dpa-guardian-bundle` containing:
 
 - the ICSD evidence envelope
 - the released state and workstation payload
 - the deterministic decision journal
-- a deterministic verification transcript
-- the original input state plus replay context
-- the transparency-log snapshot that anchored the release
-- portable integrity signatures over the bundle members
-- top-level hashes for raw k-space, reconstruction, and mask state
+- the original input state plus deterministic replay seeds
+- a minimal `transparency-prefix.jsonl` member for anchor recreation
+- a canonical `claim` surface, `proof_context`, and `replay_inputs`
+- an in-band `integrity_manifest` that binds every bundle member
+- optional non-proof-critical `attachments`
 
 That means a reviewer can carry the artifact elsewhere, verify it offline, and still check that the scan remained anchored to the same measured data and Guardian Layer release proof.
 
-The replay layer makes the bundle regulator-friendly: `verify_bundle(...)` does not just check static integrity. It replays the release from the bundled `input_state.json`, `replay.json`, and transparency-log prefix, then confirms that the regenerated released state, evidence payload, and bundle members are identical.
+Guardian Bundle V1 keeps a hard boundary between proof and replay surfaces:
+
+- `proof_context` records only proof-defining or proof-recording outputs
+- `replay_inputs` carries only deterministic rerun material that is not itself a proof outcome
+- `release_artifacts` is only a descriptor table for emitted artifacts and adds no new authority
+- `attachments` are never proof-critical in V1
+
+The replay layer makes the bundle regulator-friendly: `verify_bundle(...)` does not just check static integrity. It replays the release from the bundled `input_state.json` plus `transparency-prefix.jsonl`, then confirms that the regenerated released state, evidence payload, decision journal, and canonical bundle surfaces are identical.
 
 Replay identity now includes the embedded runtime profile descriptor. A verifier can therefore prove not just "the profile name was `brain_t1_baseline`" but "the exact canonical descriptor body used at runtime had this digest."
 

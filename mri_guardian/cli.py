@@ -12,7 +12,7 @@ from typing import Any
 from icsd.core.evidence import validate_evidence_payload
 from icsd.core.serialise import canonical_json_dumps
 
-from .bundle import MRI_GUARD_BUNDLE_EXTENSION, verify_bundle
+from .bundle import GUARDIAN_BUNDLE_EXTENSION, verify_bundle
 from .demo import run_demo
 from .harness import MULTI_SERIES_CASE_KIND
 from .profiles import DEFAULT_PROFILE_NAME
@@ -60,7 +60,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "target",
         nargs="?",
         default="demo_artifacts",
-        help="Directory, .mri-guard-bundle archive, bundle.json, or evidence.json to verify.",
+        help="Directory, .guardian-bundle archive, bundle.json, or evidence.json to verify.",
     )
     verify_parser.add_argument(
         "--format",
@@ -108,15 +108,15 @@ def run_verify_command(target: Path | str) -> dict[str, Any]:
         evidence_path = path / "evidence.json"
         if evidence_path.exists():
             parts["evidence"] = _verify_evidence_file(evidence_path)
-        bundle_candidates = sorted(path.glob(f"*{MRI_GUARD_BUNDLE_EXTENSION}"))
+        bundle_candidates = sorted(path.glob(f"*{GUARDIAN_BUNDLE_EXTENSION}"))
         if len(bundle_candidates) > 1:
             raise ValueError(
-                "Verification target directory contains multiple .mri-guard-bundle files; "
+                "Verification target directory contains multiple .guardian-bundle files; "
                 "pass one bundle path explicitly."
             )
         if bundle_candidates:
             parts["bundle"] = verify_bundle(bundle_candidates[0])
-    elif path.suffix.lower() == MRI_GUARD_BUNDLE_EXTENSION:
+    elif path.suffix.lower() == GUARDIAN_BUNDLE_EXTENSION:
         parts["bundle"] = verify_bundle(path)
     elif path.name == "bundle.json":
         parts["bundle"] = verify_bundle(path)
@@ -125,7 +125,7 @@ def run_verify_command(target: Path | str) -> dict[str, Any]:
     else:
         raise ValueError(
             "Unsupported verification target. Use a directory, evidence.json, bundle.json, "
-            "or a .mri-guard-bundle archive."
+            "or a .guardian-bundle archive."
         )
 
     if not parts:

@@ -1,19 +1,17 @@
-"""Portable MRI Guardian Layer bundle builder and deterministic replay verifier."""
+"""Guardian Bundle V1 writer and deterministic replay verifier."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import shutil
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
-from icsd.core.evidence import (
-    _transparency_log_payload_from_mapping,
-    validate_evidence_payload,
-)
+from icsd.core.evidence import _transparency_log_payload_from_mapping, validate_evidence_payload
 from icsd.core.serialise import canonical_json_dumps, hash_canonical_json
 from icsd.core.transition import TransitionResult
 
@@ -25,72 +23,50 @@ from .harness import (
     build_case_verification_report,
 )
 from .journal import build_decision_journal, build_transparency_receipt_context
-from .profiles import (
-    get_verification_profile,
-    verification_profile_descriptor_from_dict,
-)
+from .profiles import get_verification_profile
 
-MRI_GUARD_BUNDLE_EXTENSION = ".mri-guard-bundle"
-_BUNDLE_SCHEMA_VERSION = "0.3"
-_BUNDLE_MEDIA_TYPE = "application/vnd.mri-guard.bundle+zip"
+GUARDIAN_BUNDLE_EXTENSION = ".guardian-bundle"
+GUARDIAN_BUNDLE_TYPE = "dpa-guardian-bundle"
+GUARDIAN_BUNDLE_SCHEMA_VERSION = "1"
+
 _FIXED_ZIP_TIMESTAMP = (2026, 3, 26, 0, 0, 0)
 _BUNDLE_MANIFEST_NAME = "bundle.json"
-_SIGNATURES_NAME = "signatures.json"
-_EVIDENCE_NAME = "evidence.json"
 _INPUT_STATE_NAME = "input_state.json"
 _RELEASED_STATE_NAME = "released_state.json"
 _WORKSTATION_PAYLOAD_NAME = "workstation_payload.json"
 _VERIFICATION_REPORT_NAME = "verification_report.json"
 _DECISION_JOURNAL_NAME = "decision_journal.json"
-_PROFILE_DESCRIPTOR_NAME = "verification_profile_descriptor.json"
-_TRANSCRIPT_NAME = "transcript.json"
-_REPLAY_DESCRIPTOR_NAME = "replay.json"
-_TRANSPARENCY_LOG_NAME = "transparency-log.jsonl"
-_PRIOR_VERIFIED_CONTEXTS_NAME = "prior_verified_contexts.json"
-_PRIOR_VERIFIED_CONTEXT_NAME = "prior_verified_context.json"
-_LONGITUDINAL_SELECTION_TRACE_NAME = "longitudinal_selection_trace.json"
-_TEMPORAL_TRAJECTORY_TRACE_NAME = "temporal_trajectory_trace.json"
-_LONGITUDINAL_REGISTRATION_TRACE_NAME = "longitudinal_registration_trace.json"
-_TEMPORAL_CONSISTENCY_TRACE_NAME = "temporal_consistency_trace.json"
-_STUDY_TEMPORAL_AGGREGATION_TRACE_NAME = "study_temporal_aggregation_trace.json"
-_REQUIRED_BUNDLE_MEMBERS = (
-    _BUNDLE_MANIFEST_NAME,
-    _SIGNATURES_NAME,
-    _EVIDENCE_NAME,
+_EVIDENCE_NAME = "evidence.json"
+_TRANSPARENCY_PREFIX_NAME = "transparency-prefix.jsonl"
+_JSON_MEDIA_TYPE = "application/json"
+_BUNDLE_REDACTION_SENTINEL = "__INTEGRITY_MANIFEST_REDACTED__"
+_ATTACHMENTS_KEY = "attachments"
+_REQUIRED_TOP_LEVEL_KEYS = (
+    "bundle_type",
+    "bundle_schema_version",
+    "claim",
+    "proof_context",
+    "replay_inputs",
+    "release_artifacts",
+    "integrity_manifest",
+    "transparency_anchor",
+)
+_RELEASE_ARTIFACT_ORDER = (
+    ("evidence", _EVIDENCE_NAME),
+    ("released_state", _RELEASED_STATE_NAME),
+    ("workstation_payload", _WORKSTATION_PAYLOAD_NAME),
+    ("verification_report", _VERIFICATION_REPORT_NAME),
+    ("decision_journal", _DECISION_JOURNAL_NAME),
+)
+_PROOF_CRITICAL_MEMBERS = (
     _INPUT_STATE_NAME,
     _RELEASED_STATE_NAME,
     _WORKSTATION_PAYLOAD_NAME,
     _VERIFICATION_REPORT_NAME,
     _DECISION_JOURNAL_NAME,
-    _PROFILE_DESCRIPTOR_NAME,
-    _TRANSCRIPT_NAME,
-    _REPLAY_DESCRIPTOR_NAME,
-    _TRANSPARENCY_LOG_NAME,
+    _EVIDENCE_NAME,
+    _TRANSPARENCY_PREFIX_NAME,
 )
-_OPTIONAL_BUNDLE_MEMBERS = (
-    _PRIOR_VERIFIED_CONTEXTS_NAME,
-    _PRIOR_VERIFIED_CONTEXT_NAME,
-    _LONGITUDINAL_SELECTION_TRACE_NAME,
-    _TEMPORAL_TRAJECTORY_TRACE_NAME,
-    _LONGITUDINAL_REGISTRATION_TRACE_NAME,
-    _TEMPORAL_CONSISTENCY_TRACE_NAME,
-    _STUDY_TEMPORAL_AGGREGATION_TRACE_NAME,
-)
-
-
-def _pipeline_phase_statuses(report: Mapping[str, Any]) -> dict[str, str]:
-    return {
-        key: str(value["status"])
-        for key, value in report["verification_pipeline"]["phases"].items()
-    }
-
-
-def _proof_stage_statuses(report: Mapping[str, Any]) -> dict[str, str]:
-    proof_core = report["verification_pipeline"]["phases"].get("proof_core", {})
-    return {
-        str(item["proof_stage"]): str(item["status"])
-        for item in proof_core.get("proof_stages", [])
-    }
 
 
 def write_portable_evidence_bundle(
@@ -99,107 +75,76 @@ def write_portable_evidence_bundle(
     transparency_log_path: Path | str,
     output_path: Path | str,
 ) -> dict[str, Any]:
-    """Write a deterministic .mri-guard-bundle archive and return its metadata."""
+    """Write a deterministic Guardian Bundle V1 archive and return its metadata."""
     before_state = result.before_state
     state = result.after_state
     _ensure_released_state(state)
     evidence_payload = result.evidence.as_dict()
     evidence_failures = validate_evidence_payload(evidence_payload)
     if evidence_failures:
-        msg = f"ICSD evidence payload is invalid: {evidence_failures!r}"
-        raise ValueError(msg)
-    anchored_evidence_payload = result.evidence.transparency_log_payload()
+        raise ValueError(f"ICSD evidence payload is invalid: {evidence_failures!r}")
     report = build_case_verification_report(state)
     if not report["release_eligible"]:
-        raise ValueError("Portable bundles can only be written for release-eligible cases.")
+        raise ValueError("Guardian bundles can only be written for release-eligible cases.")
     if (
         state.get("case_kind") != MULTI_SERIES_CASE_KIND
         and not report["profile"]["release_semantics"]["portable_bundle_allowed"]
     ):
-        raise ValueError(
-            "Portable bundles are not allowed for the selected runtime profile."
-        )
+        raise ValueError("Guardian bundles are not allowed for the selected runtime profile.")
 
+    anchored_evidence_payload = _transparency_log_payload_from_mapping(evidence_payload)
     log_snapshot = _read_transparency_log_snapshot(transparency_log_path)
     receipt_entry = _resolve_receipt_entry(
         evidence_payload=evidence_payload,
         anchored_evidence_payload=anchored_evidence_payload,
         log_entries=log_snapshot["entries"],
     )
-    receipt_context = build_transparency_receipt_context(
-        reference=_transparency_receipt(evidence_payload)["reference"],
-        entry_hash=str(receipt_entry["entry_hash"]),
-        previous_entry_hash=receipt_entry.get("previous_entry_hash"),
-        checkpoint=log_snapshot["checkpoint"],
-        entry_index=int(receipt_entry["index"]),
-        log_length=len(log_snapshot["entries"]),
+    transparency_prefix_bytes = _serialise_transparency_entries(
+        log_snapshot["entries"][: int(receipt_entry["index"])]
     )
     decision_journal = build_decision_journal(
         report,
-        transparency_receipt_context=receipt_context,
+        transparency_receipt_context=_minimal_transparency_receipt_context(
+            evidence_payload=evidence_payload,
+            receipt_entry=receipt_entry,
+        ),
     )
-    transcript = _build_bundle_transcript(
+    bundle_payload = _build_bundle_payload(
         state=state,
         report=report,
         evidence_payload=evidence_payload,
-        receipt_entry=receipt_entry,
-        checkpoint=log_snapshot["checkpoint"],
-    )
-    replay_descriptor = _build_replay_descriptor(
-        before_state=before_state,
-        state=state,
-        report=report,
         decision_journal=decision_journal,
-        evidence_payload=evidence_payload,
-        anchored_evidence_payload=anchored_evidence_payload,
-        log_snapshot=log_snapshot,
         receipt_entry=receipt_entry,
     )
-    bundle_payload = _build_bundle_manifest(
-        state=state,
-        report=report,
-        evidence_payload=evidence_payload,
-        anchored_evidence_payload=anchored_evidence_payload,
-        decision_journal=decision_journal,
-        transcript=transcript,
-        replay_descriptor=replay_descriptor,
-        log_snapshot=log_snapshot,
-        receipt_entry=receipt_entry,
-    )
-    members = {
-        _BUNDLE_MANIFEST_NAME: _json_bytes(bundle_payload),
-        _EVIDENCE_NAME: _json_bytes(evidence_payload),
+    member_bytes = {
         _INPUT_STATE_NAME: _json_bytes(before_state),
         _RELEASED_STATE_NAME: _json_bytes(state),
         _WORKSTATION_PAYLOAD_NAME: _json_bytes(state["workstation_payload"]),
         _VERIFICATION_REPORT_NAME: _json_bytes(report),
         _DECISION_JOURNAL_NAME: _json_bytes(decision_journal),
-        _PROFILE_DESCRIPTOR_NAME: _json_bytes(report["contracts"]["verification_profile_descriptor"]),
-        _TRANSCRIPT_NAME: _json_bytes(transcript),
-        _REPLAY_DESCRIPTOR_NAME: _json_bytes(replay_descriptor),
-        _TRANSPARENCY_LOG_NAME: log_snapshot["bytes"],
+        _EVIDENCE_NAME: _json_bytes(evidence_payload),
+        _TRANSPARENCY_PREFIX_NAME: transparency_prefix_bytes,
     }
-    members.update(_build_optional_bundle_members(report))
-    signatures = _build_signature_catalog(members)
-    members[_SIGNATURES_NAME] = _json_bytes(signatures)
-
+    bundle_payload["integrity_manifest"] = _build_integrity_manifest(
+        bundle_payload=bundle_payload,
+        member_bytes=member_bytes,
+        attachments=None,
+    )
+    member_bytes[_BUNDLE_MANIFEST_NAME] = _json_bytes(bundle_payload)
     bundle_path = Path(output_path)
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
     with ZipFile(bundle_path, mode="w") as archive:
-        for member_name in _ordered_bundle_member_names(members):
-            _write_bundle_member(archive, member_name, members[member_name])
-
+        for member_name in _declared_member_order(bundle_payload):
+            _write_bundle_member(archive, member_name, member_bytes[member_name])
     return {
         "path": str(bundle_path),
         "bundle": bundle_payload,
-        "replay": replay_descriptor,
-        "signatures": signatures,
         "decision_journal": decision_journal,
     }
 
 
 def verify_bundle(bundle_path: Path | str) -> dict[str, Any]:
-    """Verify a bundle archive or an extracted bundle.json replay package."""
+    """Verify a bundle archive or an extracted bundle.json package."""
     return verify_portable_evidence_bundle(bundle_path)
 
 
@@ -216,149 +161,90 @@ def verify_portable_evidence_bundle(bundle_path: Path | str) -> dict[str, Any]:
     try:
         source = _load_bundle_source(path)
         source_kind = source["source_kind"]
-        payloads = source["payloads"]
-        member_bytes = source["member_bytes"]
-        bundle_bytes = source["bundle_bytes"]
-
-        bundle_payload = payloads[_BUNDLE_MANIFEST_NAME]
-        evidence_payload = payloads[_EVIDENCE_NAME]
-        input_state = payloads[_INPUT_STATE_NAME]
-        state = payloads[_RELEASED_STATE_NAME]
-        report = payloads[_VERIFICATION_REPORT_NAME]
-        decision_journal = payloads[_DECISION_JOURNAL_NAME]
-        profile_descriptor = payloads[_PROFILE_DESCRIPTOR_NAME]
-        transcript = payloads[_TRANSCRIPT_NAME]
-        replay_descriptor = payloads[_REPLAY_DESCRIPTOR_NAME]
-        signatures = payloads[_SIGNATURES_NAME]
+        bundle_payload = source["bundle_payload"]
+        member_names = list(source["member_names"])
+        member_bytes = dict(source["member_bytes"])
+        payloads = dict(source["payloads"])
+        failures.extend(
+            _verify_bundle_structure_and_integrity(
+                bundle_payload=bundle_payload,
+                member_names=member_names,
+                member_bytes=member_bytes,
+                payloads=payloads,
+                source_kind=source_kind,
+            )
+        )
+        input_state = _require_member_payload(payloads, _INPUT_STATE_NAME)
+        state = _require_member_payload(payloads, _RELEASED_STATE_NAME)
+        report = _require_member_payload(payloads, _VERIFICATION_REPORT_NAME)
+        decision_journal = _require_member_payload(payloads, _DECISION_JOURNAL_NAME)
+        evidence_payload = _require_member_payload(payloads, _EVIDENCE_NAME)
         anchored_evidence_payload = _transparency_log_payload_from_mapping(evidence_payload)
-        if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
-            descriptor_failure = _validate_multi_series_profile_descriptor_set(profile_descriptor)
-            if descriptor_failure is not None:
-                failures.append(descriptor_failure)
-        else:
-            try:
-                verification_profile_descriptor_from_dict(profile_descriptor)
-            except ValueError as exc:
-                failures.append(f"verification_profile_descriptor.json is invalid: {exc}")
-
+        receipt_entry = _receipt_entry_from_bundle(bundle_payload)
+        transparency_prefix_bytes = member_bytes.get(_TRANSPARENCY_PREFIX_NAME, b"")
+        transparency_prefix_entries = _parse_transparency_entries(transparency_prefix_bytes)
         evidence_failures = validate_evidence_payload(evidence_payload)
         if evidence_failures:
             failures.append(f"evidence.json failed ICSD validation: {evidence_failures!r}")
-
-        try:
-            _ensure_released_state(state)
-        except ValueError as exc:
-            failures.append(str(exc))
-
+        _ensure_released_state(state)
         expected_report = build_case_verification_report(state)
         if report != expected_report:
             failures.append("verification_report.json does not match the released state's math trace.")
-        if profile_descriptor != expected_report["contracts"]["verification_profile_descriptor"]:
-            failures.append(
-                "verification_profile_descriptor.json does not match the released state's runtime profile."
-            )
-        if not expected_report["release_eligible"]:
-            failures.append("released_state.json is not release-eligible.")
-
-        expected_optional_members = _build_optional_bundle_members(expected_report)
-        for member_name in expected_optional_members:
-            if member_name not in member_bytes:
-                failures.append(f"Bundle is missing expected optional member {member_name!r}.")
-
         trace_failures = _check_released_state_matches_trace(state)
         if trace_failures:
             failures.extend(failure.message for failure in trace_failures)
-
-        log_snapshot = {
-            "bytes": member_bytes[_TRANSPARENCY_LOG_NAME],
-            "entries": _parse_transparency_entries(member_bytes[_TRANSPARENCY_LOG_NAME]),
-            "checkpoint": None,
-        }
-        chain_error = _verify_transparency_entries(log_snapshot["entries"])
-        if chain_error is not None:
-            failures.append(chain_error)
+        if receipt_entry is None:
+            failures.append("bundle.json transparency_anchor is missing anchored receipt metadata.")
         else:
-            log_snapshot["checkpoint"] = (
-                log_snapshot["entries"][-1]["entry_hash"] if log_snapshot["entries"] else None
-            )
-
-        receipt_entry = None
-        try:
-            receipt_entry = _resolve_receipt_entry(
-                evidence_payload=evidence_payload,
-                anchored_evidence_payload=anchored_evidence_payload,
-                log_entries=log_snapshot["entries"],
-            )
-        except ValueError as exc:
-            failures.append(str(exc))
-
-        if receipt_entry is not None:
-            receipt_context = build_transparency_receipt_context(
-                reference=_transparency_receipt(evidence_payload)["reference"],
-                entry_hash=str(receipt_entry["entry_hash"]),
-                previous_entry_hash=receipt_entry.get("previous_entry_hash"),
-                checkpoint=log_snapshot["checkpoint"],
-                entry_index=int(receipt_entry["index"]),
-                log_length=len(log_snapshot["entries"]),
-            )
-            expected_decision_journal = build_decision_journal(
-                expected_report,
-                transparency_receipt_context=receipt_context,
-            )
-            if decision_journal != expected_decision_journal:
-                failures.append(
-                    "decision_journal.json does not match the deterministic decision journal."
+            failures.extend(
+                _verify_transparency_anchor_against_prefix(
+                    evidence_payload=evidence_payload,
+                    anchored_evidence_payload=anchored_evidence_payload,
+                    transparency_prefix_entries=transparency_prefix_entries,
+                    receipt_entry=receipt_entry,
                 )
-            expected_transcript = _build_bundle_transcript(
-                state=state,
-                report=expected_report,
-                evidence_payload=evidence_payload,
-                receipt_entry=receipt_entry,
-                checkpoint=log_snapshot["checkpoint"],
             )
-            if transcript != expected_transcript:
-                failures.append(
-                    "transcript.json does not match the deterministic verification transcript."
+        expected_decision_journal = build_decision_journal(
+            expected_report,
+            transparency_receipt_context=(
+                None
+                if receipt_entry is None
+                else _minimal_transparency_receipt_context(
+                    evidence_payload=evidence_payload,
+                    receipt_entry=receipt_entry,
                 )
-            expected_bundle = _build_bundle_manifest(
-                state=state,
-                report=expected_report,
-                evidence_payload=evidence_payload,
-                anchored_evidence_payload=anchored_evidence_payload,
-                decision_journal=expected_decision_journal,
-                transcript=expected_transcript,
-                replay_descriptor=replay_descriptor,
-                log_snapshot=log_snapshot,
-                receipt_entry=receipt_entry,
-            )
-            if bundle_payload != expected_bundle:
-                failures.append("bundle.json does not match the deterministic bundle manifest.")
-
-            replay_verification = _verify_deterministic_replay(
-                input_state=input_state,
-                expected_state=state,
-                expected_report=expected_report,
-                expected_decision_journal=expected_decision_journal,
-                expected_evidence_payload=evidence_payload,
-                expected_profile_descriptor=profile_descriptor,
-                expected_member_bytes=member_bytes,
-                expected_bundle_bytes=bundle_bytes,
-                replay_descriptor=replay_descriptor,
-                log_snapshot=log_snapshot,
-                receipt_entry=receipt_entry,
-                scratch_root=path.parent,
-            )
-            failures.extend(replay_verification["failures"])
-
-        expected_signatures = _build_signature_catalog(
-            {
-                name: member_bytes[name]
-                for name in _ordered_bundle_member_names(member_bytes)
-                if name != _SIGNATURES_NAME
-            }
+            ),
         )
-        if signatures != expected_signatures:
-            failures.append("signatures.json does not match the bundled member contents.")
+        if decision_journal != expected_decision_journal:
+            failures.append("decision_journal.json does not match the deterministic decision journal.")
+        expected_bundle = _build_bundle_payload(
+            state=state,
+            report=expected_report,
+            evidence_payload=evidence_payload,
+            decision_journal=expected_decision_journal,
+            receipt_entry=receipt_entry,
+            attachments=bundle_payload.get(_ATTACHMENTS_KEY),
+        )
+        if bundle_payload.get("claim") != expected_bundle["claim"]:
+            failures.append("bundle.json claim does not match the deterministic claim surface.")
+        if bundle_payload.get("proof_context") != expected_bundle["proof_context"]:
+            failures.append("bundle.json proof_context does not match the deterministic proof surface.")
+        if bundle_payload.get("replay_inputs") != expected_bundle["replay_inputs"]:
+            failures.append("bundle.json replay_inputs does not match the deterministic replay seed surface.")
+        if bundle_payload.get("release_artifacts") != expected_bundle["release_artifacts"]:
+            failures.append("bundle.json release_artifacts does not match the canonical artifact descriptor table.")
+        replay_verification = _verify_deterministic_replay(
+            input_state=input_state,
+            expected_state=state,
+            expected_report=expected_report,
+            expected_decision_journal=expected_decision_journal,
+            expected_evidence_payload=evidence_payload,
+            bundle_payload=bundle_payload,
+            transparency_prefix_bytes=transparency_prefix_bytes,
+            receipt_entry=receipt_entry,
+            scratch_root=path.parent,
+        )
+        failures.extend(replay_verification["failures"])
     except Exception as exc:
         return {
             "verified": False,
@@ -366,496 +252,455 @@ def verify_portable_evidence_bundle(bundle_path: Path | str) -> dict[str, Any]:
             "failures": [str(exc)],
             "details": {"source_kind": source_kind},
         }
-
     return {
         "verified": not failures,
         "bundle_path": str(path),
         "failures": failures,
         "details": {
-            "case_id": state.get("case_id"),
+            "case_id": payloads.get(_RELEASED_STATE_NAME, {}).get("case_id"),
             "bundle_type": bundle_payload.get("bundle_type"),
-            "receipt_reference": bundle_payload.get("transparency", {}).get("receipt_reference"),
-            "evidence_hash": bundle_payload.get("hashes", {}).get("evidence_hash"),
             "replay_verified": replay_verification["verified"],
-            "replayed_bundle_sha256": replay_verification["details"].get(
-                "replayed_bundle_sha256"
-            ),
+            "replayed_bundle_sha256": replay_verification["details"].get("replayed_bundle_sha256"),
             "source_kind": source_kind,
         },
     }
 
 
-def _ensure_released_state(state: Mapping[str, Any]) -> None:
-    if state.get("release_status") != RELEASE_STATUS_RELEASED:
-        raise ValueError("Portable bundles require a released MRI guardian state.")
-
-
-def _build_bundle_manifest(
+def _build_bundle_payload(
     *,
     state: Mapping[str, Any],
     report: Mapping[str, Any],
     evidence_payload: Mapping[str, Any],
-    anchored_evidence_payload: Mapping[str, Any],
     decision_journal: Mapping[str, Any],
-    transcript: Mapping[str, Any],
-    replay_descriptor: Mapping[str, Any],
-    log_snapshot: Mapping[str, Any],
-    receipt_entry: Mapping[str, Any],
+    receipt_entry: Mapping[str, Any] | None,
+    attachments: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
-        return _build_multi_series_bundle_manifest(
-            state=state,
-            report=report,
+    payload: dict[str, Any] = {
+        "bundle_type": GUARDIAN_BUNDLE_TYPE,
+        "bundle_schema_version": GUARDIAN_BUNDLE_SCHEMA_VERSION,
+        "claim": _build_claim(state=state, report=report),
+        "proof_context": _build_proof_context(report),
+        "replay_inputs": _build_replay_inputs(state=state, report=report, evidence_payload=evidence_payload),
+        "release_artifacts": _build_release_artifacts(),
+        "integrity_manifest": {},
+        "transparency_anchor": _build_transparency_anchor(
             evidence_payload=evidence_payload,
-            anchored_evidence_payload=anchored_evidence_payload,
-            decision_journal=decision_journal,
-            transcript=transcript,
-            replay_descriptor=replay_descriptor,
-            log_snapshot=log_snapshot,
             receipt_entry=receipt_entry,
-        )
-    analysis = report["analysis"]
+        ),
+    }
+    if attachments:
+        payload[_ATTACHMENTS_KEY] = _normalise_attachments(attachments)
+    return payload
+
+
+def _build_claim(*, state: Mapping[str, Any], report: Mapping[str, Any]) -> dict[str, Any]:
+    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        return _build_multi_series_claim(state=state, report=report)
+    return _build_single_series_claim(report["contracts"]["ai_claim_envelope"])
+
+
+def _build_single_series_claim(ai_claim_envelope: Mapping[str, Any]) -> dict[str, Any]:
+    ai_identity = {"ai_model_id": ai_claim_envelope["ai_model_id"]}
+    if ai_claim_envelope.get("ai_stack_identity") is not None:
+        ai_identity["ai_stack_identity"] = deepcopy(ai_claim_envelope["ai_stack_identity"])
+    return {
+        "claim_scope": ai_claim_envelope["claim_scope"],
+        "case_id": ai_claim_envelope["case_id"],
+        "case_kind": "single_series_v1",
+        "input_identity": {
+            "study_uid": ai_claim_envelope["study_uid"],
+            "series_uid": ai_claim_envelope["series_uid"],
+            "patient_pseudonym": ai_claim_envelope["patient_pseudonym"],
+            "raw_kspace_hash": ai_claim_envelope["raw_kspace_hash"],
+            "voxel_spacing_mm": list(ai_claim_envelope["voxel_spacing_mm"]),
+        },
+        "ai_identity": ai_identity,
+        "declared_outputs": deepcopy(ai_claim_envelope["claimed_outputs"]),
+    }
+
+
+def _build_multi_series_claim(*, state: Mapping[str, Any], report: Mapping[str, Any]) -> dict[str, Any]:
+    input_identity = {
+        "study_uid": state["study_uid"],
+        "patient_pseudonym": state["patient_pseudonym"],
+    }
+    scanner_id = state.get("scanner_id")
+    if isinstance(scanner_id, str) and scanner_id:
+        input_identity["scanner_id"] = scanner_id
+    return {
+        "claim_scope": "multi_series_study_verification",
+        "case_id": state["case_id"],
+        "case_kind": MULTI_SERIES_CASE_KIND,
+        "input_identity": input_identity,
+        "required_series_ids": list(report["analysis"]["required_series_ids"]),
+        "supporting_series_ids": list(report["analysis"]["supporting_series_ids"]),
+        "series_claims": [
+            {
+                "series_id": series_report["series_id"],
+                "series_uid": series_report["series_uid"],
+                "resolved_role": series_report["resolved_role"],
+                "gating_status": series_report["gating_status"],
+                "claim": _build_single_series_claim(series_report["contracts"]["ai_claim_envelope"]),
+            }
+            for series_report in report["series_reports"]
+        ],
+    }
+
+
+def _build_proof_context(report: Mapping[str, Any]) -> dict[str, Any]:
+    if report.get("case_kind") == MULTI_SERIES_CASE_KIND:
+        return _build_multi_series_proof_context(report)
+    return _build_single_series_proof_context(report)
+
+
+def _build_single_series_proof_context(report: Mapping[str, Any]) -> dict[str, Any]:
     contracts = report["contracts"]
-    members = list(_REQUIRED_BUNDLE_MEMBERS)
-    if (
-        contracts.get("prior_verified_context") is not None
-        or contracts.get("prior_verified_contexts") is not None
-    ):
-        members.extend(_OPTIONAL_BUNDLE_MEMBERS)
-    hashes = {
-        "verification_profile_descriptor_hash": hash_canonical_json(
-            contracts["verification_profile_descriptor"]
-        ),
-        "raw_kspace_hash": analysis["raw_hash"],
-        "ai_claim_envelope_hash": hash_canonical_json(contracts["ai_claim_envelope"]),
-        "mask_derivation_policy_hash": hash_canonical_json(
-            contracts["mask_derivation_policy"]
-        ),
-        "verification_tolerance_policy_hash": hash_canonical_json(
-            contracts["verification_tolerance_policy"]
-        ),
-        "proof_stage_hashes": dict(contracts["proof_core_evidence_trace"]["proof_stage_hashes"]),
-        "proof_core_evidence_trace_hash": hash_canonical_json(
-            contracts["proof_core_evidence_trace"]
-        ),
-        "temporal_consistency_trace_hash": hash_canonical_json(
-            contracts["temporal_consistency_trace"]
-        ),
-        "reconstruction_hash": analysis["derived_reconstruction_hash"],
-        "ai_mask_hash": analysis["ai_mask_hash"],
-        "verified_mask_hash": analysis["verified_mask_hash"],
-        "input_state_hash": replay_descriptor["expected_hashes"]["input_state_hash"],
-        "verified_manifest_hash": hash_canonical_json(state["verified_manifest"]),
-        "workstation_payload_hash": hash_canonical_json(state["workstation_payload"]),
-        "released_state_hash": hash_canonical_json(state),
-        "evidence_hash": hash_canonical_json(evidence_payload),
-        "anchored_evidence_hash": hash_canonical_json(anchored_evidence_payload),
-        "verification_report_hash": hash_canonical_json(report),
-        "decision_journal_hash": hash_canonical_json(decision_journal),
-        "transcript_hash": hash_canonical_json(transcript),
-        "transparency_log_hash": _sha256_hex(log_snapshot["bytes"]),
-        "transparency_prefix_hash": replay_descriptor["expected_hashes"][
-            "transparency_prefix_hash"
-        ],
+    derived_traces: dict[str, Any] = {
+        "proof_core_evidence_trace": deepcopy(contracts["proof_core_evidence_trace"]),
     }
-    prior_verified_context = contracts.get("prior_verified_context")
-    prior_verified_contexts = contracts.get("prior_verified_contexts")
-    if prior_verified_contexts is not None:
-        hashes["prior_verified_contexts_hash"] = hash_canonical_json(prior_verified_contexts)
-    if prior_verified_context is not None:
-        hashes["prior_verified_context_hash"] = hash_canonical_json(prior_verified_context)
-    for key, hash_name in (
-        ("longitudinal_selection_trace", "longitudinal_selection_trace_hash"),
-        ("temporal_trajectory_trace", "temporal_trajectory_trace_hash"),
-        ("longitudinal_registration_trace", "longitudinal_registration_trace_hash"),
-    ):
-        if contracts.get(key) is not None:
-            hashes[hash_name] = hash_canonical_json(contracts[key])
-    return {
-        "schema_version": _BUNDLE_SCHEMA_VERSION,
-        "bundle_type": "mri_guard_bundle",
-        "bundle_media_type": _BUNDLE_MEDIA_TYPE,
-        "case_id": state["case_id"],
-        "entity_type": evidence_payload["entity_type"],
-        "entity_id": evidence_payload["entity_id"],
-        "generated_at": evidence_payload["timestamp"],
-        "actor": evidence_payload["actor"],
-        "profile_name": report["profile"]["profile_name"],
-        "profile_revision": report["profile"]["profile_revision"],
-        "profile_digest": report["profile"]["profile_digest"],
-        "icsd_policy_id": report["profile"]["icsd_policy_id"],
-        "icsd_policy_version": report["profile"]["icsd_policy_version"],
-        "verdict": "This scan is verifiably correct.",
-        "hashes": hashes,
-        "verification": {
-            "release_eligible": bool(report["release_eligible"]),
-            "decision": report["decision"],
-            "decision_summary": report["decision_summary"],
-            "failure_reasons": report["failure_reasons"],
-            "pipeline_phase_statuses": _pipeline_phase_statuses(report),
-            "proof_stage_statuses": _proof_stage_statuses(report),
-        },
-        "deterministic_replay": {
-            "supported": True,
-            "mode": replay_descriptor["replay_mode"],
-            "input_member": _INPUT_STATE_NAME,
-            "replay_member": _REPLAY_DESCRIPTOR_NAME,
-            "profile_descriptor_member": _PROFILE_DESCRIPTOR_NAME,
-            "transition_id": replay_descriptor["transition_id"],
-        },
-        "transparency": {
-            "receipt_reference": _transparency_receipt(evidence_payload)["reference"],
-            "entry_hash": receipt_entry["entry_hash"],
-            "previous_entry_hash": receipt_entry["previous_entry_hash"],
-            "checkpoint": log_snapshot["checkpoint"],
-            "entry_index": receipt_entry["index"],
-            "log_length": len(log_snapshot["entries"]),
-        },
-        "members": members,
-        "signatures_member": _SIGNATURES_NAME,
-    }
-
-
-def _build_bundle_transcript(
-    *,
-    state: Mapping[str, Any],
-    report: Mapping[str, Any],
-    evidence_payload: Mapping[str, Any],
-    receipt_entry: Mapping[str, Any],
-    checkpoint: str | None,
- ) -> dict[str, Any]:
-    if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
-        return _build_multi_series_bundle_transcript(
-            state=state,
-            report=report,
-            evidence_payload=evidence_payload,
-            receipt_entry=receipt_entry,
-            checkpoint=checkpoint,
+    if _single_series_temporal_context_present(contracts):
+        derived_traces.update(
+            {
+                "longitudinal_selection_trace": deepcopy(contracts["longitudinal_selection_trace"]),
+                "temporal_trajectory_trace": deepcopy(contracts["temporal_trajectory_trace"]),
+                "longitudinal_registration_trace": deepcopy(contracts["longitudinal_registration_trace"]),
+                "temporal_consistency_trace": deepcopy(contracts["temporal_consistency_trace"]),
+            }
         )
-    analysis = report["analysis"]
-    manifest = report["manifest"]
-    verification_pipeline = report["verification_pipeline"]
-    proof_core = verification_pipeline["phases"]["proof_core"]
     return {
-        "schema_version": _BUNDLE_SCHEMA_VERSION,
-        "transcript_type": "portable_mri_guard_transcript",
-        "case_id": state["case_id"],
-        "timestamp": evidence_payload["timestamp"],
-        "actor": evidence_payload["actor"],
-        "statement": "This scan is verifiably correct.",
-        "events": [
-            {
-                "stage": "profile",
-                "summary": "Resolved the Guardian runtime profile and fixed its canonical digest.",
-                "details": {
-                    "profile_name": report["profile"]["profile_name"],
-                    "profile_revision": report["profile"]["profile_revision"],
-                    "profile_digest": report["profile"]["profile_digest"],
-                    "icsd_policy_id": report["profile"]["icsd_policy_id"],
-                    "icsd_policy_version": report["profile"]["icsd_policy_version"],
-                },
-            },
-            {
-                "stage": "capture",
-                "summary": "Captured the raw MRI measurements and fixed their canonical hash.",
-                "details": {
-                    "raw_kspace_hash": analysis["raw_hash"],
-                    "voxel_spacing_mm": state["voxel_spacing_mm"],
-                },
-            },
-            {
-                "stage": "measurement_integrity_proof",
-                "summary": (
-                    "Materialized the measurement-domain proof that anchors the derived "
-                    "reconstruction to the supplied raw measurements within policy."
-                ),
-                "details": {
-                    "reconstruction_hash": analysis["derived_reconstruction_hash"],
-                    "forward_projection_hash": analysis["forward_projection_hash"],
-                    "max_measurement_abs_error": analysis["max_measurement_abs_error"],
-                    "relative_measurement_l2_error": analysis["relative_measurement_l2_error"],
-                    "max_imaginary_leakage": analysis["max_imaginary_leakage"],
-                },
-            },
-            {
-                "stage": "reconstruction_parity_proof",
-                "summary": (
-                    "Materialized the reconstruction-parity proof between the AI image "
-                    "and the raw-derived reconstruction."
-                ),
-                "details": {
-                    "ai_reconstruction_hash": analysis["ai_reconstruction_hash"],
-                    "derived_reconstruction_hash": analysis["derived_reconstruction_hash"],
-                    "max_ai_abs_error": analysis["max_ai_abs_error"],
-                    "relative_ai_l2_error": analysis["relative_ai_l2_error"],
-                },
-            },
-            {
-                "stage": "segmentation_policy_proof",
-                "summary": (
-                    "Materialized the segmentation-policy proof between the AI mask and "
-                    "the policy-derived verified mask."
-                ),
-                "details": {
-                    "ai_mask_hash": analysis["ai_mask_hash"],
-                    "verified_mask_hash": analysis["verified_mask_hash"],
-                    "mask_voxel_delta": analysis["mask_voxel_delta"],
-                },
-            },
-            {
-                "stage": "volume_computation_proof",
-                "summary": (
-                    "Materialized the volume-computation proof from the verified mask, "
-                    "voxel geometry, and claimed scalar quantity."
-                ),
-                "details": {
-                    "claimed_tumor_volume_mm3": manifest["volume_computation_proof"][
-                        "claimed_mm3"
-                    ],
-                    "verified_tumor_volume_mm3": manifest["volume_computation_proof"][
-                        "computed_mm3"
-                    ],
-                    "verified_mask_voxel_count": manifest["volume_computation_proof"][
-                        "voxel_count"
-                    ],
-                    "voxel_volume_mm3": manifest["volume_computation_proof"][
-                        "voxel_volume_mm3"
-                    ],
-                },
-            },
-            {
-                "stage": "proof_core_evidence_trace",
-                "summary": (
-                    "Aggregated the already-materialized proof-stage artefacts into the "
-                    "strictly derived proof-core evidence trace."
-                ),
-                "details": dict(report["contracts"]["proof_core_evidence_trace"]),
-            },
-            {
-                "stage": "verification_pipeline",
-                "summary": (
-                    "Recorded the canonical assurance-flow schema and evidence-ordering "
-                    "model for this case."
-                ),
-                "details": {
-                    "ordering_semantics": verification_pipeline["ordering_semantics"],
-                    "pipeline_phase_statuses": _pipeline_phase_statuses(report),
-                    "proof_stage_statuses": _proof_stage_statuses(report),
-                    "proof_core_status": proof_core["status"],
-                },
-            },
-            {
-                "stage": "release",
-                "summary": "Passed only the raw-derived reconstruction and verified mask through the verification layer to the PACS/workstation boundary.",
-                "details": {
-                    "release_status": state["release_status"],
-                    "workstation_payload_hash": hash_canonical_json(state["workstation_payload"]),
-                    "verified_manifest_hash": hash_canonical_json(state["verified_manifest"]),
-                },
-            },
-            {
-                "stage": "transparency",
-                "summary": "Anchored the ICSD evidence envelope into the append-only transparency hash chain.",
-                "details": {
-                    "receipt_reference": _transparency_receipt(evidence_payload)["reference"],
-                    "entry_hash": receipt_entry["entry_hash"],
-                    "previous_entry_hash": receipt_entry["previous_entry_hash"],
-                    "checkpoint": checkpoint,
-                },
-            },
-        ],
+        "profile_identity": {
+            "profile_name": report["profile"]["profile_name"],
+            "profile_revision": report["profile"]["profile_revision"],
+            "profile_digest": report["profile"]["profile_digest"],
+        },
+        "policy_identity": {
+            "icsd_policy_id": report["profile"]["icsd_policy_id"],
+            "icsd_policy_version": report["profile"]["icsd_policy_version"],
+            "verification_profile_descriptor_hash": hash_canonical_json(contracts["verification_profile_descriptor"]),
+            "mask_derivation_policy_hash": hash_canonical_json(contracts["mask_derivation_policy"]),
+            "verification_tolerance_policy_hash": hash_canonical_json(contracts["verification_tolerance_policy"]),
+        },
+        "tolerance_definitions": deepcopy(contracts["verification_tolerance_policy"]["rules"]),
+        "proof_outputs": {
+            "measurement_integrity_proof": deepcopy(contracts["measurement_integrity_proof"]),
+            "reconstruction_parity_proof": deepcopy(contracts["reconstruction_parity_proof"]),
+            "segmentation_policy_proof": deepcopy(contracts["segmentation_policy_proof"]),
+            "volume_computation_proof": deepcopy(contracts["volume_computation_proof"]),
+        },
+        "derived_traces": derived_traces,
     }
 
 
-def _build_replay_descriptor(
+def _build_multi_series_proof_context(report: Mapping[str, Any]) -> dict[str, Any]:
+    contracts = report["contracts"]
+    return {
+        "profile_identity": {
+            "case_kind": MULTI_SERIES_CASE_KIND,
+            "interface_type": report["profile"]["interface_type"],
+            "interface_version": report["profile"]["interface_version"],
+            "verification_profile_descriptor_hash": hash_canonical_json(contracts["verification_profile_descriptor"]),
+        },
+        "policy_identity": {
+            "cross_series_verification_policy_hash": hash_canonical_json(contracts["cross_series_verification_policy"]),
+            "series_policy_hashes": [
+                {
+                    "series_id": series_report["series_id"],
+                    "mask_derivation_policy_hash": hash_canonical_json(series_report["contracts"]["mask_derivation_policy"]),
+                    "verification_tolerance_policy_hash": hash_canonical_json(series_report["contracts"]["verification_tolerance_policy"]),
+                }
+                for series_report in report["series_reports"]
+            ],
+        },
+        "tolerance_definitions": {
+            "series": [
+                {
+                    "series_id": series_report["series_id"],
+                    "rules": deepcopy(series_report["contracts"]["verification_tolerance_policy"]["rules"]),
+                }
+                for series_report in report["series_reports"]
+            ]
+        },
+        "proof_outputs": {
+            "series": [
+                {
+                    "series_id": series_report["series_id"],
+                    "series_uid": series_report["series_uid"],
+                    "resolved_role": series_report["resolved_role"],
+                    "gating_status": series_report["gating_status"],
+                    "proof_stage_outputs": {
+                        "measurement_integrity_proof": deepcopy(series_report["contracts"]["measurement_integrity_proof"]),
+                        "reconstruction_parity_proof": deepcopy(series_report["contracts"]["reconstruction_parity_proof"]),
+                        "segmentation_policy_proof": deepcopy(series_report["contracts"]["segmentation_policy_proof"]),
+                        "volume_computation_proof": deepcopy(series_report["contracts"]["volume_computation_proof"]),
+                    },
+                }
+                for series_report in report["series_reports"]
+            ]
+        },
+        "derived_traces": {
+            "series": [_build_series_trace_surface(series_report) for series_report in report["series_reports"]],
+            "study": _build_multi_series_study_traces(contracts),
+        },
+    }
+
+
+def _build_series_trace_surface(series_report: Mapping[str, Any]) -> dict[str, Any]:
+    contracts = series_report["contracts"]
+    payload: dict[str, Any] = {
+        "series_id": series_report["series_id"],
+        "series_uid": series_report["series_uid"],
+        "resolved_role": series_report["resolved_role"],
+        "gating_status": series_report["gating_status"],
+        "proof_core_evidence_trace": deepcopy(contracts["proof_core_evidence_trace"]),
+    }
+    if _single_series_temporal_context_present(contracts):
+        payload["longitudinal_selection_trace"] = deepcopy(contracts["longitudinal_selection_trace"])
+        payload["temporal_trajectory_trace"] = deepcopy(contracts["temporal_trajectory_trace"])
+        payload["longitudinal_registration_trace"] = deepcopy(contracts["longitudinal_registration_trace"])
+        payload["temporal_consistency_trace"] = deepcopy(contracts["temporal_consistency_trace"])
+    return payload
+
+
+def _build_multi_series_study_traces(contracts: Mapping[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "cross_series_verification_trace": deepcopy(contracts["cross_series_verification_trace"]),
+    }
+    if contracts.get("study_temporal_aggregation_trace") is not None:
+        payload["study_temporal_aggregation_trace"] = deepcopy(contracts["study_temporal_aggregation_trace"])
+    return payload
+
+
+def _build_replay_inputs(
     *,
-    before_state: Mapping[str, Any],
     state: Mapping[str, Any],
     report: Mapping[str, Any],
-    decision_journal: Mapping[str, Any],
     evidence_payload: Mapping[str, Any],
-    anchored_evidence_payload: Mapping[str, Any],
-    log_snapshot: Mapping[str, Any],
-    receipt_entry: Mapping[str, Any],
 ) -> dict[str, Any]:
     if state.get("case_kind") == MULTI_SERIES_CASE_KIND:
-        return _build_multi_series_replay_descriptor(
-            before_state=before_state,
-            state=state,
-            report=report,
-            decision_journal=decision_journal,
-            evidence_payload=evidence_payload,
-            anchored_evidence_payload=anchored_evidence_payload,
-            log_snapshot=log_snapshot,
-            receipt_entry=receipt_entry,
-        )
-    prefix_entries = log_snapshot["entries"][: receipt_entry["index"]]
-    prefix_bytes = _serialise_transparency_entries(prefix_entries)
+        return _build_multi_series_replay_inputs(report=report, evidence_payload=evidence_payload)
+    return _build_single_series_replay_inputs(report=report, evidence_payload=evidence_payload)
+
+
+def _build_single_series_replay_inputs(
+    *,
+    report: Mapping[str, Any],
+    evidence_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    contracts = report["contracts"]
+    replay_contracts: dict[str, Any] = {
+        "verification_profile_descriptor": deepcopy(contracts["verification_profile_descriptor"]),
+        "mask_derivation_policy": deepcopy(contracts["mask_derivation_policy"]),
+        "verification_tolerance_policy": deepcopy(contracts["verification_tolerance_policy"]),
+    }
+    if contracts.get("prior_verified_contexts") is not None:
+        replay_contracts["prior_verified_contexts"] = deepcopy(contracts["prior_verified_contexts"])
+    if contracts.get("prior_verified_context") is not None:
+        replay_contracts["prior_verified_context"] = deepcopy(contracts["prior_verified_context"])
     return {
-        "schema_version": _BUNDLE_SCHEMA_VERSION,
-        "replay_type": "deterministic_mri_guard_replay",
         "replay_mode": "seeded_transparency_prefix",
-        "statement": "Same replay input produces identical output and identical hashes.",
-        "entity_type": evidence_payload["entity_type"],
-        "entity_id": evidence_payload["entity_id"],
-        "authority": evidence_payload["authority"],
+        "input_member": _INPUT_STATE_NAME,
+        "transparency_prefix_member": _TRANSPARENCY_PREFIX_NAME,
         "actor": evidence_payload["actor"],
         "timestamp": evidence_payload["timestamp"],
         "transition_id": evidence_payload["transition_id"],
         "profile_name": report["profile"]["profile_name"],
-        "profile_revision": report["profile"]["profile_revision"],
-        "profile_digest": report["profile"]["profile_digest"],
-        "icsd_policy_id": report["profile"]["icsd_policy_id"],
-        "icsd_policy_version": report["profile"]["icsd_policy_version"],
-        "authority_sources": evidence_payload["authority_sources"],
-        "transparency_prefix_entry_count": receipt_entry["index"],
-        "expected_hashes": {
-            "input_state_hash": hash_canonical_json(before_state),
-            "released_state_hash": hash_canonical_json(state),
-            "workstation_payload_hash": hash_canonical_json(state["workstation_payload"]),
-            "verified_manifest_hash": hash_canonical_json(state["verified_manifest"]),
-            "verification_profile_descriptor_hash": hash_canonical_json(report["profile"]),
-            "evidence_hash": hash_canonical_json(evidence_payload),
-            "anchored_evidence_hash": hash_canonical_json(anchored_evidence_payload),
-        "verification_report_hash": hash_canonical_json(report),
-        "decision_journal_hash": hash_canonical_json(decision_journal),
-        "transparency_prefix_hash": _sha256_hex(prefix_bytes),
-    },
-}
-
-
-def _build_signature_catalog(member_bytes: dict[str, bytes]) -> dict[str, Any]:
-    return {
-        "schema_version": _BUNDLE_SCHEMA_VERSION,
-        "signature_type": "sha256_integrity_catalog",
-        "members": [
-            {
-                "path": member_name,
-                "algorithm": "sha256",
-                "value": _sha256_hex(payload),
-            }
-            for member_name, payload in sorted(member_bytes.items())
-        ],
+        "authority_sources": deepcopy(evidence_payload["authority_sources"]),
+        "contracts": replay_contracts,
     }
 
 
-def _build_single_series_optional_bundle_members(
+def _build_multi_series_replay_inputs(
+    *,
     report: Mapping[str, Any],
-) -> dict[str, bytes]:
-    if report.get("analysis", {}).get("series") is not None:
-        return {}
-    contracts = report["contracts"]
-    prior_verified_context = contracts.get("prior_verified_context")
-    prior_verified_contexts = contracts.get("prior_verified_contexts")
-    if prior_verified_context is None and prior_verified_contexts is None:
-        return {}
-    members = {
-        _LONGITUDINAL_SELECTION_TRACE_NAME: _json_bytes(
-            contracts["longitudinal_selection_trace"]
-        ),
-        _TEMPORAL_TRAJECTORY_TRACE_NAME: _json_bytes(
-            contracts["temporal_trajectory_trace"]
-        ),
-        _LONGITUDINAL_REGISTRATION_TRACE_NAME: _json_bytes(
-            contracts["longitudinal_registration_trace"]
-        ),
-        _TEMPORAL_CONSISTENCY_TRACE_NAME: _json_bytes(
-            contracts["temporal_consistency_trace"]
-        ),
-    }
-    if prior_verified_contexts is not None:
-        members[_PRIOR_VERIFIED_CONTEXTS_NAME] = _json_bytes(prior_verified_contexts)
-    if prior_verified_context is not None:
-        members[_PRIOR_VERIFIED_CONTEXT_NAME] = _json_bytes(prior_verified_context)
-    return members
-
-
-def _build_multi_series_optional_bundle_members(
-    report: Mapping[str, Any],
-) -> dict[str, bytes]:
-    if report.get("analysis", {}).get("series") is None:
-        return {}
-    trace = report["contracts"].get("study_temporal_aggregation_trace")
-    if trace is None:
-        return {}
+    evidence_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    primary_series_report = next(item for item in report["series_reports"] if item["resolved_role"] == "primary")
+    series_contracts: list[dict[str, Any]] = []
+    for series_report in report["series_reports"]:
+        contracts = series_report["contracts"]
+        payload: dict[str, Any] = {
+            "series_id": series_report["series_id"],
+            "series_uid": series_report["series_uid"],
+            "resolved_role": series_report["resolved_role"],
+            "gating_status": series_report["gating_status"],
+            "verification_profile_descriptor": deepcopy(contracts["verification_profile_descriptor"]),
+            "mask_derivation_policy": deepcopy(contracts["mask_derivation_policy"]),
+            "verification_tolerance_policy": deepcopy(contracts["verification_tolerance_policy"]),
+        }
+        if contracts.get("prior_verified_contexts") is not None:
+            payload["prior_verified_contexts"] = deepcopy(contracts["prior_verified_contexts"])
+        if contracts.get("prior_verified_context") is not None:
+            payload["prior_verified_context"] = deepcopy(contracts["prior_verified_context"])
+        series_contracts.append(payload)
     return {
-        _STUDY_TEMPORAL_AGGREGATION_TRACE_NAME: _json_bytes(trace),
+        "replay_mode": "seeded_transparency_prefix",
+        "input_member": _INPUT_STATE_NAME,
+        "transparency_prefix_member": _TRANSPARENCY_PREFIX_NAME,
+        "actor": evidence_payload["actor"],
+        "timestamp": evidence_payload["timestamp"],
+        "transition_id": evidence_payload["transition_id"],
+        "default_profile_name": primary_series_report["profile"]["profile_name"],
+        "authority_sources": deepcopy(evidence_payload["authority_sources"]),
+        "contracts": {
+            "verification_profile_descriptor": deepcopy(report["contracts"]["verification_profile_descriptor"]),
+            "cross_series_verification_policy": deepcopy(report["contracts"]["cross_series_verification_policy"]),
+            "series_contracts": series_contracts,
+        },
     }
 
 
-def _build_optional_bundle_members(
-    report: Mapping[str, Any],
-) -> dict[str, bytes]:
-    members = dict(_build_single_series_optional_bundle_members(report))
-    members.update(_build_multi_series_optional_bundle_members(report))
-    return members
-
-
-def _ordered_bundle_member_names(member_names: Mapping[str, Any] | set[str] | tuple[str, ...]) -> list[str]:
-    names = set(member_names)
-    ordered = list(_REQUIRED_BUNDLE_MEMBERS)
-    ordered.extend(name for name in _OPTIONAL_BUNDLE_MEMBERS if name in names)
-    return ordered
-
-
-def _load_bundle_source(path: Path) -> dict[str, Any]:
-    if path.suffix.lower() == ".json":
-        return _read_extracted_bundle_members(path)
-    return _read_bundle_archive_members(path)
-
-
-def _read_bundle_archive_members(path: Path) -> dict[str, Any]:
-    member_bytes: dict[str, bytes] = {}
-    payloads: dict[str, Any] = {}
-    bundle_bytes = path.read_bytes()
-    with ZipFile(path, mode="r") as archive:
-        names = set(archive.namelist())
-        missing_members = [name for name in _REQUIRED_BUNDLE_MEMBERS if name not in names]
-        if missing_members:
-            missing = ", ".join(missing_members)
-            raise ValueError(f"Bundle is missing required members: {missing}.")
-        for member_name in _ordered_bundle_member_names(names):
-            payload = archive.read(member_name)
-            member_bytes[member_name] = payload
-            if member_name.endswith(".json"):
-                payloads[member_name] = json.loads(payload.decode("utf-8"))
+def _build_release_artifacts() -> dict[str, Any]:
     return {
-        "source_kind": "archive",
-        "bundle_bytes": bundle_bytes,
-        "member_bytes": member_bytes,
-        "payloads": payloads,
+        "artifacts": [
+            {"artifact_id": artifact_id, "member": member_name, "media_type": _JSON_MEDIA_TYPE}
+            for artifact_id, member_name in _RELEASE_ARTIFACT_ORDER
+        ]
     }
 
 
-def _read_extracted_bundle_members(bundle_json_path: Path) -> dict[str, Any]:
-    if bundle_json_path.name != _BUNDLE_MANIFEST_NAME:
-        msg = f"verify_bundle expects {_BUNDLE_MANIFEST_NAME!r} when pointed at an extracted JSON bundle."
-        raise ValueError(msg)
-    root = bundle_json_path.parent
-    member_bytes: dict[str, bytes] = {}
-    payloads: dict[str, Any] = {}
-    for member_name in _ordered_bundle_member_names(
-        _REQUIRED_BUNDLE_MEMBERS
-        + tuple(
-            member_name
-            for member_name in _OPTIONAL_BUNDLE_MEMBERS
-            if (root / member_name).exists()
-        )
-    ):
-        member_path = root / member_name
-        if not member_path.exists():
-            msg = f"Extracted bundle is missing required member {member_name!r}."
-            raise ValueError(msg)
-        payload = member_path.read_bytes()
-        member_bytes[member_name] = payload
-        if member_name.endswith(".json"):
-            payloads[member_name] = json.loads(payload.decode("utf-8"))
+def _build_transparency_anchor(
+    *,
+    evidence_payload: Mapping[str, Any],
+    receipt_entry: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if receipt_entry is None:
+        return {"status": "not_anchored"}
     return {
-        "source_kind": "directory",
-        "bundle_bytes": None,
-        "member_bytes": member_bytes,
-        "payloads": payloads,
+        "status": "anchored",
+        "receipt_reference": _transparency_receipt(evidence_payload)["reference"],
+        "anchor_id": _transparency_reference(receipt_entry),
+        "entry_hash": receipt_entry["entry_hash"],
+        "previous_entry_hash": receipt_entry.get("previous_entry_hash"),
+        "entry_index": int(receipt_entry["index"]),
     }
+
+
+def _build_integrity_manifest(
+    *,
+    bundle_payload: Mapping[str, Any],
+    member_bytes: Mapping[str, bytes],
+    attachments: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    member_order = [_BUNDLE_MANIFEST_NAME, *_PROOF_CRITICAL_MEMBERS]
+    attachment_members = [str(item["member"]) for item in _normalise_attachments(attachments or [])]
+    member_order.extend(attachment_members)
+    member_hashes = _member_hash_entries(
+        bundle_payload=bundle_payload,
+        member_bytes=member_bytes,
+        member_order=member_order,
+    )
+    return {
+        "member_order": member_order,
+        "member_hashes": member_hashes,
+        "proof_critical_members": list(_PROOF_CRITICAL_MEMBERS),
+        "bundle_descriptor_hash": _bundle_descriptor_hash(bundle_payload),
+        "bundle_hash": hash_canonical_json(member_hashes),
+    }
+
+
+def _verify_bundle_structure_and_integrity(
+    *,
+    bundle_payload: Mapping[str, Any],
+    member_names: Sequence[str],
+    member_bytes: Mapping[str, bytes],
+    payloads: Mapping[str, Any],
+    source_kind: str,
+) -> list[str]:
+    failures: list[str] = []
+    expected_keys = set(_REQUIRED_TOP_LEVEL_KEYS)
+    if _ATTACHMENTS_KEY in bundle_payload:
+        expected_keys.add(_ATTACHMENTS_KEY)
+    missing = sorted(key for key in _REQUIRED_TOP_LEVEL_KEYS if key not in bundle_payload)
+    unexpected = sorted(key for key in bundle_payload if key not in expected_keys)
+    if missing:
+        failures.append(f"bundle.json is missing required top-level fields: {', '.join(missing)}.")
+    if unexpected:
+        failures.append(f"bundle.json contains unsupported top-level fields: {', '.join(unexpected)}.")
+    if bundle_payload.get("bundle_type") != GUARDIAN_BUNDLE_TYPE:
+        failures.append(f"bundle.json bundle_type must be {GUARDIAN_BUNDLE_TYPE!r}.")
+    if bundle_payload.get("bundle_schema_version") != GUARDIAN_BUNDLE_SCHEMA_VERSION:
+        failures.append(f"bundle.json bundle_schema_version must be {GUARDIAN_BUNDLE_SCHEMA_VERSION!r}.")
+    if member_bytes.get(_BUNDLE_MANIFEST_NAME) != _json_bytes(bundle_payload):
+        failures.append("bundle.json is not canonically encoded.")
+
+    integrity_manifest = bundle_payload.get("integrity_manifest")
+    if not isinstance(integrity_manifest, Mapping):
+        failures.append("bundle.json integrity_manifest must be an object.")
+        return failures
+    declared_member_order = _declared_member_order(bundle_payload)
+    if not declared_member_order:
+        failures.append("bundle.json integrity_manifest.member_order must be a non-empty list.")
+        return failures
+    if declared_member_order[0] != _BUNDLE_MANIFEST_NAME:
+        failures.append("bundle.json integrity_manifest.member_order must start with bundle.json.")
+    if source_kind == "archive" and list(member_names) != declared_member_order:
+        failures.append("Archive member order does not match bundle.json integrity_manifest.member_order.")
+    if source_kind == "directory" and set(member_names) != set(declared_member_order):
+        failures.append("Extracted bundle members do not match bundle.json integrity_manifest.member_order.")
+
+    declared_member_set = set(declared_member_order)
+    for member_name in declared_member_order:
+        if member_name not in member_bytes:
+            failures.append(f"Bundle is missing declared member {member_name!r}.")
+    undeclared = sorted(name for name in member_names if name not in declared_member_set)
+    if undeclared:
+        failures.append(f"Bundle contains undeclared members: {', '.join(undeclared)}.")
+
+    if integrity_manifest.get("proof_critical_members") != list(_PROOF_CRITICAL_MEMBERS):
+        failures.append("bundle.json integrity_manifest.proof_critical_members does not match Guardian Bundle V1.")
+    attachments = _normalise_attachments(bundle_payload.get(_ATTACHMENTS_KEY, []))
+    attachment_members = {str(item["member"]) for item in attachments}
+    if attachment_members.intersection(_PROOF_CRITICAL_MEMBERS):
+        failures.append("bundle.json attachments must never be proof-critical in V1.")
+    for attachment_member in attachment_members:
+        if attachment_member not in declared_member_set:
+            failures.append(f"bundle.json attachments references undeclared member {attachment_member!r}.")
+
+    if bundle_payload.get("release_artifacts") != _build_release_artifacts():
+        failures.append("bundle.json release_artifacts does not match the canonical artifact descriptor table.")
+    replay_inputs = bundle_payload.get("replay_inputs")
+    if isinstance(replay_inputs, Mapping):
+        if replay_inputs.get("input_member") != _INPUT_STATE_NAME:
+            failures.append("bundle.json replay_inputs.input_member must be input_state.json.")
+        if replay_inputs.get("transparency_prefix_member") != _TRANSPARENCY_PREFIX_NAME:
+            failures.append("bundle.json replay_inputs.transparency_prefix_member must be transparency-prefix.jsonl.")
+
+    transparency_anchor = bundle_payload.get("transparency_anchor")
+    if not isinstance(transparency_anchor, Mapping):
+        failures.append("bundle.json transparency_anchor must be an object.")
+    elif transparency_anchor.get("status") not in {"anchored", "not_anchored"}:
+        failures.append("bundle.json transparency_anchor.status must be 'anchored' or 'not_anchored'.")
+
+    actual_member_hashes = _member_hash_entries(
+        bundle_payload=bundle_payload,
+        member_bytes=member_bytes,
+        member_order=declared_member_order,
+    )
+    if integrity_manifest.get("member_hashes") != actual_member_hashes:
+        failures.append("bundle.json integrity_manifest.member_hashes does not match the declared bundle members.")
+    if integrity_manifest.get("bundle_descriptor_hash") != _bundle_descriptor_hash(bundle_payload):
+        failures.append("bundle.json integrity_manifest.bundle_descriptor_hash does not match the redacted bundle descriptor.")
+    if integrity_manifest.get("bundle_hash") != hash_canonical_json(actual_member_hashes):
+        failures.append("bundle.json integrity_manifest.bundle_hash does not match the ordered member hash list.")
+
+    transparency_prefix_bytes = member_bytes.get(_TRANSPARENCY_PREFIX_NAME, b"")
+    try:
+        prefix_entries = _parse_transparency_entries(transparency_prefix_bytes)
+    except ValueError as exc:
+        failures.append(str(exc))
+    else:
+        chain_error = _verify_transparency_entries(prefix_entries)
+        if chain_error is not None:
+            failures.append(chain_error)
+        elif transparency_prefix_bytes != _serialise_transparency_entries(prefix_entries):
+            failures.append("transparency-prefix.jsonl is not canonically encoded.")
+
+    for member_name, payload in payloads.items():
+        if member_name == _BUNDLE_MANIFEST_NAME:
+            continue
+        if member_name.endswith(".json") and member_bytes.get(member_name) != _json_bytes(payload):
+            failures.append(f"{member_name} is not canonically encoded.")
+    return failures
 
 
 def _verify_deterministic_replay(
@@ -865,213 +710,312 @@ def _verify_deterministic_replay(
     expected_report: Mapping[str, Any],
     expected_decision_journal: Mapping[str, Any],
     expected_evidence_payload: Mapping[str, Any],
-    expected_profile_descriptor: Mapping[str, Any],
-    expected_member_bytes: Mapping[str, bytes],
-    expected_bundle_bytes: bytes | None,
-    replay_descriptor: Mapping[str, Any],
-    log_snapshot: Mapping[str, Any],
-    receipt_entry: Mapping[str, Any],
+    bundle_payload: Mapping[str, Any],
+    transparency_prefix_bytes: bytes,
+    receipt_entry: Mapping[str, Any] | None,
     scratch_root: Path,
 ) -> dict[str, Any]:
-    if input_state.get("case_kind") == MULTI_SERIES_CASE_KIND:
-        return _verify_multi_series_deterministic_replay(
-            input_state=input_state,
-            expected_state=expected_state,
-            expected_report=expected_report,
-            expected_decision_journal=expected_decision_journal,
-            expected_evidence_payload=expected_evidence_payload,
-            expected_profile_descriptor=expected_profile_descriptor,
-            expected_member_bytes=expected_member_bytes,
-            expected_bundle_bytes=expected_bundle_bytes,
-            replay_descriptor=replay_descriptor,
-            log_snapshot=log_snapshot,
-            receipt_entry=receipt_entry,
-            scratch_root=scratch_root,
-        )
     failures: list[str] = []
-    expected_hashes = dict(replay_descriptor["expected_hashes"])
-    observed_hashes = {
-        "input_state_hash": hash_canonical_json(input_state),
-        "released_state_hash": hash_canonical_json(expected_state),
-        "workstation_payload_hash": hash_canonical_json(expected_state["workstation_payload"]),
-        "verified_manifest_hash": hash_canonical_json(expected_state["verified_manifest"]),
-        "verification_profile_descriptor_hash": hash_canonical_json(expected_profile_descriptor),
-        "evidence_hash": hash_canonical_json(expected_evidence_payload),
-        "anchored_evidence_hash": hash_canonical_json(
-            _transparency_log_payload_from_mapping(expected_evidence_payload)
-        ),
-        "verification_report_hash": hash_canonical_json(expected_report),
-        "decision_journal_hash": hash_canonical_json(expected_decision_journal),
-        "transparency_prefix_hash": _sha256_hex(
-            _serialise_transparency_entries(log_snapshot["entries"][: receipt_entry["index"]])
-        ),
-    }
-    for hash_name, observed_value in observed_hashes.items():
-        if expected_hashes.get(hash_name) == observed_value:
-            continue
-        failures.append(
-            f"replay.json expected {hash_name}={expected_hashes.get(hash_name)!r}, got {observed_value!r}."
-        )
+    replayed_bundle_sha256 = None
+    if receipt_entry is None:
+        failures.append("deterministic replay requires an anchored transparency receipt.")
+        return {"verified": False, "failures": failures, "details": {"replayed_bundle_sha256": replayed_bundle_sha256}}
 
-    replay_bundle_sha256 = None
-    if failures:
-        return {
-            "verified": False,
-            "failures": failures,
-            "details": {"replayed_bundle_sha256": replay_bundle_sha256},
-        }
-
-    prefix_entries = log_snapshot["entries"][: receipt_entry["index"]]
-    prefix_bytes = _serialise_transparency_entries(prefix_entries)
-    temp_root = scratch_root / (
-        f".mri_guard_replay_{_sha256_hex(_json_bytes(replay_descriptor))[:12]}"
+    replay_inputs = bundle_payload["replay_inputs"]
+    expected_replay_inputs = _build_replay_inputs(
+        state=expected_state,
+        report=expected_report,
+        evidence_payload=expected_evidence_payload,
     )
+    if replay_inputs != expected_replay_inputs:
+        failures.append("bundle.json replay_inputs does not match the deterministic replay seed surface.")
+    failures.extend(
+        _verify_runtime_profile_registry(
+            replay_inputs=replay_inputs,
+            expected_replay_inputs=expected_replay_inputs,
+        )
+    )
+    if failures:
+        return {"verified": False, "failures": failures, "details": {"replayed_bundle_sha256": replayed_bundle_sha256}}
+
+    temp_root = scratch_root / f".guardian_bundle_replay_{_sha256_hex(_json_bytes(replay_inputs))[:12]}"
     if temp_root.exists():
         shutil.rmtree(temp_root, ignore_errors=True)
     temp_root.mkdir(parents=True, exist_ok=True)
     try:
-        runtime_profile = get_verification_profile(str(replay_descriptor["profile_name"]))
-        runtime_profile_payload = runtime_profile.to_dict()
-        if runtime_profile.profile_revision != replay_descriptor["profile_revision"]:
-            failures.append(
-                "embedded_profile_revision_mismatch: replay descriptor profile_revision "
-                "does not match the runtime registry."
-            )
-        if runtime_profile.profile_digest() != replay_descriptor["profile_digest"]:
-            failures.append(
-                "embedded_profile_digest_mismatch: replay descriptor digest does not "
-                "match the runtime registry."
-            )
-        if runtime_profile.icsd_policy_id != replay_descriptor["icsd_policy_id"]:
-            failures.append(
-                "embedded_profile_policy_id_mismatch: replay descriptor ICSD policy id "
-                "does not match the runtime registry."
-            )
-        if runtime_profile.icsd_policy_version != replay_descriptor["icsd_policy_version"]:
-            failures.append(
-                "embedded_profile_policy_version_mismatch: replay descriptor ICSD policy version "
-                "does not match the runtime registry."
-            )
-        if runtime_profile_payload != expected_profile_descriptor:
-            failures.append(
-                "embedded_profile_descriptor_mismatch: bundled profile descriptor does not "
-                "match the runtime registry."
-            )
-        if failures:
-            return {
-                "verified": False,
-                "failures": failures,
-                "details": {"replayed_bundle_sha256": replay_bundle_sha256},
-            }
-        temp_log_path = temp_root / _TRANSPARENCY_LOG_NAME
-        temp_log_path.write_bytes(prefix_bytes)
+        temp_log_path = temp_root / _TRANSPARENCY_PREFIX_NAME
+        temp_log_path.write_bytes(transparency_prefix_bytes)
         harness = MriGuardianHarness(
             transparency_log_path=temp_log_path,
-            default_profile_name=str(replay_descriptor["profile_name"]),
+            default_profile_name=str(replay_inputs.get("profile_name", replay_inputs.get("default_profile_name", ""))),
         )
-        replay_result = harness.release_case(
-            state=input_state,
-            actor=str(replay_descriptor["actor"]),
-            authority_sources=replay_descriptor["authority_sources"],
-            profile_name=str(replay_descriptor["profile_name"]),
-            timestamp=str(replay_descriptor["timestamp"]),
-            transition_id=str(replay_descriptor["transition_id"]),
-        )
+        if input_state.get("case_kind") == MULTI_SERIES_CASE_KIND:
+            replay_result = harness.release_multi_series_case(
+                state=input_state,
+                actor=str(replay_inputs["actor"]),
+                authority_sources_by_series_id=_group_authority_sources_by_series_id(list(replay_inputs["authority_sources"])),
+                timestamp=str(replay_inputs["timestamp"]),
+                transition_id=str(replay_inputs["transition_id"]),
+            )
+        else:
+            replay_result = harness.release_case(
+                state=input_state,
+                actor=str(replay_inputs["actor"]),
+                authority_sources=list(replay_inputs["authority_sources"]),
+                profile_name=str(replay_inputs["profile_name"]),
+                timestamp=str(replay_inputs["timestamp"]),
+                transition_id=str(replay_inputs["transition_id"]),
+            )
         replay_evidence_payload = replay_result.evidence.as_dict()
         if replay_result.after_state != expected_state:
-            failures.append(
-                "Deterministic replay did not reproduce the released_state.json payload."
-            )
+            failures.append("Deterministic replay did not reproduce the released_state.json payload.")
         if replay_evidence_payload != expected_evidence_payload:
             failures.append("Deterministic replay did not reproduce the evidence.json payload.")
         replay_report = build_case_verification_report(replay_result.after_state)
         if replay_report != expected_report:
-            failures.append(
-                "Deterministic replay did not reproduce the verification_report.json payload."
-            )
-        replay_receipt_context = build_transparency_receipt_context(
-            reference=_transparency_receipt(replay_evidence_payload)["reference"],
-            entry_hash=str(log_snapshot["entries"][receipt_entry["index"]]["entry_hash"]),
-            previous_entry_hash=log_snapshot["entries"][receipt_entry["index"]].get("previous_entry_hash"),
-            checkpoint=log_snapshot["entries"][-1]["entry_hash"] if log_snapshot["entries"] else None,
-            entry_index=int(receipt_entry["index"]),
-            log_length=len(log_snapshot["entries"]),
-        )
+            failures.append("Deterministic replay did not reproduce the verification_report.json payload.")
         replay_decision_journal = build_decision_journal(
             replay_report,
-            transparency_receipt_context=replay_receipt_context,
+            transparency_receipt_context=_minimal_transparency_receipt_context(
+                evidence_payload=replay_evidence_payload,
+                receipt_entry=_resolve_receipt_entry(
+                    evidence_payload=replay_evidence_payload,
+                    anchored_evidence_payload=_transparency_log_payload_from_mapping(replay_evidence_payload),
+                    log_entries=_parse_transparency_entries(temp_log_path.read_bytes()),
+                ),
+            ),
         )
         if replay_decision_journal != expected_decision_journal:
-            failures.append(
-                "Deterministic replay did not reproduce the decision_journal.json payload."
-            )
-        replay_profile_descriptor = replay_report["contracts"]["verification_profile_descriptor"]
-        if replay_profile_descriptor != expected_profile_descriptor:
-            failures.append(
-                "Deterministic replay did not reproduce the verification_profile_descriptor.json payload."
-            )
-
-        replay_bundle_path = temp_root / f"{expected_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
-        write_portable_evidence_bundle(
+            failures.append("Deterministic replay did not reproduce the decision_journal.json payload.")
+        replay_bundle_path = temp_root / f"{expected_state['case_id']}{GUARDIAN_BUNDLE_EXTENSION}"
+        replay_metadata = write_portable_evidence_bundle(
             result=replay_result,
             transparency_log_path=temp_log_path,
             output_path=replay_bundle_path,
         )
-        replay_source = _load_bundle_source(replay_bundle_path)
-        for member_name in _ordered_bundle_member_names(expected_member_bytes):
-            if replay_source["member_bytes"][member_name] == expected_member_bytes[member_name]:
-                continue
-            failures.append(
-                f"Deterministic replay changed bundle member {member_name!r}."
-            )
-        replay_bundle_bytes = replay_bundle_path.read_bytes()
-        replay_bundle_sha256 = _sha256_hex(replay_bundle_bytes)
-        if expected_bundle_bytes is not None and replay_bundle_bytes != expected_bundle_bytes:
-            failures.append("Deterministic replay did not reproduce the original bundle archive bytes.")
+        replayed_bundle_sha256 = _sha256_hex(replay_bundle_path.read_bytes())
+        if replay_metadata["bundle"]["claim"] != bundle_payload["claim"]:
+            failures.append("Deterministic replay did not reproduce the bundle.json claim surface.")
+        if replay_metadata["bundle"]["proof_context"] != bundle_payload["proof_context"]:
+            failures.append("Deterministic replay did not reproduce the bundle.json proof_context surface.")
+        if replay_metadata["bundle"]["replay_inputs"] != bundle_payload["replay_inputs"]:
+            failures.append("Deterministic replay did not reproduce the bundle.json replay_inputs surface.")
+        if replay_metadata["bundle"]["release_artifacts"] != bundle_payload["release_artifacts"]:
+            failures.append("Deterministic replay did not reproduce the bundle.json release_artifacts surface.")
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
+    return {"verified": not failures, "failures": failures, "details": {"replayed_bundle_sha256": replayed_bundle_sha256}}
 
+
+def _verify_runtime_profile_registry(
+    *,
+    replay_inputs: Mapping[str, Any],
+    expected_replay_inputs: Mapping[str, Any],
+) -> list[str]:
+    failures: list[str] = []
+    contracts = replay_inputs["contracts"]
+    if "profile_name" in replay_inputs:
+        profile_name = str(replay_inputs["profile_name"])
+        runtime_profile_payload = get_verification_profile(profile_name).to_dict()
+        if contracts["verification_profile_descriptor"] != runtime_profile_payload:
+            failures.append("embedded_profile_descriptor_mismatch: bundled profile descriptor does not match the runtime registry.")
+        if runtime_profile_payload != expected_replay_inputs["contracts"]["verification_profile_descriptor"]:
+            failures.append("embedded_profile_digest_mismatch: bundled profile descriptor no longer matches the runtime registry.")
+        return failures
+    for item in contracts.get("series_contracts", []):
+        profile_descriptor = item["verification_profile_descriptor"]
+        profile_name = str(profile_descriptor["profile_name"])
+        runtime_profile_payload = get_verification_profile(profile_name).to_dict()
+        if profile_descriptor != runtime_profile_payload:
+            failures.append(
+                f"embedded_profile_descriptor_mismatch: series {item['series_id']!r} profile descriptor does not match the runtime registry."
+            )
+    return failures
+
+
+def _load_bundle_source(path: Path) -> dict[str, Any]:
+    if path.suffix.lower() == ".json":
+        return _read_extracted_bundle_members(path)
+    return _read_bundle_archive_members(path)
+
+
+def _read_bundle_archive_members(path: Path) -> dict[str, Any]:
+    member_names: list[str] = []
+    member_bytes: dict[str, bytes] = {}
+    payloads: dict[str, Any] = {}
+    with ZipFile(path, mode="r") as archive:
+        for info in archive.infolist():
+            member_names.append(info.filename)
+            payload = archive.read(info.filename)
+            member_bytes[info.filename] = payload
+            if info.filename.endswith(".json"):
+                payloads[info.filename] = json.loads(payload.decode("utf-8"))
+    if _BUNDLE_MANIFEST_NAME not in payloads:
+        raise ValueError("Bundle archive is missing bundle.json.")
     return {
-        "verified": not failures,
-        "failures": failures,
-        "details": {"replayed_bundle_sha256": replay_bundle_sha256},
+        "source_kind": "archive",
+        "member_names": member_names,
+        "member_bytes": member_bytes,
+        "payloads": payloads,
+        "bundle_payload": payloads[_BUNDLE_MANIFEST_NAME],
     }
 
 
-def _validate_multi_series_profile_descriptor_set(payload: Mapping[str, Any]) -> str | None:
-    if payload.get("interface_type") != "MultiSeriesVerificationProfileDescriptorSet":
-        return (
-            "verification_profile_descriptor.json is invalid: expected "
-            "'MultiSeriesVerificationProfileDescriptorSet'."
-        )
-    series_descriptors = payload.get("series_descriptors")
-    if not isinstance(series_descriptors, list) or not series_descriptors:
-        return (
-            "verification_profile_descriptor.json is invalid: series_descriptors must be a "
-            "non-empty list."
-        )
-    for item in series_descriptors:
+def _read_extracted_bundle_members(bundle_json_path: Path) -> dict[str, Any]:
+    if bundle_json_path.name != _BUNDLE_MANIFEST_NAME:
+        raise ValueError(f"verify_bundle expects {_BUNDLE_MANIFEST_NAME!r} when pointed at an extracted JSON bundle.")
+    root = bundle_json_path.parent
+    bundle_payload = json.loads(bundle_json_path.read_text(encoding="utf-8"))
+    member_names = sorted(path.name for path in root.iterdir() if path.is_file())
+    member_bytes: dict[str, bytes] = {}
+    payloads: dict[str, Any] = {_BUNDLE_MANIFEST_NAME: bundle_payload}
+    for member_name in member_names:
+        payload = (root / member_name).read_bytes()
+        member_bytes[member_name] = payload
+        if member_name.endswith(".json") and member_name != _BUNDLE_MANIFEST_NAME:
+            payloads[member_name] = json.loads(payload.decode("utf-8"))
+    return {
+        "source_kind": "directory",
+        "member_names": member_names,
+        "member_bytes": member_bytes,
+        "payloads": payloads,
+        "bundle_payload": bundle_payload,
+    }
+
+
+def _declared_member_order(bundle_payload: Mapping[str, Any]) -> list[str]:
+    member_order = bundle_payload.get("integrity_manifest", {}).get("member_order", [])
+    if not isinstance(member_order, list):
+        return []
+    names: list[str] = []
+    for item in member_order:
+        if type(item) is not str or item == "":
+            return []
+        names.append(item)
+    return names
+
+
+def _member_hash_entries(
+    *,
+    bundle_payload: Mapping[str, Any],
+    member_bytes: Mapping[str, bytes],
+    member_order: Sequence[str],
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for member_name in member_order:
+        value = _bundle_descriptor_hash(bundle_payload) if member_name == _BUNDLE_MANIFEST_NAME else _sha256_hex(member_bytes.get(member_name, b""))
+        entries.append({"member": member_name, "algorithm": "sha256", "value": value})
+    return entries
+
+
+def _bundle_descriptor_hash(bundle_payload: Mapping[str, Any]) -> str:
+    redacted = deepcopy(dict(bundle_payload))
+    redacted["integrity_manifest"] = _BUNDLE_REDACTION_SENTINEL
+    return hash_canonical_json(redacted)
+
+
+def _single_series_temporal_context_present(contracts: Mapping[str, Any]) -> bool:
+    return contracts.get("prior_verified_context") is not None or contracts.get("prior_verified_contexts") is not None
+
+
+def _require_member_payload(payloads: Mapping[str, Any], member_name: str) -> dict[str, Any]:
+    payload = payloads.get(member_name)
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"Bundle member {member_name!r} is missing or is not a JSON object.")
+    return dict(payload)
+
+
+def _normalise_attachments(attachments: Sequence[Mapping[str, Any]] | None) -> list[dict[str, Any]]:
+    if attachments is None:
+        return []
+    payload: list[dict[str, Any]] = []
+    seen_members: set[str] = set()
+    for index, item in enumerate(attachments):
         if not isinstance(item, Mapping):
-            return (
-                "verification_profile_descriptor.json is invalid: each series descriptor "
-                "entry must be a mapping."
-            )
-        profile_descriptor = item.get("verification_profile_descriptor")
-        if not isinstance(profile_descriptor, Mapping):
-            return (
-                "verification_profile_descriptor.json is invalid: each series descriptor "
-                "entry must contain verification_profile_descriptor."
-            )
-        try:
-            verification_profile_descriptor_from_dict(dict(profile_descriptor))
-        except ValueError as exc:
-            return f"verification_profile_descriptor.json is invalid: {exc}"
-    return None
+            raise ValueError(f"attachments[{index}] must be an object.")
+        member = item.get("member")
+        media_type = item.get("media_type")
+        if type(member) is not str or member == "":
+            raise ValueError(f"attachments[{index}].member must be a non-empty string.")
+        if type(media_type) is not str or media_type == "":
+            raise ValueError(f"attachments[{index}].media_type must be a non-empty string.")
+        if member in seen_members:
+            raise ValueError(f"attachments contains duplicate member {member!r}.")
+        payload.append({"member": member, "media_type": media_type})
+        seen_members.add(member)
+    return payload
 
 
-def _group_authority_sources_by_series_id(
-    authority_sources: list[dict[str, Any]],
-) -> dict[str, list[dict[str, Any]]]:
+def _minimal_transparency_receipt_context(
+    *,
+    evidence_payload: Mapping[str, Any],
+    receipt_entry: Mapping[str, Any],
+) -> dict[str, Any]:
+    return build_transparency_receipt_context(
+        reference=_transparency_receipt(evidence_payload)["reference"],
+        entry_hash=str(receipt_entry["entry_hash"]),
+        previous_entry_hash=receipt_entry.get("previous_entry_hash"),
+        checkpoint=str(receipt_entry["entry_hash"]),
+        entry_index=int(receipt_entry["index"]),
+        log_length=int(receipt_entry["index"]) + 1,
+    )
+
+
+def _receipt_entry_from_bundle(bundle_payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    transparency_anchor = bundle_payload.get("transparency_anchor")
+    if not isinstance(transparency_anchor, Mapping):
+        return None
+    if transparency_anchor.get("status") != "anchored":
+        return None
+    if type(transparency_anchor.get("entry_hash")) is not str:
+        return None
+    if type(transparency_anchor.get("entry_index")) is not int:
+        return None
+    previous_entry_hash = transparency_anchor.get("previous_entry_hash")
+    if previous_entry_hash is not None and type(previous_entry_hash) is not str:
+        return None
+    return {
+        "entry_hash": transparency_anchor["entry_hash"],
+        "index": int(transparency_anchor["entry_index"]),
+        "previous_entry_hash": previous_entry_hash,
+    }
+
+
+def _verify_transparency_anchor_against_prefix(
+    *,
+    evidence_payload: Mapping[str, Any],
+    anchored_evidence_payload: Mapping[str, Any],
+    transparency_prefix_entries: list[dict[str, Any]],
+    receipt_entry: Mapping[str, Any],
+) -> list[str]:
+    failures: list[str] = []
+    prefix_chain_error = _verify_transparency_entries(transparency_prefix_entries)
+    if prefix_chain_error is not None:
+        failures.append(prefix_chain_error)
+        return failures
+    expected_previous = None if not transparency_prefix_entries else transparency_prefix_entries[-1]["entry_hash"]
+    if int(receipt_entry["index"]) != len(transparency_prefix_entries):
+        failures.append("bundle.json transparency_anchor.entry_index does not match transparency-prefix.jsonl length.")
+    if receipt_entry.get("previous_entry_hash") != expected_previous:
+        failures.append("bundle.json transparency_anchor.previous_entry_hash does not match transparency-prefix.jsonl.")
+    if _transparency_receipt(evidence_payload)["reference"] != _transparency_reference(receipt_entry):
+        failures.append("bundle.json transparency_anchor does not match evidence.json provenance receipt.")
+    candidate = {
+        "index": int(receipt_entry["index"]),
+        "previous_entry_hash": receipt_entry.get("previous_entry_hash"),
+        "evidence_hash": hash_canonical_json(anchored_evidence_payload),
+    }
+    if receipt_entry["entry_hash"] != hash_canonical_json(candidate):
+        failures.append("bundle.json transparency_anchor.entry_hash does not match the canonical anchored evidence hash.")
+    return failures
+
+
+def _ensure_released_state(state: Mapping[str, Any]) -> None:
+    if state.get("release_status") != RELEASE_STATUS_RELEASED:
+        raise ValueError("Guardian bundles require a released guardian state.")
+
+
+def _group_authority_sources_by_series_id(authority_sources: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for source in authority_sources:
         details = dict(source.get("details", {}))
@@ -1082,372 +1026,16 @@ def _group_authority_sources_by_series_id(
     return grouped
 
 
-def _build_multi_series_bundle_manifest(
-    *,
-    state: Mapping[str, Any],
-    report: Mapping[str, Any],
-    evidence_payload: Mapping[str, Any],
-    anchored_evidence_payload: Mapping[str, Any],
-    decision_journal: Mapping[str, Any],
-    transcript: Mapping[str, Any],
-    replay_descriptor: Mapping[str, Any],
-    log_snapshot: Mapping[str, Any],
-    receipt_entry: Mapping[str, Any],
-) -> dict[str, Any]:
-    contracts = report["contracts"]
-    return {
-        "schema_version": _BUNDLE_SCHEMA_VERSION,
-        "bundle_type": "mri_guard_bundle_multi_series_v2",
-        "bundle_media_type": _BUNDLE_MEDIA_TYPE,
-        "case_kind": MULTI_SERIES_CASE_KIND,
-        "case_id": state["case_id"],
-        "entity_type": evidence_payload["entity_type"],
-        "entity_id": evidence_payload["entity_id"],
-        "generated_at": evidence_payload["timestamp"],
-        "actor": evidence_payload["actor"],
-        "verdict": "This study is verifiably correct.",
-        "hashes": {
-            "verification_profile_descriptor_hash": hash_canonical_json(
-                contracts["verification_profile_descriptor"]
-            ),
-            "cross_series_verification_policy_hash": hash_canonical_json(
-                contracts["cross_series_verification_policy"]
-            ),
-            "cross_series_verification_trace_hash": hash_canonical_json(
-                contracts["cross_series_verification_trace"]
-            ),
-            "study_temporal_aggregation_trace_hash": hash_canonical_json(
-                contracts["study_temporal_aggregation_trace"]
-            ),
-            "series_manifest_hashes": [
-                {
-                    "series_id": item["series_id"],
-                    "hash": hash_canonical_json(item),
-                }
-                for item in report["manifest"]["series_manifests"]
-            ],
-            "input_state_hash": replay_descriptor["expected_hashes"]["input_state_hash"],
-            "verified_manifest_hash": hash_canonical_json(state["verified_manifest"]),
-            "workstation_payload_hash": hash_canonical_json(state["workstation_payload"]),
-            "released_state_hash": hash_canonical_json(state),
-            "evidence_hash": hash_canonical_json(evidence_payload),
-            "anchored_evidence_hash": hash_canonical_json(anchored_evidence_payload),
-            "verification_report_hash": hash_canonical_json(report),
-            "decision_journal_hash": hash_canonical_json(decision_journal),
-            "transcript_hash": hash_canonical_json(transcript),
-            "transparency_log_hash": _sha256_hex(log_snapshot["bytes"]),
-            "transparency_prefix_hash": replay_descriptor["expected_hashes"][
-                "transparency_prefix_hash"
-            ],
-        },
-        "verification": {
-            "release_eligible": bool(report["release_eligible"]),
-            "decision": report["decision"],
-            "decision_summary": report["decision_summary"],
-            "failure_reasons": report["failure_reasons"],
-            "pipeline_phase_statuses": _pipeline_phase_statuses(report),
-            "released_series_ids": report["analysis"]["released_series_ids"],
-            "withheld_series_ids": report["analysis"]["withheld_series_ids"],
-        },
-        "deterministic_replay": {
-            "supported": True,
-            "mode": replay_descriptor["replay_mode"],
-            "input_member": _INPUT_STATE_NAME,
-            "replay_member": _REPLAY_DESCRIPTOR_NAME,
-            "profile_descriptor_member": _PROFILE_DESCRIPTOR_NAME,
-            "transition_id": replay_descriptor["transition_id"],
-        },
-        "transparency": {
-            "receipt_reference": _transparency_receipt(evidence_payload)["reference"],
-            "entry_hash": receipt_entry["entry_hash"],
-            "previous_entry_hash": receipt_entry["previous_entry_hash"],
-            "checkpoint": log_snapshot["checkpoint"],
-            "entry_index": receipt_entry["index"],
-            "log_length": len(log_snapshot["entries"]),
-        },
-        "members": list(_REQUIRED_BUNDLE_MEMBERS),
-        "signatures_member": _SIGNATURES_NAME,
-    }
-
-
-def _build_multi_series_bundle_transcript(
-    *,
-    state: Mapping[str, Any],
-    report: Mapping[str, Any],
-    evidence_payload: Mapping[str, Any],
-    receipt_entry: Mapping[str, Any],
-    checkpoint: str | None,
-) -> dict[str, Any]:
-    return {
-        "schema_version": _BUNDLE_SCHEMA_VERSION,
-        "transcript_type": "portable_mri_guard_multi_series_transcript",
-        "case_id": state["case_id"],
-        "timestamp": evidence_payload["timestamp"],
-        "actor": evidence_payload["actor"],
-        "statement": "This study is verifiably correct.",
-        "events": [
-            {
-                "stage": "profile_set",
-                "summary": "Resolved the ordered study profile descriptor set.",
-                "details": {
-                    "descriptor_hash": hash_canonical_json(
-                        report["contracts"]["verification_profile_descriptor"]
-                    ),
-                    "series_count": len(report["series_reports"]),
-                },
-            },
-            {
-                "stage": "per_series_proof",
-                "summary": "Verified every payload series independently.",
-                "details": {
-                    "series": [
-                        {
-                            "series_id": item["series_id"],
-                            "resolved_role": item["resolved_role"],
-                            "gating_status": item["gating_status"],
-                            "series_proof_status": item["series_proof_status"],
-                        }
-                        for item in report["series_reports"]
-                    ],
-                },
-            },
-            {
-                "stage": "cross_series_consistency",
-                "summary": "Evaluated required-series geometry and positive-lesion corroboration.",
-                "details": {
-                    "geometry_verification": report["contracts"]["cross_series_verification_trace"][
-                        "geometry_verification"
-                    ],
-                    "lesion_corroboration": report["contracts"]["cross_series_verification_trace"][
-                        "lesion_corroboration"
-                    ],
-                },
-            },
-            {
-                "stage": "release",
-                "summary": "Released only the study series that remained downstream-allowed after the merged gate.",
-                "details": {
-                    "release_status": state["release_status"],
-                    "released_series_ids": report["analysis"]["released_series_ids"],
-                    "withheld_series_ids": report["analysis"]["withheld_series_ids"],
-                    "workstation_payload_hash": hash_canonical_json(state["workstation_payload"]),
-                    "verified_manifest_hash": hash_canonical_json(state["verified_manifest"]),
-                },
-            },
-            {
-                "stage": "transparency",
-                "summary": "Anchored the ICSD evidence envelope into the append-only transparency hash chain.",
-                "details": {
-                    "receipt_reference": _transparency_receipt(evidence_payload)["reference"],
-                    "entry_hash": receipt_entry["entry_hash"],
-                    "previous_entry_hash": receipt_entry["previous_entry_hash"],
-                    "checkpoint": checkpoint,
-                },
-            },
-        ],
-    }
-
-
-def _build_multi_series_replay_descriptor(
-    *,
-    before_state: Mapping[str, Any],
-    state: Mapping[str, Any],
-    report: Mapping[str, Any],
-    decision_journal: Mapping[str, Any],
-    evidence_payload: Mapping[str, Any],
-    anchored_evidence_payload: Mapping[str, Any],
-    log_snapshot: Mapping[str, Any],
-    receipt_entry: Mapping[str, Any],
-) -> dict[str, Any]:
-    prefix_entries = log_snapshot["entries"][: receipt_entry["index"]]
-    prefix_bytes = _serialise_transparency_entries(prefix_entries)
-    primary_series_report = next(
-        item for item in report["series_reports"] if item["resolved_role"] == "primary"
-    )
-    return {
-        "schema_version": _BUNDLE_SCHEMA_VERSION,
-        "case_kind": MULTI_SERIES_CASE_KIND,
-        "replay_type": "deterministic_mri_guard_multi_series_replay",
-        "replay_mode": "seeded_transparency_prefix",
-        "statement": "Same replay input produces identical multi-series output and identical hashes.",
-        "entity_type": evidence_payload["entity_type"],
-        "entity_id": evidence_payload["entity_id"],
-        "authority": evidence_payload["authority"],
-        "actor": evidence_payload["actor"],
-        "timestamp": evidence_payload["timestamp"],
-        "transition_id": evidence_payload["transition_id"],
-        "default_profile_name": primary_series_report["profile"]["profile_name"],
-        "authority_sources_by_series_id": _group_authority_sources_by_series_id(
-            list(evidence_payload["authority_sources"])
-        ),
-        "transparency_prefix_entry_count": receipt_entry["index"],
-        "expected_hashes": {
-            "input_state_hash": hash_canonical_json(before_state),
-            "released_state_hash": hash_canonical_json(state),
-            "workstation_payload_hash": hash_canonical_json(state["workstation_payload"]),
-            "verified_manifest_hash": hash_canonical_json(state["verified_manifest"]),
-            "verification_profile_descriptor_hash": hash_canonical_json(
-                report["contracts"]["verification_profile_descriptor"]
-            ),
-            "evidence_hash": hash_canonical_json(evidence_payload),
-            "anchored_evidence_hash": hash_canonical_json(anchored_evidence_payload),
-            "verification_report_hash": hash_canonical_json(report),
-            "decision_journal_hash": hash_canonical_json(decision_journal),
-            "transparency_prefix_hash": _sha256_hex(prefix_bytes),
-        },
-    }
-
-
-def _verify_multi_series_deterministic_replay(
-    *,
-    input_state: Mapping[str, Any],
-    expected_state: Mapping[str, Any],
-    expected_report: Mapping[str, Any],
-    expected_decision_journal: Mapping[str, Any],
-    expected_evidence_payload: Mapping[str, Any],
-    expected_profile_descriptor: Mapping[str, Any],
-    expected_member_bytes: Mapping[str, bytes],
-    expected_bundle_bytes: bytes | None,
-    replay_descriptor: Mapping[str, Any],
-    log_snapshot: Mapping[str, Any],
-    receipt_entry: Mapping[str, Any],
-    scratch_root: Path,
-) -> dict[str, Any]:
-    failures: list[str] = []
-    expected_hashes = dict(replay_descriptor["expected_hashes"])
-    observed_hashes = {
-        "input_state_hash": hash_canonical_json(input_state),
-        "released_state_hash": hash_canonical_json(expected_state),
-        "workstation_payload_hash": hash_canonical_json(expected_state["workstation_payload"]),
-        "verified_manifest_hash": hash_canonical_json(expected_state["verified_manifest"]),
-        "verification_profile_descriptor_hash": hash_canonical_json(expected_profile_descriptor),
-        "evidence_hash": hash_canonical_json(expected_evidence_payload),
-        "anchored_evidence_hash": hash_canonical_json(
-            _transparency_log_payload_from_mapping(expected_evidence_payload)
-        ),
-        "verification_report_hash": hash_canonical_json(expected_report),
-        "decision_journal_hash": hash_canonical_json(expected_decision_journal),
-        "transparency_prefix_hash": _sha256_hex(
-            _serialise_transparency_entries(log_snapshot["entries"][: receipt_entry["index"]])
-        ),
-    }
-    for hash_name, observed_value in observed_hashes.items():
-        if expected_hashes.get(hash_name) == observed_value:
-            continue
-        failures.append(
-            f"replay.json expected {hash_name}={expected_hashes.get(hash_name)!r}, got {observed_value!r}."
-        )
-
-    descriptor_failure = _validate_multi_series_profile_descriptor_set(expected_profile_descriptor)
-    if descriptor_failure is not None:
-        failures.append(descriptor_failure)
-
-    replay_bundle_sha256 = None
-    if failures:
-        return {
-            "verified": False,
-            "failures": failures,
-            "details": {"replayed_bundle_sha256": replay_bundle_sha256},
-        }
-
-    prefix_entries = log_snapshot["entries"][: receipt_entry["index"]]
-    prefix_bytes = _serialise_transparency_entries(prefix_entries)
-    temp_root = scratch_root / (
-        f".mri_guard_replay_{_sha256_hex(_json_bytes(replay_descriptor))[:12]}"
-    )
-    if temp_root.exists():
-        shutil.rmtree(temp_root, ignore_errors=True)
-    temp_root.mkdir(parents=True, exist_ok=True)
-    try:
-        temp_log_path = temp_root / _TRANSPARENCY_LOG_NAME
-        temp_log_path.write_bytes(prefix_bytes)
-        harness = MriGuardianHarness(
-            transparency_log_path=temp_log_path,
-            default_profile_name=str(replay_descriptor["default_profile_name"]),
-        )
-        replay_result = harness.release_multi_series_case(
-            state=input_state,
-            actor=str(replay_descriptor["actor"]),
-            authority_sources_by_series_id=replay_descriptor["authority_sources_by_series_id"],
-            timestamp=str(replay_descriptor["timestamp"]),
-            transition_id=str(replay_descriptor["transition_id"]),
-        )
-        replay_evidence_payload = replay_result.evidence.as_dict()
-        if replay_result.after_state != expected_state:
-            failures.append(
-                "Deterministic replay did not reproduce the released_state.json payload."
-            )
-        if replay_evidence_payload != expected_evidence_payload:
-            failures.append("Deterministic replay did not reproduce the evidence.json payload.")
-        replay_report = build_case_verification_report(replay_result.after_state)
-        if replay_report != expected_report:
-            failures.append(
-                "Deterministic replay did not reproduce the verification_report.json payload."
-            )
-        replay_receipt_context = build_transparency_receipt_context(
-            reference=_transparency_receipt(replay_evidence_payload)["reference"],
-            entry_hash=str(log_snapshot["entries"][receipt_entry["index"]]["entry_hash"]),
-            previous_entry_hash=log_snapshot["entries"][receipt_entry["index"]].get("previous_entry_hash"),
-            checkpoint=log_snapshot["entries"][-1]["entry_hash"] if log_snapshot["entries"] else None,
-            entry_index=int(receipt_entry["index"]),
-            log_length=len(log_snapshot["entries"]),
-        )
-        replay_decision_journal = build_decision_journal(
-            replay_report,
-            transparency_receipt_context=replay_receipt_context,
-        )
-        if replay_decision_journal != expected_decision_journal:
-            failures.append(
-                "Deterministic replay did not reproduce the decision_journal.json payload."
-            )
-        replay_profile_descriptor = replay_report["contracts"]["verification_profile_descriptor"]
-        if replay_profile_descriptor != expected_profile_descriptor:
-            failures.append(
-                "Deterministic replay did not reproduce the verification_profile_descriptor.json payload."
-            )
-
-        replay_bundle_path = temp_root / f"{expected_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
-        write_portable_evidence_bundle(
-            result=replay_result,
-            transparency_log_path=temp_log_path,
-            output_path=replay_bundle_path,
-        )
-        replay_source = _load_bundle_source(replay_bundle_path)
-        for member_name in _REQUIRED_BUNDLE_MEMBERS:
-            if replay_source["member_bytes"][member_name] == expected_member_bytes[member_name]:
-                continue
-            failures.append(
-                f"Deterministic replay changed bundle member {member_name!r}."
-            )
-        replay_bundle_bytes = replay_bundle_path.read_bytes()
-        replay_bundle_sha256 = _sha256_hex(replay_bundle_bytes)
-        if expected_bundle_bytes is not None and replay_bundle_bytes != expected_bundle_bytes:
-            failures.append("Deterministic replay did not reproduce the original bundle archive bytes.")
-    finally:
-        shutil.rmtree(temp_root, ignore_errors=True)
-
-    return {
-        "verified": not failures,
-        "failures": failures,
-        "details": {"replayed_bundle_sha256": replay_bundle_sha256},
-    }
-
-
 def _read_transparency_log_snapshot(path: Path | str) -> dict[str, Any]:
     log_path = Path(path)
     if not log_path.exists():
-        msg = f"Transparency log snapshot not found: {log_path}"
-        raise ValueError(msg)
+        raise ValueError(f"Transparency log snapshot not found: {log_path}")
     payload = log_path.read_bytes()
     entries = _parse_transparency_entries(payload)
     chain_error = _verify_transparency_entries(entries)
     if chain_error is not None:
         raise ValueError(chain_error)
-    return {
-        "bytes": payload,
-        "entries": entries,
-        "checkpoint": entries[-1]["entry_hash"] if entries else None,
-    }
+    return {"bytes": payload, "entries": entries}
 
 
 def _parse_transparency_entries(payload: bytes) -> list[dict[str, Any]]:
@@ -1458,8 +1046,7 @@ def _parse_transparency_entries(payload: bytes) -> list[dict[str, Any]]:
             continue
         entry = json.loads(line)
         if not isinstance(entry, dict):
-            msg = f"Transparency log line {line_number} is not a JSON object."
-            raise ValueError(msg)
+            raise ValueError(f"Transparency log line {line_number} is not a JSON object.")
         entries.append(entry)
     return entries
 
@@ -1468,9 +1055,9 @@ def _verify_transparency_entries(entries: list[dict[str, Any]]) -> str | None:
     previous_entry_hash = None
     for expected_index, entry in enumerate(entries):
         if entry.get("index") != expected_index:
-            return "Bundled transparency log index sequence is not contiguous."
+            return "Bundled transparency prefix index sequence is not contiguous."
         if entry.get("previous_entry_hash") != previous_entry_hash:
-            return "Bundled transparency log previous_entry_hash chain is broken."
+            return "Bundled transparency prefix previous_entry_hash chain is broken."
         candidate = {
             "index": entry.get("index"),
             "previous_entry_hash": entry.get("previous_entry_hash"),
@@ -1478,7 +1065,7 @@ def _verify_transparency_entries(entries: list[dict[str, Any]]) -> str | None:
         }
         expected_entry_hash = hash_canonical_json(candidate)
         if entry.get("entry_hash") != expected_entry_hash:
-            return "Bundled transparency log entry_hash does not match canonical contents."
+            return "Bundled transparency prefix entry_hash does not match canonical contents."
         previous_entry_hash = expected_entry_hash
     return None
 
@@ -1496,11 +1083,9 @@ def _resolve_receipt_entry(
         if _transparency_reference(entry) != expected_reference:
             continue
         if entry["evidence_hash"] != expected_evidence_hash:
-            msg = "Transparency receipt reference exists, but evidence_hash does not match."
-            raise ValueError(msg)
+            raise ValueError("Transparency receipt reference exists, but evidence_hash does not match.")
         return entry
-    msg = f"Transparency receipt {expected_reference!r} is not present in the bundled log."
-    raise ValueError(msg)
+    raise ValueError(f"Transparency receipt {expected_reference!r} is not present in the transparency log.")
 
 
 def _transparency_receipt(evidence_payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1518,11 +1103,10 @@ def _transparency_reference(entry: Mapping[str, Any]) -> str:
 def _serialise_transparency_entries(entries: list[dict[str, Any]]) -> bytes:
     if not entries:
         return b""
-    lines = [canonical_json_dumps(entry) for entry in entries]
-    return f"{'\n'.join(lines)}\n".encode("utf-8")
+    return f"{'\n'.join(canonical_json_dumps(entry) for entry in entries)}\n".encode("utf-8")
 
 
-def _json_bytes(payload: Mapping[str, Any] | list[Any]) -> bytes:
+def _json_bytes(payload: Mapping[str, Any] | Sequence[Any]) -> bytes:
     return f"{canonical_json_dumps(payload)}\n".encode("utf-8")
 
 

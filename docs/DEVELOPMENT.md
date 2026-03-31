@@ -115,7 +115,7 @@ Verify the portable bundle:
 ```powershell
 @'
 from mri_guardian import verify_bundle
-print(verify_bundle("demo_artifacts/mri-case-0001.mri-guard-bundle"))
+print(verify_bundle("demo_artifacts/mri-case-0001.guardian-bundle"))
 '@ | .\.venv\Scripts\python.exe -
 ```
 

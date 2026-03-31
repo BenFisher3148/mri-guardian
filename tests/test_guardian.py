@@ -12,7 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
-from zipfile import ZipFile, ZipInfo
+from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
 import numpy as np
 
@@ -22,7 +22,7 @@ from icsd.core.serialise import canonical_json_dumps, hash_canonical_json
 
 import mri_guardian.profiles as profile_registry_module
 from mri_guardian.bundle import (
-    MRI_GUARD_BUNDLE_EXTENSION,
+    GUARDIAN_BUNDLE_EXTENSION,
     verify_bundle,
     write_portable_evidence_bundle,
 )
@@ -1107,7 +1107,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         )
         report = build_case_verification_report(result.after_state)
         temporal_trace = report["contracts"]["temporal_consistency_trace"]
-        bundle_path = self.runtime_root / f"temporal{MRI_GUARD_BUNDLE_EXTENSION}"
+        bundle_path = self.runtime_root / f"temporal{GUARDIAN_BUNDLE_EXTENSION}"
 
         write_portable_evidence_bundle(
             result=result,
@@ -1140,35 +1140,38 @@ class MriGuardianHarnessTests(unittest.TestCase):
         with ZipFile(bundle_path, mode="r") as archive:
             member_names = set(archive.namelist())
             manifest = self._read_bundle_json(archive, "bundle.json")
-            prior_context = self._read_bundle_json(archive, "prior_verified_context.json")
-            selection_trace = self._read_bundle_json(archive, "longitudinal_selection_trace.json")
-            trajectory_trace = self._read_bundle_json(archive, "temporal_trajectory_trace.json")
-            registration_trace = self._read_bundle_json(archive, "longitudinal_registration_trace.json")
-            temporal_contract = self._read_bundle_json(archive, "temporal_consistency_trace.json")
-        self.assertIn("prior_verified_context.json", member_names)
-        self.assertIn("longitudinal_selection_trace.json", member_names)
-        self.assertIn("temporal_trajectory_trace.json", member_names)
-        self.assertIn("longitudinal_registration_trace.json", member_names)
-        self.assertIn("temporal_consistency_trace.json", member_names)
         self.assertEqual(
-            manifest["hashes"]["prior_verified_context_hash"],
-            hash_canonical_json(prior_context),
+            member_names,
+            {
+                "bundle.json",
+                "input_state.json",
+                "released_state.json",
+                "workstation_payload.json",
+                "verification_report.json",
+                "decision_journal.json",
+                "evidence.json",
+                "transparency-prefix.jsonl",
+            },
         )
         self.assertEqual(
-            manifest["hashes"]["longitudinal_selection_trace_hash"],
-            hash_canonical_json(selection_trace),
+            manifest["replay_inputs"]["contracts"]["prior_verified_context"],
+            report["contracts"]["prior_verified_context"],
         )
         self.assertEqual(
-            manifest["hashes"]["temporal_trajectory_trace_hash"],
-            hash_canonical_json(trajectory_trace),
+            manifest["proof_context"]["derived_traces"]["longitudinal_selection_trace"],
+            report["contracts"]["longitudinal_selection_trace"],
         )
         self.assertEqual(
-            manifest["hashes"]["longitudinal_registration_trace_hash"],
-            hash_canonical_json(registration_trace),
+            manifest["proof_context"]["derived_traces"]["temporal_trajectory_trace"],
+            report["contracts"]["temporal_trajectory_trace"],
         )
         self.assertEqual(
-            manifest["hashes"]["temporal_consistency_trace_hash"],
-            hash_canonical_json(temporal_contract),
+            manifest["proof_context"]["derived_traces"]["longitudinal_registration_trace"],
+            report["contracts"]["longitudinal_registration_trace"],
+        )
+        self.assertEqual(
+            manifest["proof_context"]["derived_traces"]["temporal_consistency_trace"],
+            report["contracts"]["temporal_consistency_trace"],
         )
 
     def test_longitudinal_selection_trace_is_deterministic_for_multi_prior_history(self) -> None:
@@ -2672,7 +2675,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
         dicom_input = build_mock_dicom_input(result.before_state)
         pacs_submission = build_mock_pacs_submission(
             result,
-            bundle_reference="mri-case-0001.mri-guard-bundle",
+            bundle_reference="mri-case-0001.guardian-bundle",
         )
         integration_trace = build_mock_integration_trace(
             dicom_input=dicom_input,
@@ -3621,7 +3624,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
     def test_portable_bundle_round_trips_and_replays_identically(self) -> None:
         _, result = self._release_demo_case()
-        bundle_path = self.runtime_root / f"baseline{MRI_GUARD_BUNDLE_EXTENSION}"
+        bundle_path = self.runtime_root / f"baseline{GUARDIAN_BUNDLE_EXTENSION}"
 
         write_portable_evidence_bundle(
             result=result,
@@ -3629,46 +3632,39 @@ class MriGuardianHarnessTests(unittest.TestCase):
             output_path=bundle_path,
         )
         verification = verify_bundle(bundle_path)
+        expected_report = build_case_verification_report(result.after_state)
 
         self.assertTrue(verification["verified"])
         self.assertTrue(verification["details"]["replay_verified"])
         with ZipFile(bundle_path, mode="r") as archive:
             manifest = self._read_bundle_json(archive, "bundle.json")
             decision_journal = self._read_bundle_json(archive, "decision_journal.json")
-            transcript = self._read_bundle_json(archive, "transcript.json")
-            signatures = self._read_bundle_json(archive, "signatures.json")
-            replay = self._read_bundle_json(archive, "replay.json")
-            profile_descriptor = self._read_bundle_json(
-                archive,
-                "verification_profile_descriptor.json",
-            )
-
-        self.assertEqual(manifest["profile_name"], DEFAULT_PROFILE_NAME)
-        self.assertEqual(manifest["profile_digest"], profile_descriptor["profile_digest"])
+        self.assertEqual(manifest["bundle_type"], "dpa-guardian-bundle")
+        self.assertEqual(manifest["bundle_schema_version"], "1")
+        self.assertEqual(manifest["replay_inputs"]["profile_name"], DEFAULT_PROFILE_NAME)
         self.assertEqual(
-            manifest["hashes"]["verification_profile_descriptor_hash"],
-            hash_canonical_json(profile_descriptor),
+            manifest["proof_context"]["policy_identity"]["verification_profile_descriptor_hash"],
+            hash_canonical_json(expected_report["contracts"]["verification_profile_descriptor"]),
         )
         self.assertEqual(
-            manifest["hashes"]["ai_claim_envelope_hash"],
-            hash_canonical_json(result.after_state["verified_manifest"]["ai_claim_envelope"]),
+            manifest["proof_context"]["derived_traces"]["proof_core_evidence_trace"],
+            expected_report["contracts"]["proof_core_evidence_trace"],
         )
-        self.assertEqual(
-            manifest["hashes"]["decision_journal_hash"],
-            hash_canonical_json(decision_journal),
-        )
-        self.assertEqual(transcript["events"][0]["stage"], "profile")
         self.assertEqual(decision_journal["entries"][-1]["status"], "recorded")
-        self.assertEqual(replay["profile_name"], DEFAULT_PROFILE_NAME)
         self.assertEqual(
-            replay["expected_hashes"]["verification_profile_descriptor_hash"],
-            hash_canonical_json(profile_descriptor),
+            manifest["integrity_manifest"]["member_order"],
+            [
+                "bundle.json",
+                "input_state.json",
+                "released_state.json",
+                "workstation_payload.json",
+                "verification_report.json",
+                "decision_journal.json",
+                "evidence.json",
+                "transparency-prefix.jsonl",
+            ],
         )
-        self.assertEqual(
-            replay["expected_hashes"]["decision_journal_hash"],
-            hash_canonical_json(decision_journal),
-        )
-        self.assertEqual(signatures["members"][0]["algorithm"], "sha256")
+        self.assertEqual(manifest["integrity_manifest"]["member_hashes"][0]["algorithm"], "sha256")
 
     def test_ai_stack_identity_changes_bundle_and_replay_hash_surfaces(self) -> None:
         _, baseline_result = self._release_demo_case()
@@ -3679,8 +3675,8 @@ class MriGuardianHarnessTests(unittest.TestCase):
             authority_sources=build_demo_authority_sources(case_id=provenance_state["case_id"]),
             timestamp="2026-03-26T00:00:00Z",
         )
-        baseline_bundle_path = self.runtime_root / f"baseline-provenance{MRI_GUARD_BUNDLE_EXTENSION}"
-        provenance_bundle_path = self.runtime_root / f"declared-provenance{MRI_GUARD_BUNDLE_EXTENSION}"
+        baseline_bundle_path = self.runtime_root / f"baseline-provenance{GUARDIAN_BUNDLE_EXTENSION}"
+        provenance_bundle_path = self.runtime_root / f"declared-provenance{GUARDIAN_BUNDLE_EXTENSION}"
         transparency_log_path = self.runtime_root / "transparency-log.jsonl"
 
         write_portable_evidence_bundle(
@@ -3699,31 +3695,29 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertTrue(verification["details"]["replay_verified"])
         with ZipFile(baseline_bundle_path, mode="r") as baseline_archive:
             baseline_bundle = self._read_bundle_json(baseline_archive, "bundle.json")
-            baseline_replay = self._read_bundle_json(baseline_archive, "replay.json")
         with ZipFile(provenance_bundle_path, mode="r") as provenance_archive:
             provenance_bundle = self._read_bundle_json(provenance_archive, "bundle.json")
-            provenance_replay = self._read_bundle_json(provenance_archive, "replay.json")
 
         self.assertNotEqual(
-            baseline_bundle["hashes"]["ai_claim_envelope_hash"],
-            provenance_bundle["hashes"]["ai_claim_envelope_hash"],
+            baseline_bundle["claim"],
+            provenance_bundle["claim"],
         )
         self.assertNotEqual(
-            baseline_bundle["hashes"]["released_state_hash"],
-            provenance_bundle["hashes"]["released_state_hash"],
+            self._member_hash_from_manifest(baseline_bundle, "released_state.json"),
+            self._member_hash_from_manifest(provenance_bundle, "released_state.json"),
         )
         self.assertNotEqual(
-            baseline_replay["expected_hashes"]["released_state_hash"],
-            provenance_replay["expected_hashes"]["released_state_hash"],
+            self._member_hash_from_manifest(baseline_bundle, "verification_report.json"),
+            self._member_hash_from_manifest(provenance_bundle, "verification_report.json"),
         )
         self.assertNotEqual(
-            baseline_replay["expected_hashes"]["verification_report_hash"],
-            provenance_replay["expected_hashes"]["verification_report_hash"],
+            baseline_bundle["integrity_manifest"]["bundle_hash"],
+            provenance_bundle["integrity_manifest"]["bundle_hash"],
         )
 
     def test_non_default_profile_bundle_replays_identically(self) -> None:
         _, result = self._release_demo_case(profile_name="contrast_enhanced_review")
-        bundle_path = self.runtime_root / f"contrast{MRI_GUARD_BUNDLE_EXTENSION}"
+        bundle_path = self.runtime_root / f"contrast{GUARDIAN_BUNDLE_EXTENSION}"
 
         write_portable_evidence_bundle(
             result=result,
@@ -3736,16 +3730,15 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertTrue(verification["details"]["replay_verified"])
         with ZipFile(bundle_path, mode="r") as archive:
             manifest = self._read_bundle_json(archive, "bundle.json")
-            profile_descriptor = self._read_bundle_json(
-                archive,
-                "verification_profile_descriptor.json",
-            )
-        self.assertEqual(manifest["profile_name"], "contrast_enhanced_review")
-        self.assertEqual(profile_descriptor["profile_name"], "contrast_enhanced_review")
+        self.assertEqual(
+            manifest["proof_context"]["profile_identity"]["profile_name"],
+            "contrast_enhanced_review",
+        )
+        self.assertEqual(manifest["replay_inputs"]["profile_name"], "contrast_enhanced_review")
 
     def test_morphology_profile_bundle_and_mock_pacs_flow_replay_identically(self) -> None:
         _, result = self._release_demo_case(profile_name="brain_t1_morphology_review")
-        bundle_path = self.runtime_root / f"morphology{MRI_GUARD_BUNDLE_EXTENSION}"
+        bundle_path = self.runtime_root / f"morphology{GUARDIAN_BUNDLE_EXTENSION}"
 
         write_portable_evidence_bundle(
             result=result,
@@ -3771,7 +3764,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
     def test_component_profile_bundle_and_mock_pacs_flow_replay_identically(self) -> None:
         _, result = self._release_demo_case(profile_name="brain_t1_component_review")
-        bundle_path = self.runtime_root / f"component{MRI_GUARD_BUNDLE_EXTENSION}"
+        bundle_path = self.runtime_root / f"component{GUARDIAN_BUNDLE_EXTENSION}"
 
         write_portable_evidence_bundle(
             result=result,
@@ -3797,7 +3790,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
     def test_slice_profile_bundle_and_mock_pacs_flow_replay_identically(self) -> None:
         _, result = self._release_demo_case(profile_name="brain_t1_slice_review")
-        bundle_path = self.runtime_root / f"slice{MRI_GUARD_BUNDLE_EXTENSION}"
+        bundle_path = self.runtime_root / f"slice{GUARDIAN_BUNDLE_EXTENSION}"
 
         write_portable_evidence_bundle(
             result=result,
@@ -3823,7 +3816,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
     def test_replay_uses_embedded_profile_when_runtime_default_changes(self) -> None:
         _, result = self._release_demo_case(profile_name="contrast_enhanced_review")
-        bundle_path = self.runtime_root / f"default-shift{MRI_GUARD_BUNDLE_EXTENSION}"
+        bundle_path = self.runtime_root / f"default-shift{GUARDIAN_BUNDLE_EXTENSION}"
         write_portable_evidence_bundle(
             result=result,
             transparency_log_path=self.runtime_root / "transparency-log.jsonl",
@@ -3836,36 +3829,24 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertTrue(verification["verified"])
         self.assertTrue(verification["details"]["replay_verified"])
 
-    def test_replay_fails_with_embedded_profile_digest_mismatch_when_runtime_registry_changes(self) -> None:
+    def test_replay_fails_with_embedded_profile_descriptor_mismatch_when_bundle_descriptor_is_tampered(self) -> None:
         _, result = self._release_demo_case()
-        bundle_path = self.runtime_root / f"digest-mismatch{MRI_GUARD_BUNDLE_EXTENSION}"
-        tampered_path = self.runtime_root / f"digest-mismatch-tampered{MRI_GUARD_BUNDLE_EXTENSION}"
+        bundle_path = self.runtime_root / f"digest-mismatch{GUARDIAN_BUNDLE_EXTENSION}"
+        tampered_path = self.runtime_root / f"digest-mismatch-tampered{GUARDIAN_BUNDLE_EXTENSION}"
         write_portable_evidence_bundle(
             result=result,
             transparency_log_path=self.runtime_root / "transparency-log.jsonl",
             output_path=bundle_path,
         )
         with ZipFile(bundle_path, mode="r") as archive:
-            replay = self._read_bundle_json(archive, "replay.json")
-            member_bytes = {
-                info.filename: archive.read(info.filename)
-                for info in archive.infolist()
-            }
-        replay["profile_digest"] = "0" * 64
-        member_bytes["replay.json"] = self._json_bytes(replay)
-        member_bytes["signatures.json"] = self._json_bytes(
-            self._build_signature_catalog(
-                {
-                    name: payload
-                    for name, payload in member_bytes.items()
-                    if name != "signatures.json"
-                }
-            )
+            manifest = self._read_bundle_json(archive, "bundle.json")
+        manifest["replay_inputs"]["contracts"]["verification_profile_descriptor"]["profile_digest"] = (
+            "0" * 64
         )
         self._rewrite_bundle_members(
             source=bundle_path,
             destination=tampered_path,
-            member_bytes=member_bytes,
+            member_bytes={"bundle.json": self._json_bytes(manifest)},
         )
 
         verification = verify_bundle(tampered_path)
@@ -3873,14 +3854,14 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertFalse(verification["verified"])
         self.assertTrue(
             any(
-                "embedded_profile_digest_mismatch" in failure
+                "embedded_profile_descriptor_mismatch" in failure
                 for failure in verification["failures"]
             )
         )
 
     def test_verify_bundle_accepts_extracted_bundle_json(self) -> None:
         _, result = self._release_demo_case()
-        bundle_path = self.runtime_root / f"extracted{MRI_GUARD_BUNDLE_EXTENSION}"
+        bundle_path = self.runtime_root / f"extracted{GUARDIAN_BUNDLE_EXTENSION}"
         extracted_root = self.runtime_root / "extracted_bundle"
 
         write_portable_evidence_bundle(
@@ -3896,40 +3877,46 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertTrue(verification["verified"])
         self.assertEqual(verification["details"]["source_kind"], "directory")
 
-    def test_portable_bundle_detects_transcript_tampering(self) -> None:
+    def test_portable_bundle_attachment_tampering_breaks_integrity_but_not_replay(self) -> None:
         _, result = self._release_demo_case()
-        bundle_path = self.runtime_root / f"clean{MRI_GUARD_BUNDLE_EXTENSION}"
-        tampered_path = self.runtime_root / f"tampered{MRI_GUARD_BUNDLE_EXTENSION}"
+        bundle_path = self.runtime_root / f"clean{GUARDIAN_BUNDLE_EXTENSION}"
+        attached_path = self.runtime_root / f"attached{GUARDIAN_BUNDLE_EXTENSION}"
+        tampered_path = self.runtime_root / f"tampered{GUARDIAN_BUNDLE_EXTENSION}"
 
         write_portable_evidence_bundle(
             result=result,
             transparency_log_path=self.runtime_root / "transparency-log.jsonl",
             output_path=bundle_path,
         )
-        with ZipFile(bundle_path, mode="r") as archive:
-            transcript = self._read_bundle_json(archive, "transcript.json")
-        transcript["statement"] = "This scan is verifiably correct, trust me."
-        self._rewrite_bundle_member(
+        self._add_bundle_attachment(
             source=bundle_path,
+            destination=attached_path,
+            member_name="attachment.txt",
+            payload=b"auxiliary attachment\n",
+            media_type="text/plain",
+        )
+        verification = verify_bundle(attached_path)
+
+        self.assertTrue(verification["verified"])
+        self.assertTrue(verification["details"]["replay_verified"])
+
+        self._rewrite_bundle_member(
+            source=attached_path,
             destination=tampered_path,
-            member_name="transcript.json",
-            payload=self._json_bytes(transcript),
+            member_name="attachment.txt",
+            payload=b"tampered auxiliary attachment\n",
         )
 
         verification = verify_bundle(tampered_path)
 
         self.assertFalse(verification["verified"])
-        self.assertTrue(
-            any(
-                "transcript.json" in failure or "signatures.json" in failure
-                for failure in verification["failures"]
-            )
-        )
+        self.assertTrue(verification["details"]["replay_verified"])
+        self.assertTrue(any("integrity_manifest" in failure for failure in verification["failures"]))
 
     def test_portable_bundle_detects_decision_journal_tampering(self) -> None:
         _, result = self._release_demo_case()
-        bundle_path = self.runtime_root / f"clean-journal{MRI_GUARD_BUNDLE_EXTENSION}"
-        tampered_path = self.runtime_root / f"tampered-journal{MRI_GUARD_BUNDLE_EXTENSION}"
+        bundle_path = self.runtime_root / f"clean-journal{GUARDIAN_BUNDLE_EXTENSION}"
+        tampered_path = self.runtime_root / f"tampered-journal{GUARDIAN_BUNDLE_EXTENSION}"
 
         write_portable_evidence_bundle(
             result=result,
@@ -3951,14 +3938,14 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertFalse(verification["verified"])
         self.assertTrue(
             any(
-                "decision_journal.json" in failure or "signatures.json" in failure
+                "decision_journal.json" in failure or "integrity_manifest" in failure
                 for failure in verification["failures"]
             )
         )
 
     def test_multi_series_mock_dicom_pacs_and_bundle_replay_identically(self) -> None:
         state, result = self._release_multi_series_demo_case()
-        bundle_path = self.runtime_root / f"{state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
+        bundle_path = self.runtime_root / f"{state['case_id']}{GUARDIAN_BUNDLE_EXTENSION}"
         dicom_input = build_mock_dicom_input(result.before_state)
         pacs_submission = build_mock_pacs_submission(
             result,
@@ -4002,7 +3989,7 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
     def test_cli_verify_command_reports_directory_success(self) -> None:
         _, result = self._release_demo_case()
-        bundle_path = self.runtime_root / f"{result.after_state['case_id']}{MRI_GUARD_BUNDLE_EXTENSION}"
+        bundle_path = self.runtime_root / f"{result.after_state['case_id']}{GUARDIAN_BUNDLE_EXTENSION}"
         (self.runtime_root / "evidence.json").write_text(
             f"{result.evidence_json}\n",
             encoding="utf-8",
@@ -4536,21 +4523,90 @@ class MriGuardianHarnessTests(unittest.TestCase):
                 clone.compress_type = info.compress_type
                 clone.create_system = info.create_system
                 clone.external_attr = info.external_attr
-                dst.writestr(clone, member_bytes[info.filename])
+                dst.writestr(clone, member_bytes.get(info.filename, src.read(info.filename)))
 
-    def _build_signature_catalog(self, member_bytes: dict[str, bytes]) -> dict[str, object]:
+    def _member_hash_from_manifest(
+        self,
+        manifest: dict[str, object],
+        member_name: str,
+    ) -> str:
+        for item in manifest["integrity_manifest"]["member_hashes"]:
+            if item["member"] == member_name:
+                return str(item["value"])
+        raise AssertionError(f"Missing member hash for {member_name!r}")
+
+    def _build_integrity_manifest(
+        self,
+        bundle_payload: dict[str, object],
+        member_bytes: dict[str, bytes],
+        attachments: list[dict[str, str]] | None = None,
+    ) -> dict[str, object]:
+        member_order = [
+            "bundle.json",
+            "input_state.json",
+            "released_state.json",
+            "workstation_payload.json",
+            "verification_report.json",
+            "decision_journal.json",
+            "evidence.json",
+            "transparency-prefix.jsonl",
+        ]
+        if attachments:
+            member_order.extend(item["member"] for item in attachments)
+        redacted_bundle = deepcopy(bundle_payload)
+        redacted_bundle["integrity_manifest"] = "__INTEGRITY_MANIFEST_REDACTED__"
+        bundle_descriptor_hash = hash_canonical_json(redacted_bundle)
+        member_hashes = []
+        for member in member_order:
+            value = (
+                bundle_descriptor_hash
+                if member == "bundle.json"
+                else hashlib.sha256(member_bytes[member]).hexdigest()
+            )
+            member_hashes.append(
+                {"member": member, "algorithm": "sha256", "value": value}
+            )
         return {
-            "schema_version": "0.3",
-            "signature_type": "sha256_integrity_catalog",
-            "members": [
-                {
-                    "path": member_name,
-                    "algorithm": "sha256",
-                    "value": hashlib.sha256(payload).hexdigest(),
-                }
-                for member_name, payload in sorted(member_bytes.items())
-            ],
+            "member_order": member_order,
+            "member_hashes": member_hashes,
+            "proof_critical_members": member_order[1:8],
+            "bundle_descriptor_hash": bundle_descriptor_hash,
+            "bundle_hash": hash_canonical_json(member_hashes),
         }
+
+    def _add_bundle_attachment(
+        self,
+        *,
+        source: Path,
+        destination: Path,
+        member_name: str,
+        payload: bytes,
+        media_type: str,
+    ) -> None:
+        with ZipFile(source, mode="r") as src:
+            info_by_name = {info.filename: info for info in src.infolist()}
+            member_bytes = {info.filename: src.read(info.filename) for info in src.infolist()}
+        manifest = json.loads(member_bytes["bundle.json"].decode("utf-8"))
+        attachments = [{"member": member_name, "media_type": media_type}]
+        manifest["attachments"] = attachments
+        member_bytes[member_name] = payload
+        manifest["integrity_manifest"] = self._build_integrity_manifest(
+            manifest,
+            member_bytes,
+            attachments=attachments,
+        )
+        member_bytes["bundle.json"] = self._json_bytes(manifest)
+        with ZipFile(destination, mode="w") as dst:
+            for bundled_name in manifest["integrity_manifest"]["member_order"]:
+                info = info_by_name.get(bundled_name)
+                clone = ZipInfo(
+                    filename=bundled_name,
+                    date_time=info.date_time if info is not None else (2026, 3, 26, 0, 0, 0),
+                )
+                clone.compress_type = ZIP_STORED
+                clone.create_system = 0 if info is None else info.create_system
+                clone.external_attr = 0o600 << 16 if info is None else info.external_attr
+                dst.writestr(clone, member_bytes[bundled_name])
 
     def _json_bytes(self, payload: dict[str, object]) -> bytes:
         return f"{canonical_json_dumps(payload)}\n".encode("utf-8")
