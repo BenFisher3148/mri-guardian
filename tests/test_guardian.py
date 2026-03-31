@@ -5334,6 +5334,7 @@ class BatchOrchestrationTests(unittest.TestCase):
             [item["final_outcome"] for item in summary["items"]],
             [OUTCOME_PACKAGE_INVALID, OUTCOME_PACKAGE_INVALID],
         )
+        self.assertEqual(summary["items"][1]["case_kind"], MULTI_SERIES_CASE_KIND)
         self.assertEqual(summary["items"][0]["attempts"], [])
         self.assertEqual(summary["items"][1]["attempts"], [])
 
@@ -5362,6 +5363,41 @@ class BatchOrchestrationTests(unittest.TestCase):
         self.assertEqual(item["attempts"], [])
         self.assertIn("missing authority source types", item["messages"][0])
 
+    def test_run_batch_marks_malformed_case_state_as_package_invalid_without_attempts(self) -> None:
+        missing_case_id_state = build_demo_case()
+        missing_case_id_state.pop("case_id")
+        invalid_descriptor_state = build_demo_case()
+        invalid_descriptor_state["verification_profile_descriptor"]["profile_name"] = "not-a-profile"
+        missing_case_id_dir = self._write_single_series_case_package(
+            "missing_case_id_package",
+            state=missing_case_id_state,
+            authority_sources=self._serialise_authority_sources(
+                build_demo_authority_sources(case_id="mri-case-0001")
+            ),
+        )
+        invalid_descriptor_dir = self._write_single_series_case_package(
+            "invalid_descriptor_package",
+            state=invalid_descriptor_state,
+        )
+        manifest = self._build_batch_manifest(
+            [
+                {"item_id": "missing-case-id", "case_dir": str(missing_case_id_dir)},
+                {"item_id": "invalid-descriptor", "case_dir": str(invalid_descriptor_dir)},
+            ]
+        )
+
+        summary = run_batch(manifest, self.runtime_root / "batch_malformed_package")
+
+        for item in summary["items"]:
+            self.assertEqual(item["final_outcome"], OUTCOME_PACKAGE_INVALID)
+            self.assertFalse(item["entered_execution"])
+            self.assertEqual(item["attempts"], [])
+            self.assertFalse(item["package_validation"]["valid"])
+            self.assertIn(
+                "Case package failed pre-execution validation:",
+                item["package_validation"]["failures"][0],
+            )
+
     def test_run_batch_retries_retryable_artifact_failures_then_succeeds(self) -> None:
         case_dir = self._write_single_series_case_package("retry_case")
         manifest = self._build_batch_manifest(
@@ -5374,7 +5410,7 @@ class BatchOrchestrationTests(unittest.TestCase):
         def flaky(staged_root: Path, artifact_root: Path) -> None:
             state["calls"] += 1
             if state["calls"] == 1:
-                raise OSError("locked")
+                raise BlockingIOError("locked")
             original(staged_root, artifact_root)
 
         with patch("mri_guardian.batch._finalise_artifact_root", side_effect=flaky):
@@ -5393,7 +5429,10 @@ class BatchOrchestrationTests(unittest.TestCase):
             [{"item_id": "retry-exhausted", "case_dir": str(case_dir)}]
         )
 
-        with patch("mri_guardian.batch._finalise_artifact_root", side_effect=OSError("locked")):
+        with patch(
+            "mri_guardian.batch._finalise_artifact_root",
+            side_effect=BlockingIOError("locked"),
+        ):
             summary = run_batch(manifest, self.runtime_root / "batch_retry_exhausted")
 
         item = summary["items"][0]
@@ -5402,6 +5441,24 @@ class BatchOrchestrationTests(unittest.TestCase):
         self.assertEqual(item["attempts"][0]["outcome"], "retryable_failure")
         self.assertEqual(item["attempts"][1]["outcome"], OUTCOME_TRANSIENT_FAILURE_EXHAUSTED)
         self.assertTrue(item["attempts"][1]["retryable"])
+
+    def test_run_batch_does_not_retry_non_classified_oserror_failures(self) -> None:
+        case_dir = self._write_single_series_case_package("non_retryable_oserror_case")
+        manifest = self._build_batch_manifest(
+            [{"item_id": "non-retryable-oserror", "case_dir": str(case_dir)}]
+        )
+
+        with patch(
+            "mri_guardian.batch._finalise_artifact_root",
+            side_effect=FileNotFoundError("missing path"),
+        ):
+            summary = run_batch(manifest, self.runtime_root / "batch_non_retryable_oserror")
+
+        item = summary["items"][0]
+        self.assertEqual(item["final_outcome"], OUTCOME_WORKER_ERROR)
+        self.assertEqual(len(item["attempts"]), 1)
+        self.assertEqual(item["attempts"][0]["exception_class"], "FileNotFoundError")
+        self.assertFalse(item["attempts"][0]["retryable"])
 
     def test_run_batch_unexpected_execution_exception_is_worker_error(self) -> None:
         case_dir = self._write_single_series_case_package("worker_error_case")

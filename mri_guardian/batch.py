@@ -20,6 +20,8 @@ from .bundle import GUARDIAN_BUNDLE_EXTENSION, write_portable_evidence_bundle
 from .contracts import build_verification_profile_contract
 from .harness import (
     DEFAULT_PROFILE_NAME,
+    EVALUATION_STAGE_INTAKE_VALIDATION,
+    EVALUATION_STAGE_STRUCTURAL_VALIDITY,
     MULTI_SERIES_CASE_KIND,
     MriGuardianHarness,
     build_case_verification_report,
@@ -62,10 +64,15 @@ _FINAL_OUTCOME_ORDER = (
 )
 _RETRYABLE_ATTEMPT_OUTCOME = "retryable_failure"
 _RETRYABLE_EXCEPTION_TYPES = (
-    OSError,
     PermissionError,
     TimeoutError,
     BlockingIOError,
+)
+_PACKAGE_INVALID_PIPELINE_PHASES = frozenset(
+    {
+        EVALUATION_STAGE_INTAKE_VALIDATION,
+        EVALUATION_STAGE_STRUCTURAL_VALIDITY,
+    }
 )
 
 _BATCH_NAMESPACE = UUID("7a9d5d98-4ac7-4bde-9f08-d6d0dfb63fea")
@@ -219,7 +226,7 @@ def run_batch(
             queue_path_name=queue_path_name,
             item=item,
         )
-        package_validation, validated_package = _validate_case_package(
+        package_validation, validated_package, detected_case_kind = _validate_case_package(
             batch_id=batch_manifest["batch_id"],
             manifest_index=manifest_index,
             queue_path_name=queue_path_name,
@@ -233,7 +240,7 @@ def run_batch(
                 item=item,
                 manifest_index=manifest_index,
                 queue_path_name=queue_path_name,
-                case_kind=_case_kind_from_state_payload(None),
+                case_kind=detected_case_kind,
                 package_validation=package_validation,
             )
             final_item_dir = _move_item_directory(
@@ -411,15 +418,17 @@ def _validate_case_package(
     item: BatchQueueItem,
     item_dir: Path,
     allowed_profile_overrides: Sequence[str],
-) -> tuple[BatchPackageValidation, _ValidatedPackage | None]:
+) -> tuple[BatchPackageValidation, _ValidatedPackage | None, str]:
     started_at = _utc_now()
     failures: list[str] = []
     package: _ValidatedPackage | None = None
+    detected_case_kind = _case_kind_from_state_payload(None)
     case_dir = Path(item["case_dir"])
     try:
         normalized_state, normalized_authority_name, normalized_authority_payload = (
             _load_normalized_case_package(case_dir)
         )
+        detected_case_kind = _case_kind_from_state_payload(normalized_state)
         profile_override = item.get("profile_override")
         override_applied = False
         if profile_override is not None:
@@ -441,6 +450,11 @@ def _validate_case_package(
             authority_name=normalized_authority_name,
             authority_payload=normalized_authority_payload,
         )
+        package_validation_failure = _preflight_case_state_validation_failure(
+            normalized_state
+        )
+        if package_validation_failure is not None:
+            raise ValueError(package_validation_failure)
         normalized_input_digest = _hash_normalized_package(
             state=normalized_state,
             authority_name=normalized_authority_name,
@@ -490,7 +504,7 @@ def _validate_case_package(
         validation["execution_actor"] = package.execution_actor
         validation["execution_timestamp"] = package.execution_timestamp
         validation["transition_id"] = package.transition_id
-    return validation, package
+    return validation, package, detected_case_kind
 
 
 def _load_normalized_case_package(
@@ -641,6 +655,48 @@ def _validate_authority_package(
             + ", ".join(missing_types)
             + "."
         )
+
+
+def _preflight_case_state_validation_failure(
+    state: Mapping[str, Any],
+) -> str | None:
+    try:
+        report = build_case_verification_report(state)
+    except ValueError as exc:
+        return f"Case package failed pre-execution validation: {exc}"
+    except Exception:
+        return None
+    if not _report_failed_pre_execution_validation(report):
+        return None
+    return _preflight_validation_message(report)
+
+
+def _report_failed_pre_execution_validation(report: Mapping[str, Any]) -> bool:
+    decision = _mapping_get(report, "decision")
+    pipeline_phase = str(_mapping_get(decision, "pipeline_phase") or "")
+    return pipeline_phase in _PACKAGE_INVALID_PIPELINE_PHASES
+
+
+def _preflight_validation_message(report: Mapping[str, Any]) -> str:
+    decision = _mapping_get(report, "decision")
+    reasons = _mapping_get(decision, "decision_reasons")
+    if isinstance(reasons, list):
+        messages = [
+            str(reason.get("message")).strip()
+            for reason in reasons
+            if isinstance(reason, Mapping)
+            and isinstance(reason.get("message"), str)
+            and str(reason.get("message")).strip()
+        ]
+        if messages:
+            return (
+                "Case package failed pre-execution validation: "
+                + "; ".join(messages)
+            )
+    return (
+        "Case package failed pre-execution validation during intake or "
+        "structural validation."
+    )
 
 
 def _try_single_series_descriptor(state: Mapping[str, Any]) -> Any | None:
@@ -799,8 +855,8 @@ def _run_attempt(
         report = build_case_verification_report(validated_package.normalized_state)
     except ValueError as exc:
         exception_class = exc.__class__.__name__
-        outcome = OUTCOME_VERIFICATION_BLOCK
         messages.append(str(exc))
+        outcome = OUTCOME_WORKER_ERROR
     except Exception as exc:  # pragma: no cover - exercised by tests via patching
         exception_class = exc.__class__.__name__
         messages.append(str(exc))
