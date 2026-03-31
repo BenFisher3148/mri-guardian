@@ -3,12 +3,34 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 from icsd.core.serialise import canonical_json_dumps, hash_canonical_json
 
 _ADAPTER_NAME = "jsonl_hash_chain"
+_LOCK_POLL_INTERVAL_SECONDS = 0.01
+_LOCK_REGISTRY_GUARD = threading.Lock()
+_LOCK_REGISTRY: dict[str, threading.Lock] = {}
+
+
+def _lock_for_path(lock_path: Path) -> threading.Lock:
+    key = str(lock_path.absolute())
+    with _LOCK_REGISTRY_GUARD:
+        lock = _LOCK_REGISTRY.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LOCK_REGISTRY[key] = lock
+        return lock
 
 
 class JsonlHashChainTransparencyLog:
@@ -18,17 +40,23 @@ class JsonlHashChainTransparencyLog:
         self.path = Path(path)
 
     def append(self, *, evidence_payload: dict[str, Any]) -> dict[str, Any]:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        entries = self._read_entries()
-        previous_entry_hash = entries[-1]["entry_hash"] if entries else None
-        entry = {
-            "index": len(entries),
-            "previous_entry_hash": previous_entry_hash,
-            "evidence_hash": hash_canonical_json(evidence_payload),
-        }
-        entry["entry_hash"] = hash_canonical_json(entry)
-        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(f"{canonical_json_dumps(entry)}\n")
+        # Serialize the full read/compute/write cycle so correctness never depends
+        # on platform append atomicity.
+        with self._serialised_log_access(create_parent=True):
+            entries = self._read_entries()
+            previous_entry_hash = entries[-1]["entry_hash"] if entries else None
+            entry = {
+                "index": len(entries),
+                "previous_entry_hash": previous_entry_hash,
+                "evidence_hash": hash_canonical_json(evidence_payload),
+            }
+            entry["entry_hash"] = hash_canonical_json(entry)
+            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(f"{canonical_json_dumps(entry)}\n")
+                handle.flush()
+                # Flush the JSONL file before releasing the lock. Directory fsync is
+                # intentionally out of scope for this adapter.
+                os.fsync(handle.fileno())
         return {
             "adapter": _ADAPTER_NAME,
             "reference": self._reference(entry),
@@ -46,7 +74,10 @@ class JsonlHashChainTransparencyLog:
         receipt: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         evidence_hash = hash_canonical_json(evidence_payload)
-        entries = self._read_entries()
+        # Reads hold the same lock as writers so verification observes one
+        # serialized snapshot of the log rather than a live stream.
+        with self._serialised_log_access(create_parent=False):
+            entries = self._read_entries()
         chain_error = self._verify_chain(entries)
         if chain_error is not None:
             return {
@@ -108,6 +139,53 @@ class JsonlHashChainTransparencyLog:
                     raise ValueError(msg)
                 entries.append(entry)
         return entries
+
+    def _lock_path(self) -> Path:
+        return self.path.parent / f"{self.path.name}.lock"
+
+    @contextmanager
+    def _serialised_log_access(self, *, create_parent: bool) -> Iterator[None]:
+        lock_path = self._lock_path()
+        if create_parent:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+        elif not lock_path.parent.exists():
+            yield
+            return
+
+        with _lock_for_path(lock_path):
+            # The sidecar file may remain on disk after use. Its presence alone is
+            # not a lock signal; the OS lock state is authoritative.
+            with lock_path.open("a+b") as handle:
+                self._acquire_os_lock(handle)
+                try:
+                    yield
+                finally:
+                    self._release_os_lock(handle)
+
+    @staticmethod
+    def _acquire_os_lock(handle: Any) -> None:
+        if os.name == "nt":
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    return
+                except OSError:
+                    time.sleep(_LOCK_POLL_INTERVAL_SECONDS)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+    @staticmethod
+    def _release_os_lock(handle: Any) -> None:
+        if os.name == "nt":
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     @staticmethod
     def _reference(entry: dict[str, Any]) -> str:

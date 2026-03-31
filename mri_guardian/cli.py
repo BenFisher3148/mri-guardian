@@ -12,7 +12,12 @@ from typing import Any
 from icsd.core.evidence import validate_evidence_payload
 from icsd.core.serialise import canonical_json_dumps
 
-from .bundle import GUARDIAN_BUNDLE_EXTENSION, verify_bundle
+from .bundle import (
+    GUARDIAN_BUNDLE_EXTENSION,
+    _BUNDLE_MANIFEST_NAME,
+    _is_minimal_extracted_bundle_root,
+    verify_bundle,
+)
 from .demo import run_demo
 from .harness import MULTI_SERIES_CASE_KIND
 from .profiles import DEFAULT_PROFILE_NAME
@@ -97,6 +102,37 @@ def build_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _discover_top_level_verifiable_artifacts(directory: Path) -> dict[str, Path]:
+    """Select the single top-level bundle target, if any, plus adjacent evidence."""
+    parts: dict[str, Path] = {}
+    evidence_path = directory / "evidence.json"
+    if evidence_path.is_file():
+        parts["evidence"] = evidence_path
+
+    bundle_candidates = sorted(
+        candidate
+        for candidate in directory.iterdir()
+        if candidate.is_file() and candidate.suffix.lower() == GUARDIAN_BUNDLE_EXTENSION
+    )
+    has_extracted_bundle_root = _is_minimal_extracted_bundle_root(directory)
+
+    if len(bundle_candidates) > 1:
+        raise ValueError(
+            "Verification target directory contains multiple .guardian-bundle files; "
+            "pass one bundle path explicitly."
+        )
+    if bundle_candidates and has_extracted_bundle_root:
+        raise ValueError(
+            "Verification target directory contains both a .guardian-bundle archive and "
+            "an extracted bundle root; pass one bundle path explicitly."
+        )
+    if bundle_candidates:
+        parts["bundle"] = bundle_candidates[0]
+    elif has_extracted_bundle_root:
+        parts["bundle"] = directory / _BUNDLE_MANIFEST_NAME
+    return parts
+
+
 def run_verify_command(target: Path | str) -> dict[str, Any]:
     """Verify evidence and/or bundle artifacts from a target path."""
     path = Path(target)
@@ -105,17 +141,11 @@ def run_verify_command(target: Path | str) -> dict[str, Any]:
 
     parts: dict[str, Any] = {}
     if path.is_dir():
-        evidence_path = path / "evidence.json"
-        if evidence_path.exists():
-            parts["evidence"] = _verify_evidence_file(evidence_path)
-        bundle_candidates = sorted(path.glob(f"*{GUARDIAN_BUNDLE_EXTENSION}"))
-        if len(bundle_candidates) > 1:
-            raise ValueError(
-                "Verification target directory contains multiple .guardian-bundle files; "
-                "pass one bundle path explicitly."
-            )
-        if bundle_candidates:
-            parts["bundle"] = verify_bundle(bundle_candidates[0])
+        for part_name, artifact_path in _discover_top_level_verifiable_artifacts(path).items():
+            if part_name == "evidence":
+                parts[part_name] = _verify_evidence_file(artifact_path)
+            else:
+                parts[part_name] = verify_bundle(artifact_path)
     elif path.suffix.lower() == GUARDIAN_BUNDLE_EXTENSION:
         parts["bundle"] = verify_bundle(path)
     elif path.name == "bundle.json":

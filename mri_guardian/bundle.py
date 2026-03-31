@@ -878,6 +878,15 @@ def _read_extracted_bundle_members(bundle_json_path: Path) -> dict[str, Any]:
     }
 
 
+def _is_minimal_extracted_bundle_root(root: Path) -> bool:
+    """Return whether ``root`` has the direct-child layout of an extracted Guardian Bundle V1."""
+    if not root.is_dir():
+        return False
+    required_members = {_BUNDLE_MANIFEST_NAME, *_PROOF_CRITICAL_MEMBERS}
+    present_members = {path.name for path in root.iterdir() if path.is_file()}
+    return required_members.issubset(present_members)
+
+
 def _declared_member_order(bundle_payload: Mapping[str, Any]) -> list[str]:
     member_order = bundle_payload.get("integrity_manifest", {}).get("member_order", [])
     if not isinstance(member_order, list):

@@ -208,6 +208,8 @@ def derive_verified_mask(
         raise ValueError(
             "Mask derivation expects a 3D float64 reconstruction on the measured grid."
         )
+    if not np.isfinite(reconstruction).all():
+        raise ValueError("Mask derivation expects finite float64 reconstruction values.")
     return _APPROVED_ALGORITHM_TABLE[policy.algorithm].implementation(reconstruction, policy)
 
 

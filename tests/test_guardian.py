@@ -5,6 +5,8 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import unittest
 from collections import OrderedDict
 from copy import deepcopy
@@ -85,6 +87,7 @@ from mri_guardian.timing import (
     build_guardian_performance_profile,
     build_timing_overlay_snapshot,
 )
+from mri_guardian.transparency import JsonlHashChainTransparencyLog
 from mri_guardian.viewer import (
     build_side_by_side_view_model,
     render_side_by_side_report_html,
@@ -101,6 +104,27 @@ def _reconstruction_with_hot_voxels(
     for z_index, y_index, x_index in hot_voxels:
         reconstruction[z_index, y_index, x_index] = hot_value
     return reconstruction
+
+
+class _BlockingReadTransparencyLog(JsonlHashChainTransparencyLog):
+    def __init__(self, path: Path | str) -> None:
+        super().__init__(path)
+        self.read_entered = threading.Event()
+        self.release_read = threading.Event()
+        self._block_next_read = False
+
+    def arm_next_read(self) -> None:
+        self.read_entered.clear()
+        self.release_read.clear()
+        self._block_next_read = True
+
+    def _read_entries(self):
+        if self._block_next_read:
+            self._block_next_read = False
+            self.read_entered.set()
+            if not self.release_read.wait(timeout=5):
+                raise AssertionError("Timed out waiting to release the blocking transparency read.")
+        return super()._read_entries()
 
 
 class MriGuardianHarnessTests(unittest.TestCase):
@@ -2573,6 +2597,20 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
         self.assertTrue(np.array_equal(verified, expected))
 
+    def test_derive_verified_mask_rejects_non_finite_reconstruction_values(self) -> None:
+        threshold_rules = {
+            "algorithm": THRESHOLD_ALGORITHM,
+            "parameters": {"threshold": 2.5},
+        }
+
+        for value in (np.nan, np.inf, -np.inf):
+            reconstruction = np.zeros((1, 1, 1), dtype=np.float64)
+            reconstruction[0, 0, 0] = value
+
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    derive_verified_mask(reconstruction, threshold_rules)
+
     def test_cross_engine_policy_non_equivalence_blocks_threshold_mask_under_morphology(self) -> None:
         baseline_state = build_demo_case(profile_name="brain_t1_baseline")
         baseline_report = build_case_verification_report(
@@ -3767,6 +3805,184 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertEqual(len(snapshot["benchmarks"]), 3)
         self.assertEqual(snapshot["streaming_strategy"]["recommended_slab_depth_slices"], 4)
 
+    def test_timing_profile_accessors_return_isolated_snapshots(self) -> None:
+        profile = build_guardian_performance_profile("brain_t2_baseline")
+        snapshot = build_timing_overlay_snapshot("brain_t2_baseline")
+
+        self.assertEqual(profile, snapshot)
+        self.assertIsNot(profile, snapshot)
+        self.assertIsNot(profile["benchmarks"], snapshot["benchmarks"])
+        self.assertIsNot(profile["benchmarks"][0], snapshot["benchmarks"][0])
+
+        profile["benchmarks"][0]["label"] = "tampered profile label"
+        profile["streaming_strategy"]["recommended_slab_depth_slices"] = 99
+        snapshot["budget_assessment"]["representative_total_ms"]["within_budget"] = False
+
+        fresh_profile = build_guardian_performance_profile("brain_t2_baseline")
+        fresh_snapshot = build_timing_overlay_snapshot("brain_t2_baseline")
+
+        self.assertNotEqual(
+            fresh_profile["benchmarks"][0]["label"],
+            "tampered profile label",
+        )
+        self.assertEqual(
+            fresh_profile["streaming_strategy"]["recommended_slab_depth_slices"],
+            4,
+        )
+        self.assertEqual(
+            fresh_snapshot["budget_assessment"]["representative_total_ms"]["within_budget"],
+            fresh_profile["budget_assessment"]["representative_total_ms"]["within_budget"],
+        )
+        self.assertEqual(fresh_profile, fresh_snapshot)
+
+    def test_transparency_log_serialises_threaded_appends(self) -> None:
+        log = _BlockingReadTransparencyLog(self.runtime_root / "threaded-transparency-log.jsonl")
+        errors: list[BaseException] = []
+        second_append_done = threading.Event()
+
+        def append_payload(case_id: str, *, done_event: threading.Event | None = None) -> None:
+            try:
+                log.append(evidence_payload={"case_id": case_id})
+            except BaseException as exc:  # pragma: no cover - test plumbing
+                errors.append(exc)
+            finally:
+                if done_event is not None:
+                    done_event.set()
+
+        log.arm_next_read()
+        first_writer = threading.Thread(target=append_payload, args=("thread-one",))
+        second_writer = threading.Thread(
+            target=append_payload,
+            args=("thread-two",),
+            kwargs={"done_event": second_append_done},
+        )
+
+        first_writer.start()
+        self.assertTrue(log.read_entered.wait(timeout=5))
+        second_writer.start()
+
+        time.sleep(0.1)
+        self.assertFalse(second_append_done.is_set())
+
+        log.release_read.set()
+        first_writer.join(timeout=5)
+        second_writer.join(timeout=5)
+
+        self.assertFalse(first_writer.is_alive())
+        self.assertFalse(second_writer.is_alive())
+        self.assertFalse(errors, repr(errors))
+
+        entries = log._read_entries()
+
+        self.assertEqual([entry["index"] for entry in entries], [0, 1])
+        self.assertIsNone(log._verify_chain(entries))
+
+    def test_transparency_log_serialises_process_appends(self) -> None:
+        log_path = self.runtime_root / "process-transparency-log.jsonl"
+        start_path = self.runtime_root / "start-process-appends.signal"
+        child_script = (
+            "import json\n"
+            "import sys\n"
+            "import time\n"
+            "from pathlib import Path\n"
+            "from mri_guardian.transparency import JsonlHashChainTransparencyLog\n"
+            "original = JsonlHashChainTransparencyLog._read_entries\n"
+            "def delayed_read(self):\n"
+            "    time.sleep(0.25)\n"
+            "    return original(self)\n"
+            "JsonlHashChainTransparencyLog._read_entries = delayed_read\n"
+            "log_path = Path(sys.argv[1])\n"
+            "start_path = Path(sys.argv[2])\n"
+            "payload = json.loads(sys.argv[3])\n"
+            "while not start_path.exists():\n"
+            "    time.sleep(0.01)\n"
+            "receipt = JsonlHashChainTransparencyLog(log_path).append(evidence_payload=payload)\n"
+            "print(json.dumps(receipt))\n"
+        )
+        commands = [
+            [
+                sys.executable,
+                "-c",
+                child_script,
+                str(log_path),
+                str(start_path),
+                json.dumps({"case_id": "process-one"}),
+            ],
+            [
+                sys.executable,
+                "-c",
+                child_script,
+                str(log_path),
+                str(start_path),
+                json.dumps({"case_id": "process-two"}),
+            ],
+        ]
+        processes = [
+            subprocess.Popen(
+                command,
+                cwd=Path.cwd(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for command in commands
+        ]
+
+        time.sleep(0.1)
+        start_path.write_text("go\n", encoding="utf-8")
+        outputs = [process.communicate(timeout=10) for process in processes]
+
+        for process, (_, stderr) in zip(processes, outputs):
+            self.assertEqual(process.returncode, 0, stderr)
+
+        entries = JsonlHashChainTransparencyLog(log_path)._read_entries()
+
+        self.assertEqual([entry["index"] for entry in entries], [0, 1])
+        self.assertIsNone(JsonlHashChainTransparencyLog(log_path)._verify_chain(entries))
+
+    def test_transparency_log_verify_waits_for_locked_snapshot(self) -> None:
+        log = _BlockingReadTransparencyLog(self.runtime_root / "snapshot-transparency-log.jsonl")
+        baseline_payload = {"case_id": "baseline"}
+        log.append(evidence_payload=baseline_payload)
+
+        errors: list[BaseException] = []
+        verify_done = threading.Event()
+        verify_result: dict[str, object] = {}
+
+        def append_payload() -> None:
+            try:
+                log.append(evidence_payload={"case_id": "next"})
+            except BaseException as exc:  # pragma: no cover - test plumbing
+                errors.append(exc)
+
+        def verify_payload() -> None:
+            try:
+                verify_result.update(log.verify(evidence_payload=baseline_payload))
+            except BaseException as exc:  # pragma: no cover - test plumbing
+                errors.append(exc)
+            finally:
+                verify_done.set()
+
+        log.arm_next_read()
+        writer = threading.Thread(target=append_payload)
+        writer.start()
+        self.assertTrue(log.read_entered.wait(timeout=5))
+
+        verifier = threading.Thread(target=verify_payload)
+        verifier.start()
+
+        time.sleep(0.1)
+        self.assertFalse(verify_done.is_set())
+
+        log.release_read.set()
+        writer.join(timeout=5)
+        verifier.join(timeout=5)
+
+        self.assertFalse(writer.is_alive())
+        self.assertFalse(verifier.is_alive())
+        self.assertFalse(errors, repr(errors))
+        self.assertTrue(verify_result["verified"])
+
     def test_portable_bundle_round_trips_and_replays_identically(self) -> None:
         _, result = self._release_demo_case()
         bundle_path = self.runtime_root / f"baseline{GUARDIAN_BUNDLE_EXTENSION}"
@@ -4022,6 +4238,33 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertTrue(verification["verified"])
         self.assertEqual(verification["details"]["source_kind"], "directory")
 
+    def test_verify_bundle_detects_tampered_extracted_proof_critical_member(self) -> None:
+        _, result = self._release_demo_case()
+        bundle_path = self.runtime_root / f"extracted-proof-critical{GUARDIAN_BUNDLE_EXTENSION}"
+        extracted_root = self.runtime_root / "extracted_proof_critical_bundle"
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        with ZipFile(bundle_path, mode="r") as archive:
+            archive.extractall(extracted_root)
+        journal_path = extracted_root / "decision_journal.json"
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        journal["entries"][0]["summary"] = "Free-form tampered summary."
+        journal_path.write_text(f"{canonical_json_dumps(journal)}\n", encoding="utf-8")
+
+        verification = verify_bundle(extracted_root / "bundle.json")
+
+        self.assertFalse(verification["verified"])
+        self.assertTrue(
+            any(
+                "decision_journal.json" in failure or "integrity_manifest" in failure
+                for failure in verification["failures"]
+            )
+        )
+
     def test_portable_bundle_attachment_tampering_breaks_integrity_but_not_replay(self) -> None:
         _, result = self._release_demo_case()
         bundle_path = self.runtime_root / f"clean{GUARDIAN_BUNDLE_EXTENSION}"
@@ -4212,6 +4455,120 @@ class MriGuardianHarnessTests(unittest.TestCase):
         self.assertTrue(verification["verified"])
         self.assertIn("evidence", verification["parts"])
         self.assertIn("bundle", verification["parts"])
+
+    def test_cli_verify_command_accepts_extracted_bundle_directory(self) -> None:
+        _, result = self._release_demo_case()
+        bundle_path = self.runtime_root / f"extracted-cli{GUARDIAN_BUNDLE_EXTENSION}"
+        extracted_root = self.runtime_root / "extracted_cli_bundle"
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        with ZipFile(bundle_path, mode="r") as archive:
+            archive.extractall(extracted_root)
+
+        verification = run_verify_command(extracted_root)
+
+        self.assertTrue(verification["verified"])
+        self.assertIn("bundle", verification["parts"])
+        self.assertIn("evidence", verification["parts"])
+        self.assertEqual(verification["parts"]["bundle"]["details"]["source_kind"], "directory")
+
+    def test_cli_verify_command_fails_on_tampered_extracted_bundle_manifest(self) -> None:
+        _, result = self._release_demo_case()
+        bundle_path = self.runtime_root / f"tampered-manifest{GUARDIAN_BUNDLE_EXTENSION}"
+        extracted_root = self.runtime_root / "tampered_manifest_bundle"
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        with ZipFile(bundle_path, mode="r") as archive:
+            archive.extractall(extracted_root)
+        manifest_path = extracted_root / "bundle.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["integrity_manifest"]["bundle_hash"] = "0" * 64
+        manifest_path.write_text(f"{canonical_json_dumps(manifest)}\n", encoding="utf-8")
+
+        verification = run_verify_command(extracted_root)
+
+        self.assertFalse(verification["verified"])
+        self.assertFalse(verification["parts"]["bundle"]["verified"])
+
+    def test_cli_verify_command_fails_on_tampered_extracted_bundle_member(self) -> None:
+        _, result = self._release_demo_case()
+        bundle_path = self.runtime_root / f"tampered-member{GUARDIAN_BUNDLE_EXTENSION}"
+        extracted_root = self.runtime_root / "tampered_member_bundle"
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        with ZipFile(bundle_path, mode="r") as archive:
+            archive.extractall(extracted_root)
+        journal_path = extracted_root / "decision_journal.json"
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        journal["entries"][0]["summary"] = "Free-form tampered summary."
+        journal_path.write_text(f"{canonical_json_dumps(journal)}\n", encoding="utf-8")
+
+        verification = run_verify_command(extracted_root)
+
+        self.assertFalse(verification["verified"])
+        self.assertFalse(verification["parts"]["bundle"]["verified"])
+
+    def test_cli_verify_command_allows_evidence_only_directory(self) -> None:
+        _, result = self._release_demo_case()
+        (self.runtime_root / "evidence.json").write_text(
+            f"{result.evidence_json}\n",
+            encoding="utf-8",
+        )
+        (self.runtime_root / "bundle.json").write_text("{}\n", encoding="utf-8")
+
+        verification = run_verify_command(self.runtime_root)
+
+        self.assertTrue(verification["verified"])
+        self.assertIn("evidence", verification["parts"])
+        self.assertNotIn("bundle", verification["parts"])
+
+    def test_cli_verify_command_rejects_directory_without_verifiable_artifacts(self) -> None:
+        with self.assertRaisesRegex(ValueError, "No verifiable artifacts"):
+            run_verify_command(self.runtime_root)
+
+    def test_cli_verify_command_rejects_ambiguous_top_level_bundle_layouts(self) -> None:
+        _, result = self._release_demo_case()
+        bundle_path = self.runtime_root / f"ambiguous{GUARDIAN_BUNDLE_EXTENSION}"
+
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        with ZipFile(bundle_path, mode="r") as archive:
+            archive.extractall(self.runtime_root)
+
+        with self.assertRaisesRegex(ValueError, "contains both a \\.guardian-bundle archive"):
+            run_verify_command(self.runtime_root)
+
+    def test_cli_verify_command_ignores_nested_bundle_artifacts(self) -> None:
+        _, result = self._release_demo_case()
+        nested_root = self.runtime_root / "nested"
+        bundle_path = nested_root / f"nested{GUARDIAN_BUNDLE_EXTENSION}"
+
+        nested_root.mkdir()
+        write_portable_evidence_bundle(
+            result=result,
+            transparency_log_path=self.runtime_root / "transparency-log.jsonl",
+            output_path=bundle_path,
+        )
+        with ZipFile(bundle_path, mode="r") as archive:
+            archive.extractall(nested_root)
+
+        with self.assertRaisesRegex(ValueError, "No verifiable artifacts"):
+            run_verify_command(self.runtime_root)
 
     def test_cli_test_command_runs_sample_suite(self) -> None:
         sample_root = self.runtime_root / "sample_tests"

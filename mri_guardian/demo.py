@@ -74,6 +74,7 @@ _DEMO_CLEAN_FILES = (
     "temporal_consistency_trace.json",
     "temporal_trajectory_trace.json",
     "transparency-log.jsonl",
+    "transparency-log.jsonl.lock",
     "verification_profile.json",
     "verification_profile_descriptor.json",
     "verification_report.json",

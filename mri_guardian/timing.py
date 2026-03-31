@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from functools import lru_cache
 from statistics import median
 from time import perf_counter_ns
@@ -41,11 +42,19 @@ _BOUND_SAFETY_MARGIN_FRACTION = 0.25
 _STREAMING_SLAB_DEPTH_SLICES = 4
 
 
-@lru_cache(maxsize=8)
 def build_guardian_performance_profile(
     profile_name: str = DEFAULT_PROFILE_NAME,
 ) -> dict[str, Any]:
-    """Return a cached benchmark ladder and performance envelope for the demo."""
+    """Return an isolated benchmark ladder and performance envelope for the demo."""
+    # Never return the cached payload directly; nested benchmark tables remain mutable.
+    return deepcopy(_build_guardian_performance_profile_cached(profile_name))
+
+
+@lru_cache(maxsize=8)
+def _build_guardian_performance_profile_cached(
+    profile_name: str = DEFAULT_PROFILE_NAME,
+) -> dict[str, Any]:
+    """Build and cache the canonical performance profile payload."""
     descriptor = get_verification_profile(profile_name)
     benchmarks = [
         _benchmark_probe(
@@ -100,8 +109,8 @@ def build_guardian_performance_profile(
 def build_timing_overlay_snapshot(
     profile_name: str = DEFAULT_PROFILE_NAME,
 ) -> dict[str, Any]:
-    """Return the cached performance profile used by the HTML timing overlay."""
-    return build_guardian_performance_profile(profile_name)
+    """Return an isolated performance profile used by the HTML timing overlay."""
+    return deepcopy(_build_guardian_performance_profile_cached(profile_name))
 
 
 def _build_timing_probe(
