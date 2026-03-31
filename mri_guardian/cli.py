@@ -12,6 +12,7 @@ from typing import Any
 from icsd.core.evidence import validate_evidence_payload
 from icsd.core.serialise import canonical_json_dumps
 
+from .batch import run_batch
 from .bundle import (
     GUARDIAN_BUNDLE_EXTENSION,
     _BUNDLE_MANIFEST_NAME,
@@ -72,6 +73,27 @@ def build_cli_parser() -> argparse.ArgumentParser:
         choices=("text", "json"),
         default="text",
         help="Render verification output as text or JSON.",
+    )
+
+    batch_parser = subparsers.add_parser(
+        "batch",
+        help="Run a batch queue from a manifest of case package directories.",
+    )
+    batch_parser.add_argument(
+        "--manifest",
+        required=True,
+        help="Path to the batch manifest JSON file.",
+    )
+    batch_parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory where queue state and batch artifacts will be written.",
+    )
+    batch_parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Render batch output as text or JSON.",
     )
 
     test_parser = subparsers.add_parser(
@@ -199,6 +221,15 @@ def run_test_command(
     }
 
 
+def run_batch_command(
+    *,
+    manifest: Path | str,
+    output_dir: Path | str,
+) -> dict[str, Any]:
+    """Run one batch queue from a manifest and return a structured summary."""
+    return run_batch(manifest=manifest, output_dir=output_dir)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI and return a process exit code."""
     parser = build_cli_parser()
@@ -219,6 +250,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(_format_verify_text(result))
         return 0 if result["verified"] else 1
+    if args.command == "batch":
+        result = run_batch_command(
+            manifest=args.manifest,
+            output_dir=args.output_dir,
+        )
+        if args.format == "json":
+            print(canonical_json_dumps(result))
+        else:
+            print(_format_batch_text(result))
+        return 0 if result["quarantined_items"] == 0 else 1
     if args.command == "test":
         result = run_test_command(
             start_dir=args.start_dir,
@@ -263,4 +304,20 @@ def _format_verify_text(result: dict[str, Any]) -> str:
             lines.append(f"  - {failure}")
     overall = "VERIFIED" if result["verified"] else "FAILED"
     lines.append(f"Overall: {overall}")
+    return "\n".join(lines)
+
+
+def _format_batch_text(result: dict[str, Any]) -> str:
+    lines = [
+        f"Batch: {result['batch_id']}",
+        f"Output Root: {result['output_root']}",
+        f"Run Status: {result['run_status'].upper()}",
+        f"Released: {result['released_items']}",
+        f"Quarantined: {result['quarantined_items']}",
+    ]
+    for item in result["items"]:
+        lines.append(
+            f"{item['manifest_index']:04d} {item['item_id']}: "
+            f"{item['final_outcome']} [{item['final_bucket']}]"
+        )
     return "\n".join(lines)

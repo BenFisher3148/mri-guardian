@@ -23,12 +23,25 @@ from icsd.core.evidence import validate_evidence_payload
 from icsd.core.serialise import canonical_json_dumps, hash_canonical_json
 
 import mri_guardian.profiles as profile_registry_module
+from mri_guardian.batch import (
+    BATCH_SCHEMA_VERSION,
+    OUTCOME_PACKAGE_INVALID,
+    OUTCOME_POLICY_BLOCK,
+    OUTCOME_RELEASED,
+    OUTCOME_TRANSIENT_FAILURE_EXHAUSTED,
+    OUTCOME_VERIFICATION_BLOCK,
+    OUTCOME_WORKER_ERROR,
+    QUEUE_BUCKET_COMPLETED,
+    QUEUE_BUCKET_PROCESSING,
+    QUEUE_BUCKET_QUARANTINE,
+    run_batch,
+)
 from mri_guardian.bundle import (
     GUARDIAN_BUNDLE_EXTENSION,
     verify_bundle,
     write_portable_evidence_bundle,
 )
-from mri_guardian.cli import run_test_command, run_verify_command
+from mri_guardian.cli import run_batch_command, run_test_command, run_verify_command
 from mri_guardian.dicom_model import (
     DICOM_MODEL_SCHEMA_VERSION,
     GUARDIAN_EXTENSION_NAMESPACE,
@@ -5174,6 +5187,383 @@ class MriGuardianHarnessTests(unittest.TestCase):
 
     def _json_bytes(self, payload: dict[str, object]) -> bytes:
         return f"{canonical_json_dumps(payload)}\n".encode("utf-8")
+
+    def _cleanup_runtime_root(self) -> None:
+        shutil.rmtree(self.runtime_root, ignore_errors=True)
+        parent = self.runtime_root.parent
+        if parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+
+
+class BatchOrchestrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.runtime_root = Path("test_runs") / uuid4().hex
+        self.runtime_root.mkdir(parents=True, exist_ok=False)
+        self.addCleanup(self._cleanup_runtime_root)
+
+    def test_run_batch_releases_single_and_multi_series_in_manifest_order(self) -> None:
+        single_dir = self._write_single_series_case_package("case_single")
+        multi_dir = self._write_multi_series_case_package("case_multi")
+        manifest = self._build_batch_manifest(
+            [
+                {"item_id": "single-first", "case_dir": str(single_dir)},
+                {"item_id": "multi-second", "case_dir": str(multi_dir)},
+            ]
+        )
+
+        summary = run_batch(manifest, self.runtime_root / "batch_success")
+
+        self.assertEqual(summary["released_items"], 2)
+        self.assertEqual(summary["quarantined_items"], 0)
+        self.assertEqual(
+            [item["item_id"] for item in summary["items"]],
+            ["single-first", "multi-second"],
+        )
+        self.assertEqual(
+            [item["final_outcome"] for item in summary["items"]],
+            [OUTCOME_RELEASED, OUTCOME_RELEASED],
+        )
+        self.assertFalse(any((Path(summary["output_root"]) / QUEUE_BUCKET_PROCESSING).iterdir()))
+        single_item_dir = (
+            Path(summary["output_root"]) / QUEUE_BUCKET_COMPLETED / summary["items"][0]["queue_path_name"]
+        )
+        multi_item_dir = (
+            Path(summary["output_root"]) / QUEUE_BUCKET_COMPLETED / summary["items"][1]["queue_path_name"]
+        )
+        self.assertTrue(
+            (single_item_dir / "attempts" / "attempt-0001" / "artifacts" / "released_state.json").exists()
+        )
+        self.assertTrue(
+            (single_item_dir / "attempts" / "attempt-0001" / "artifacts" / "mri-case-0001.guardian-bundle").exists()
+        )
+        self.assertTrue(
+            (multi_item_dir / "attempts" / "attempt-0001" / "artifacts" / "mri-study-0001.guardian-bundle").exists()
+        )
+
+    def test_run_batch_routes_verification_and_policy_blocks_to_quarantine(self) -> None:
+        physical_state = build_demo_case()
+        physical_state["tumor_volume_mm3"] = 9.9
+        policy_state = build_demo_case(profile_name="fast_triage_mode")
+        physical_dir = self._write_single_series_case_package("physical_block", state=physical_state)
+        policy_dir = self._write_single_series_case_package(
+            "policy_block",
+            state=policy_state,
+            authority_sources=self._serialise_authority_sources(
+                build_demo_authority_sources(
+                    case_id=policy_state["case_id"],
+                    profile_name="fast_triage_mode",
+                )
+            ),
+        )
+        manifest = self._build_batch_manifest(
+            [
+                {"item_id": "physical", "case_dir": str(physical_dir)},
+                {"item_id": "policy", "case_dir": str(policy_dir)},
+            ]
+        )
+
+        summary = run_batch(manifest, self.runtime_root / "batch_quarantine")
+
+        self.assertEqual(summary["quarantined_items"], 2)
+        self.assertEqual(summary["items"][0]["final_outcome"], OUTCOME_VERIFICATION_BLOCK)
+        self.assertEqual(summary["items"][1]["final_outcome"], OUTCOME_POLICY_BLOCK)
+        for item in summary["items"]:
+            item_dir = Path(summary["output_root"]) / QUEUE_BUCKET_QUARANTINE / item["queue_path_name"]
+            artifact_root = item_dir / "attempts" / "attempt-0001" / "artifacts"
+            self.assertTrue((artifact_root / "verification_report.json").exists())
+            self.assertTrue((artifact_root / "decision_journal.json").exists())
+            self.assertFalse((artifact_root / "released_state.json").exists())
+            self.assertFalse(any(artifact_root.glob(f"*{GUARDIAN_BUNDLE_EXTENSION}")))
+
+    def test_run_batch_applies_single_series_override_and_surfaces_selected_policy(self) -> None:
+        state = build_demo_case(profile_name="brain_t1_morphology_review")
+        case_dir = self._write_single_series_case_package("override_case", state=state)
+        manifest = self._build_batch_manifest(
+            [
+                {
+                    "item_id": "override-item",
+                    "case_dir": str(case_dir),
+                    "profile_override": "brain_t1_morphology_review",
+                }
+            ],
+            allowed_profile_overrides=["brain_t1_morphology_review"],
+        )
+
+        summary = run_batch(manifest, self.runtime_root / "batch_override")
+
+        item = summary["items"][0]
+        self.assertEqual(item["final_outcome"], OUTCOME_RELEASED)
+        self.assertTrue(item["override_applied"])
+        self.assertEqual(
+            item["resolved_policy"]["selected_profile_name"],
+            "brain_t1_morphology_review",
+        )
+        item_dir = Path(summary["output_root"]) / QUEUE_BUCKET_COMPLETED / item["queue_path_name"]
+        normalized_state = self._read_json(item_dir / "normalized_input_state.json")
+        report = self._read_json(
+            item_dir / "attempts" / "attempt-0001" / "artifacts" / "verification_report.json"
+        )
+        self.assertEqual(
+            normalized_state["verification_profile_descriptor"]["profile_name"],
+            "brain_t1_morphology_review",
+        )
+        self.assertEqual(report["profile"]["profile_name"], "brain_t1_morphology_review")
+
+    def test_run_batch_rejects_non_allowlisted_and_multi_series_overrides(self) -> None:
+        single_dir = self._write_single_series_case_package("bad_single_override")
+        multi_dir = self._write_multi_series_case_package("bad_multi_override")
+        manifest = self._build_batch_manifest(
+            [
+                {
+                    "item_id": "single-bad-override",
+                    "case_dir": str(single_dir),
+                    "profile_override": "brain_t1_morphology_review",
+                },
+                {
+                    "item_id": "multi-bad-override",
+                    "case_dir": str(multi_dir),
+                    "profile_override": "brain_t1_morphology_review",
+                },
+            ],
+            allowed_profile_overrides=[],
+        )
+
+        summary = run_batch(manifest, self.runtime_root / "batch_bad_override")
+
+        self.assertEqual(
+            [item["final_outcome"] for item in summary["items"]],
+            [OUTCOME_PACKAGE_INVALID, OUTCOME_PACKAGE_INVALID],
+        )
+        self.assertEqual(summary["items"][0]["attempts"], [])
+        self.assertEqual(summary["items"][1]["attempts"], [])
+
+    def test_run_batch_marks_authority_mismatch_as_package_invalid_without_attempts(self) -> None:
+        state = build_demo_case(profile_name="strict_research_mode")
+        authority_sources = self._serialise_authority_sources(
+            build_demo_authority_sources(
+                case_id=state["case_id"],
+                profile_name="brain_t1_baseline",
+            )
+        )
+        case_dir = self._write_single_series_case_package(
+            "bad_authority_package",
+            state=state,
+            authority_sources=authority_sources,
+        )
+        manifest = self._build_batch_manifest(
+            [{"item_id": "bad-authority", "case_dir": str(case_dir)}]
+        )
+
+        summary = run_batch(manifest, self.runtime_root / "batch_bad_authority")
+
+        item = summary["items"][0]
+        self.assertEqual(item["final_outcome"], OUTCOME_PACKAGE_INVALID)
+        self.assertFalse(item["entered_execution"])
+        self.assertEqual(item["attempts"], [])
+        self.assertIn("missing authority source types", item["messages"][0])
+
+    def test_run_batch_retries_retryable_artifact_failures_then_succeeds(self) -> None:
+        case_dir = self._write_single_series_case_package("retry_case")
+        manifest = self._build_batch_manifest(
+            [{"item_id": "retry-success", "case_dir": str(case_dir)}]
+        )
+        batch_output = self.runtime_root / "batch_retry_success"
+        original = __import__("mri_guardian.batch", fromlist=["_finalise_artifact_root"])._finalise_artifact_root
+        state = {"calls": 0}
+
+        def flaky(staged_root: Path, artifact_root: Path) -> None:
+            state["calls"] += 1
+            if state["calls"] == 1:
+                raise OSError("locked")
+            original(staged_root, artifact_root)
+
+        with patch("mri_guardian.batch._finalise_artifact_root", side_effect=flaky):
+            summary = run_batch(manifest, batch_output)
+
+        item = summary["items"][0]
+        self.assertEqual(item["final_outcome"], OUTCOME_RELEASED)
+        self.assertEqual(len(item["attempts"]), 2)
+        self.assertEqual(item["attempts"][0]["outcome"], "retryable_failure")
+        self.assertTrue(item["attempts"][0]["retryable"])
+        self.assertEqual(item["attempts"][1]["outcome"], OUTCOME_RELEASED)
+
+    def test_run_batch_exhausts_retryable_failures_into_quarantine(self) -> None:
+        case_dir = self._write_single_series_case_package("retry_exhausted_case")
+        manifest = self._build_batch_manifest(
+            [{"item_id": "retry-exhausted", "case_dir": str(case_dir)}]
+        )
+
+        with patch("mri_guardian.batch._finalise_artifact_root", side_effect=OSError("locked")):
+            summary = run_batch(manifest, self.runtime_root / "batch_retry_exhausted")
+
+        item = summary["items"][0]
+        self.assertEqual(item["final_outcome"], OUTCOME_TRANSIENT_FAILURE_EXHAUSTED)
+        self.assertEqual(len(item["attempts"]), 2)
+        self.assertEqual(item["attempts"][0]["outcome"], "retryable_failure")
+        self.assertEqual(item["attempts"][1]["outcome"], OUTCOME_TRANSIENT_FAILURE_EXHAUSTED)
+        self.assertTrue(item["attempts"][1]["retryable"])
+
+    def test_run_batch_unexpected_execution_exception_is_worker_error(self) -> None:
+        case_dir = self._write_single_series_case_package("worker_error_case")
+        manifest = self._build_batch_manifest(
+            [{"item_id": "worker-error", "case_dir": str(case_dir)}]
+        )
+
+        with patch("mri_guardian.batch.build_case_verification_report", side_effect=RuntimeError("boom")):
+            summary = run_batch(manifest, self.runtime_root / "batch_worker_error")
+
+        item = summary["items"][0]
+        self.assertEqual(item["final_outcome"], OUTCOME_WORKER_ERROR)
+        self.assertEqual(len(item["attempts"]), 1)
+        self.assertEqual(item["attempts"][0]["exception_class"], "RuntimeError")
+        self.assertFalse(item["attempts"][0]["retryable"])
+
+    def test_batch_cli_command_supports_json_and_text_formats(self) -> None:
+        case_dir = self._write_single_series_case_package("cli_case")
+        manifest = self._build_batch_manifest(
+            [{"item_id": "cli-item", "case_dir": str(case_dir)}]
+        )
+        manifest_path = self.runtime_root / "batch_manifest.json"
+        self._write_json(manifest_path, manifest)
+        json_output = self.runtime_root / "cli_batch_json"
+        text_output = self.runtime_root / "cli_batch_text"
+        json_command = [
+            sys.executable,
+            "-m",
+            "mri_guardian",
+            "batch",
+            "--manifest",
+            str(manifest_path),
+            "--output-dir",
+            str(json_output),
+            "--format",
+            "json",
+        ]
+        text_command = [
+            sys.executable,
+            "-m",
+            "mri_guardian",
+            "batch",
+            "--manifest",
+            str(manifest_path),
+            "--output-dir",
+            str(text_output),
+            "--format",
+            "text",
+        ]
+
+        json_run = subprocess.run(
+            json_command,
+            cwd=Path.cwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        text_run = subprocess.run(
+            text_command,
+            cwd=Path.cwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(json_run.returncode, 0, json_run.stderr)
+        self.assertEqual(text_run.returncode, 0, text_run.stderr)
+        self.assertEqual(json.loads(json_run.stdout)["items"][0]["final_outcome"], OUTCOME_RELEASED)
+        self.assertIn("cli-item: released", text_run.stdout)
+        self.assertEqual(
+            run_batch_command(manifest=manifest_path, output_dir=self.runtime_root / "cli_batch_direct")["items"][0]["final_outcome"],
+            OUTCOME_RELEASED,
+        )
+
+    def test_interoperability_docs_distinguish_batch_quarantine_from_debug_snapshot_quarantine(self) -> None:
+        interoperability = Path("docs") / "INTEROPERABILITY.md"
+        payload = interoperability.read_text(encoding="utf-8")
+
+        self.assertIn("restore-only quarantine surface", payload)
+        self.assertIn("batch queue quarantine", payload)
+
+    def _write_single_series_case_package(
+        self,
+        directory_name: str,
+        *,
+        state: dict[str, object] | None = None,
+        authority_sources: list[dict[str, object]] | None = None,
+    ) -> Path:
+        package_dir = self.runtime_root / directory_name
+        package_dir.mkdir(parents=True, exist_ok=False)
+        working_state = build_demo_case() if state is None else deepcopy(state)
+        sources = (
+            self._serialise_authority_sources(
+                build_demo_authority_sources(case_id=str(working_state["case_id"]))
+            )
+            if authority_sources is None
+            else deepcopy(authority_sources)
+        )
+        self._write_json(package_dir / "input_state.json", working_state)
+        self._write_json(package_dir / "authority_sources.json", sources)
+        return package_dir
+
+    def _write_multi_series_case_package(self, directory_name: str) -> Path:
+        package_dir = self.runtime_root / directory_name
+        package_dir.mkdir(parents=True, exist_ok=False)
+        state = build_multi_series_demo_case()
+        sources = self._serialise_authority_sources_by_series(
+            build_multi_series_demo_authority_sources()
+        )
+        self._write_json(package_dir / "input_state.json", state)
+        self._write_json(package_dir / "authority_sources_by_series_id.json", sources)
+        return package_dir
+
+    def _serialise_authority_sources(self, sources: Sequence[object]) -> list[dict[str, object]]:
+        payload: list[dict[str, object]] = []
+        for source in sources:
+            payload.append(
+                {
+                    "source_type": str(source.source_type),
+                    "source_id": str(source.source_id),
+                    "reference": str(source.reference),
+                    "details": dict(source.details),
+                }
+            )
+        return payload
+
+    def _serialise_authority_sources_by_series(
+        self,
+        payload: Mapping[str, Sequence[object]],
+    ) -> dict[str, list[dict[str, object]]]:
+        return {
+            str(series_id): self._serialise_authority_sources(sources)
+            for series_id, sources in payload.items()
+        }
+
+    def _build_batch_manifest(
+        self,
+        items: list[dict[str, str]],
+        *,
+        allowed_profile_overrides: list[str] | None = None,
+        max_attempts: int = 2,
+    ) -> dict[str, object]:
+        normalised_items: list[dict[str, str]] = []
+        for item in items:
+            payload = deepcopy(item)
+            payload["case_dir"] = str(Path(payload["case_dir"]).resolve())
+            normalised_items.append(payload)
+        return {
+            "batch_schema_version": BATCH_SCHEMA_VERSION,
+            "batch_id": "guardian-batch-v1",
+            "max_attempts": max_attempts,
+            "allowed_profile_overrides": (
+                [] if allowed_profile_overrides is None else list(allowed_profile_overrides)
+            ),
+            "items": normalised_items,
+        }
+
+    def _write_json(self, path: Path, payload: Mapping[str, object] | Sequence[object]) -> None:
+        path.write_text(f"{canonical_json_dumps(payload)}\n", encoding="utf-8")
+
+    def _read_json(self, path: Path) -> dict[str, object]:
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def _cleanup_runtime_root(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)

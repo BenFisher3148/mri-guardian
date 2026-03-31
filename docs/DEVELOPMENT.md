@@ -66,6 +66,7 @@ After `pip install -e .`, the installed CLI exposes the repo’s primary flows:
 ```powershell
 mri-guardian demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode
 mri-guardian verify demo_artifacts
+mri-guardian batch --manifest queue_manifest.json --output-dir batch_runs\run-0001
 mri-guardian test
 ```
 
@@ -74,6 +75,7 @@ Equivalent module entrypoint:
 ```powershell
 python -m mri_guardian demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode
 python -m mri_guardian verify demo_artifacts
+python -m mri_guardian batch --manifest queue_manifest.json --output-dir batch_runs\run-0001
 python -m mri_guardian test
 ```
 
@@ -108,6 +110,12 @@ Verify emitted evidence:
 
 ```powershell
 .\.venv\Scripts\mri-guardian.exe verify demo_artifacts --format json
+```
+
+Run one batch queue:
+
+```powershell
+.\.venv\Scripts\mri-guardian.exe batch --manifest queue_manifest.json --output-dir batch_runs\run-0001 --format json
 ```
 
 Verify the portable bundle:

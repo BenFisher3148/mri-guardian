@@ -149,6 +149,7 @@ The proof system and replay model do not move into the DICOM-shaped layer.
 Rules:
 
 - `debug.guardian_case_snapshot` exists only as a restore-only quarantine surface
+- batch queue quarantine is an operational filesystem bucket and is distinct from the restore-only `debug.guardian_case_snapshot` proof-state surface
 - `restore_case_state_from_dicom_input(...)` restores from `debug.guardian_case_snapshot` only
 - standard-like DICOM-shaped objects are ignored for proof-state recovery
 - if the debug snapshot is absent or malformed, restoration fails hard

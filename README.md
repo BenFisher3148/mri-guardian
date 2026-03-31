@@ -29,6 +29,7 @@ After `pip install -e .`, the repository exposes a single CLI:
 mri-guardian demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode
 mri-guardian demo --output-dir demo_artifacts --case-kind multi_series_v2
 mri-guardian verify demo_artifacts
+mri-guardian batch --manifest queue_manifest.json --output-dir batch_runs\run-0001
 mri-guardian test
 ```
 
@@ -38,8 +39,23 @@ The same commands also work as a module entrypoint:
 python -m mri_guardian demo --output-dir demo_artifacts --profile brain_t1_baseline --tamper-mode
 python -m mri_guardian demo --output-dir demo_artifacts --case-kind multi_series_v2
 python -m mri_guardian verify demo_artifacts
+python -m mri_guardian batch --manifest queue_manifest.json --output-dir batch_runs\run-0001
 python -m mri_guardian test
 ```
+
+## Batch Queue
+
+The repository now also exposes an additive batch worker for real case-package directories.
+
+- each manifest item points at a case package directory
+- each case package must contain `input_state.json`
+- single-series packages must also contain `authority_sources.json`
+- `multi_series_v2` packages must instead contain `authority_sources_by_series_id.json`
+- the batch output root materialises `queued/`, `processing/`, `completed/`, and `quarantine/` buckets plus `batch_manifest.json` and `batch_summary.json`
+
+In V1, package validation is a pre-execution gate, retries apply only to explicitly classified infrastructure failures, and quarantined batch items are an operational queue bucket rather than the restore-only `debug.guardian_case_snapshot` proof-state quarantine surface.
+
+Items left in `processing/` after abnormal termination are incomplete operational residue and are not automatically resumed by V1. Quarantined outputs remain review-only surfaces: the batch worker does not emit portable bundles or other release artefacts for quarantined items.
 
 ## Verification Model
 
